@@ -18,6 +18,15 @@ interface AuditEvent {
   created_at: number
 }
 
+interface OapApproval {
+  decision_id: string
+  capability?: string
+  status?: string
+  token?: string | null
+  reasons?: Array<{ code?: string; message?: string }>
+  _ext?: { parameters_summary?: any; mode?: string }
+}
+
 // actionLabels are now provided via translations (auditTrail namespace)
 
 const actionColors: Record<string, string> = {
@@ -117,6 +126,8 @@ export function AuditTrailPanel() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [approvals, setApprovals] = useState<OapApproval[]>([])
+  const [actingId, setActingId] = useState<string | null>(null)
   const [filter, setFilter] = useState({ action: '', actor: '' })
   const [page, setPage] = useState(0)
   const limit = 50
@@ -130,17 +141,28 @@ export function AuditTrailPanel() {
       params.append('limit', limit.toString())
       params.append('offset', (page * limit).toString())
 
-      const res = await fetch(`/api/audit?${params}`)
-      if (!res.ok) {
-        if (res.status === 403) {
+      const [auditRes, approvalsRes] = await Promise.all([
+        fetch(`/api/audit?${params}`),
+        fetch('/api/oap/approvals'),
+      ])
+
+      if (!auditRes.ok) {
+        if (auditRes.status === 403) {
           setError(t('adminRequired'))
           return
         }
         throw new Error(t('failedFetch'))
       }
-      const data = await res.json()
-      setEvents(data.events)
-      setTotal(data.total)
+      const auditData = await auditRes.json()
+      setEvents(auditData.events)
+      setTotal(auditData.total)
+
+      if (approvalsRes.ok) {
+        const approvalsData = await approvalsRes.json()
+        setApprovals(Array.isArray(approvalsData.pending) ? approvalsData.pending : [])
+      } else {
+        setApprovals([])
+      }
     } catch (err: any) {
       setError(err.message)
     } finally {
@@ -158,6 +180,26 @@ export function AuditTrailPanel() {
     return d.toLocaleString(undefined, {
       month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
     })
+  }
+
+  async function actOnApproval(decisionId: string, action: 'approve' | 'deny' | 'approve_and_add') {
+    try {
+      setActingId(decisionId)
+      const res = await fetch('/api/oap/approvals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision_id: decisionId, action }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `Action failed (${res.status})`)
+      }
+      await fetchEvents()
+    } catch (err: any) {
+      setError(err.message)
+    } finally {
+      setActingId(null)
+    }
   }
 
   function formatDetail(event: AuditEvent): string | null {
@@ -189,6 +231,14 @@ export function AuditTrailPanel() {
       return parts.length ? `${t('detailRemoved')} ${parts.join(', ')}` : null
     }
     if (event.action === 'export' && event.detail.type) return `${t('detailType')}: ${event.detail.type}`
+    if ((event.action === 'oap_alert' || event.action === 'oap_deny' || event.action === 'oap_escalate' || event.action === 'oap_approve' || event.action === 'oap_approve_and_add') && event.detail) {
+      const parts: string[] = []
+      if (event.detail.capability) parts.push(`cap: ${event.detail.capability}`)
+      if (event.detail.reason_code) parts.push(`code: ${event.detail.reason_code}`)
+      if (event.detail.decision_id) parts.push(`decision: ${String(event.detail.decision_id).slice(0, 12)}...`)
+      if (event.detail.mode) parts.push(`mode: ${event.detail.mode}`)
+      return parts.join(' | ')
+    }
     return null
   }
 
@@ -218,6 +268,41 @@ export function AuditTrailPanel() {
           {t('refresh')}
         </Button>
       </div>
+
+      {approvals.length > 0 && (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">Pending OAP approvals</h3>
+              <p className="text-xs text-muted-foreground">Review and action live sidecar escalations from Mission Control.</p>
+            </div>
+            <span className="text-xs text-amber-300">{approvals.length} pending</span>
+          </div>
+          <div className="space-y-2">
+            {approvals.slice(0, 5).map((approval) => (
+              <div key={approval.decision_id} className="rounded-md border border-border/60 bg-background/40 p-2.5">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-xs font-mono text-foreground">{approval.capability || 'unknown capability'}</div>
+                    <div className="text-2xs text-muted-foreground mt-0.5">decision {approval.decision_id}</div>
+                    {approval.reasons?.[0]?.message && (
+                      <div className="text-xs text-muted-foreground mt-1">{approval.reasons[0].message}</div>
+                    )}
+                    {approval._ext?.parameters_summary && (
+                      <pre className="mt-1 text-2xs text-muted-foreground whitespace-pre-wrap break-words font-mono-tight">{JSON.stringify(approval._ext.parameters_summary)}</pre>
+                    )}
+                  </div>
+                  <div className="flex gap-1 shrink-0">
+                    <Button size="xs" variant="ghost" disabled={actingId === approval.decision_id} onClick={() => actOnApproval(approval.decision_id, 'deny')}>Deny</Button>
+                    <Button size="xs" variant="ghost" disabled={actingId === approval.decision_id} onClick={() => actOnApproval(approval.decision_id, 'approve')}>Approve</Button>
+                    <Button size="xs" disabled={actingId === approval.decision_id} onClick={() => actOnApproval(approval.decision_id, 'approve_and_add')}>Approve + add</Button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex gap-2">

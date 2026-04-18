@@ -154,10 +154,23 @@ export function proxy(request: NextRequest) {
   }
 
   const { pathname } = request.nextUrl
+  const isAuditIngest = pathname === '/api/audit' && request.method.toUpperCase() === 'POST'
+  const isLitellmRoute = pathname.startsWith('/api/litellm/')
+  const isTokenizedRoute = isAuditIngest || isLitellmRoute
+  const configuredAuditIngestToken = (process.env.MC_AUDIT_INGEST_TOKEN || '').trim()
+  const configuredLitellmToken = (process.env.MC_LITELLM_INGEST_TOKEN || configuredAuditIngestToken).trim()
+  const ingestHeader = (request.headers.get('authorization') || request.headers.get('x-mc-token') || '').trim()
+  const ingestToken = isLitellmRoute ? configuredLitellmToken : configuredAuditIngestToken
+  const hasValidAuditIngestToken = Boolean(
+    isTokenizedRoute
+    && ingestToken
+    && ingestHeader.startsWith('Bearer ')
+    && safeCompare(ingestHeader.slice('Bearer '.length).trim(), ingestToken)
+  )
 
   // CSRF Origin validation for mutating requests
   const method = request.method.toUpperCase()
-  if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
+  if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method) && !hasValidAuditIngestToken && !isTokenizedRoute) {
     const origin = request.headers.get('origin')
     if (origin) {
       let originHost: string
@@ -173,7 +186,7 @@ export function proxy(request: NextRequest) {
 
   // Allow login, setup, auth API, docs, and container health probe without session
   const isPublicHealthProbe = pathname === '/api/status' && request.nextUrl.searchParams.get('action') === 'health'
-  if (pathname === '/login' || pathname === '/setup' || pathname.startsWith('/api/auth/') || pathname === '/api/setup' || pathname === '/api/docs' || pathname === '/docs' || isPublicHealthProbe) {
+  if (pathname === '/login' || pathname === '/setup' || pathname.startsWith('/api/auth/') || pathname === '/api/setup' || pathname === '/api/docs' || pathname === '/docs' || isPublicHealthProbe || hasValidAuditIngestToken) {
     const { response, nonce } = nextResponseWithNonce(request)
     return addSecurityHeaders(response, request, nonce)
   }

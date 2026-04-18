@@ -25,6 +25,10 @@ export function getOnboardingSessionDecision(
     return { shouldOpen: true, replayFromStart: false }
   }
 
+  if (params.completed && params.skipped) {
+    return { shouldOpen: false, replayFromStart: false }
+  }
+
   if (params.completed || params.skipped) {
     return { shouldOpen: true, replayFromStart: true }
   }
