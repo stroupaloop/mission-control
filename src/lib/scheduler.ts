@@ -26,6 +26,9 @@ interface ScheduledTask {
 }
 
 const tasks: Map<string, ScheduledTask> = new Map()
+// Extension task runner registry — populated by the extensions import at initScheduler time.
+// Maps task id → async runner fn. Checked in tick() for any id not matching a built-in task.
+const extensionTaskFns: Map<string, () => Promise<{ ok: boolean; message: string }>> = new Map()
 let tickInterval: ReturnType<typeof setInterval> | null = null
 
 /** Check if a setting is enabled (reads from settings table, falls back to default) */
@@ -398,6 +401,35 @@ export function initScheduler() {
     running: false,
   })
 
+  // ─── Extensions (@stroupaloop/mission-control) ─────────────────────────────
+  // Register extension-declared scheduled tasks into the shared task registry.
+  // Extensions declare tasks in src/extensions/extensions.config.ts; we wire
+  // them here so they appear in /api/scheduler status and can be triggered
+  // manually. Dynamic import avoids circular dependency with db.ts (which
+  // triggers initScheduler before extensions are fully loaded).
+  import('@/extensions').then(({ getExtensionScheduledTasks }) => {
+    const extensionTasks = getExtensionScheduledTasks()
+    for (const extTask of extensionTasks) {
+      if (!tasks.has(extTask.id)) {
+        tasks.set(extTask.id, {
+          name: extTask.name,
+          intervalMs: extTask.intervalMs,
+          lastRun: null,
+          nextRun: Date.now() + 35_000,
+          enabled: true,
+          running: false,
+        })
+        extensionTaskFns.set(extTask.id, extTask.fn)
+      }
+    }
+    if (extensionTasks.length > 0) {
+      logger.info({ count: extensionTasks.length }, 'Extension scheduled tasks registered')
+    }
+  }).catch((err: unknown) => {
+    logger.warn({ err }, 'Failed to load extension scheduled tasks — non-fatal')
+  })
+  // ────────────────────────────────────────────────────────────────────────────
+
   // Start the tick loop
   tickInterval = setInterval(tick, TICK_MS)
   logger.info('Scheduler initialized - backup at ~3AM, cleanup at ~4AM, heartbeat every 5m, webhook/claude/skill/local-agent/gateway-agent sync every 60s')
@@ -457,6 +489,7 @@ async function tick() {
         : id === 'aegis_review' ? await runAegisReviews()
         : id === 'recurring_task_spawn' ? await spawnRecurringTasks()
         : id === 'stale_task_requeue' ? await requeueStaleTasks()
+        : extensionTaskFns.has(id) ? await extensionTaskFns.get(id)!()
         : await runCleanup()
       task.lastResult = { ...result, timestamp: now }
     } catch (err: any) {
@@ -523,6 +556,7 @@ export async function triggerTask(taskId: string): Promise<{ ok: boolean; messag
   if (taskId === 'aegis_review') return runAegisReviews()
   if (taskId === 'recurring_task_spawn') return spawnRecurringTasks()
   if (taskId === 'stale_task_requeue') return requeueStaleTasks()
+  if (extensionTaskFns.has(taskId)) return extensionTaskFns.get(taskId)!()
   return { ok: false, message: `Unknown task: ${taskId}` }
 }
 

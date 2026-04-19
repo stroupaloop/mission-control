@@ -85,6 +85,20 @@ function initializeSchema() {
         }).catch(() => {
           // Silent - scheduler is optional
         });
+
+        // ─── Extensions (@stroupaloop/mission-control) ───────────────────────
+        // Single mount point for all AMS extensions (resolver, litellm, oap,
+        // mcp, security-audit). Runs startup hooks and registers scheduled
+        // tasks after the scheduler is initialized. All extension code lives
+        // under src/extensions/; this is the only upstream file touched.
+        import('@/extensions').then(({ mountExtensions }) => {
+          mountExtensions().catch((err: unknown) => {
+            logger.warn({ err }, 'Extension mount failed — non-fatal');
+          });
+        }).catch(() => {
+          // Silent — extensions are optional
+        });
+        // ─────────────────────────────────────────────────────────────────────
       }
     }
 
