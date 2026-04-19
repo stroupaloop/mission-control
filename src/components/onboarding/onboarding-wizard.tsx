@@ -75,7 +75,7 @@ export function OnboardingWizard() {
 }
 
 // Dead code below kept for upstream diff reduction
-function _UpstreamOnboardingWizard() {
+function UpstreamOnboardingWizardDisabled() {
   const { showOnboarding, setShowOnboarding, dashboardMode, gatewayAvailable, interfaceMode, setInterfaceMode } = useMissionControl()
   const navigateToPanel = useNavigateToPanel()
   const t = useTranslations('onboarding')
