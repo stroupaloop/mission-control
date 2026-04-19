@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-04-18T00:00:00Z",
+  "model": "claude-sonnet-4-6",
+  "total_cases": 116,
+  "must_include_accuracy": 0.979,
+  "avg_recall": 0.934,
+  "avg_precision": 0.748,
+  "errors": 2,
+  "latency_p50": 1634,
+  "latency_p95": 2821,
+  "latency_mean": 1734,
+  "usage": { "input_tokens": 157164, "output_tokens": 5226, "total_tokens": 162390, "cost_usd": 0.0 },
+  "votes": 1
+}
