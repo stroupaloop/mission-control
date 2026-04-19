@@ -5,14 +5,92 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   Line,
   LineChart,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts'
 import { Button } from '@/components/ui/button'
+
+// ---------- Additional Types (timeseries + benchmark) ----------
+
+interface WeeklyRow {
+  week_start: string
+  must_include_recall_curated: number | null
+  must_include_recall_live: number | null
+  drift_delta_pp: number | null
+  flagged_drift: boolean
+  top_miss_tools: string // JSON
+  tokens_saved_total: number
+  dollars_saved_total: number
+}
+
+interface WeeklyTimeseriesResponse {
+  weeks: number
+  rows: WeeklyRow[]
+  hasData: boolean
+}
+
+interface BenchmarkLeaderboardRow {
+  run_date: string
+  model_id: string
+  must_include_recall: number | null
+  f1_score: number | null
+  latency_p50_ms: number | null
+  latency_p95_ms: number | null
+  cost_per_1k_calls_usd: number | null
+  rank_in_run: number
+  is_recommended_production: boolean
+}
+
+interface LeaderboardResponse {
+  hasData: boolean
+  runDate: string | null
+  rows: BenchmarkLeaderboardRow[]
+  nextBenchmarkNote?: string
+}
+
+interface ModelHistoryRow {
+  effective_from: string
+  effective_to: string | null
+  model_id: string
+  reason: string
+}
+
+interface ModelHistoryResponse {
+  hasData: boolean
+  currentModel: string | null
+  currentSince: string | null
+  rows: ModelHistoryRow[]
+}
+
+interface CostSplitResponse {
+  days: number
+  total_cost_usd: number
+  resolver_cost_usd: number
+  other_cost_usd: number
+  resolver_pct: number
+  resolver_calls: number
+  total_calls: number
+}
+
+interface ToolMissRow {
+  toolId: string
+  missCount: number
+  selectCount: number
+  missRate: number
+}
+
+interface ToolMissHeatmapResponse {
+  days: number
+  rows: number
+  tools: ToolMissRow[]
+}
 
 // ---------- Types ----------
 
@@ -293,6 +371,44 @@ export function ResolverIntelligencePanel() {
   useEffect(() => {
     loadRecommendations()
   }, [loadRecommendations])
+
+  // ---------- Timeseries + Benchmark state ----------
+
+  const [weeklyData, setWeeklyData] = useState<WeeklyTimeseriesResponse | null>(null)
+  const [dailyTrend, setDailyTrend] = useState<DailyRow[]>([])
+  const [leaderboard, setLeaderboard] = useState<LeaderboardResponse | null>(null)
+  const [modelHistory, setModelHistory] = useState<ModelHistoryResponse | null>(null)
+  const [costSplit, setCostSplit] = useState<CostSplitResponse | null>(null)
+  const [toolMissData, setToolMissData] = useState<ToolMissHeatmapResponse | null>(null)
+  const [tsLoading, setTsLoading] = useState<boolean>(true)
+
+  const loadTimeseries = useCallback(async () => {
+    setTsLoading(true)
+    try {
+      const [weekly, daily, lb, mh, cs, tm] = await Promise.allSettled([
+        fetch('/api/resolver/timeseries/weekly?weeks=12').then(r => r.ok ? r.json() : null),
+        fetch(`/api/resolver/timeseries/daily?days=${days}`).then(r => r.ok ? r.json() : null),
+        fetch('/api/resolver/benchmark/leaderboard').then(r => r.ok ? r.json() : null),
+        fetch('/api/resolver/benchmark/model-history').then(r => r.ok ? r.json() : null),
+        fetch(`/api/resolver/cost-split?days=${days}`).then(r => r.ok ? r.json() : null),
+        fetch('/api/resolver/tool-miss-heatmap?days=7').then(r => r.ok ? r.json() : null),
+      ])
+      if (weekly.status === 'fulfilled' && weekly.value) setWeeklyData(weekly.value)
+      if (daily.status === 'fulfilled' && daily.value?.rows) setDailyTrend(daily.value.rows.slice().reverse())
+      if (lb.status === 'fulfilled' && lb.value) setLeaderboard(lb.value)
+      if (mh.status === 'fulfilled' && mh.value) setModelHistory(mh.value)
+      if (cs.status === 'fulfilled' && cs.value) setCostSplit(cs.value)
+      if (tm.status === 'fulfilled' && tm.value) setToolMissData(tm.value)
+    } catch { /* best effort */ } finally {
+      setTsLoading(false)
+    }
+  }, [days])
+
+  useEffect(() => {
+    loadTimeseries()
+    const h = setInterval(loadTimeseries, 5 * 60_000) // refresh every 5min
+    return () => clearInterval(h)
+  }, [loadTimeseries])
 
   const chartData = useMemo(() => {
     if (!metrics) return []
@@ -689,6 +805,239 @@ export function ResolverIntelligencePanel() {
           </div>
         </div>
       )}
+
+      {/* ===== 7-DAY TREND ===== */}
+      <Card title="7-Day Trend">
+        {dailyTrend.length === 0 ? (
+          <EmptyState loading={tsLoading} />
+        ) : (
+          <>
+            <ResponsiveContainer width="100%" height={160}>
+              <LineChart data={dailyTrend.slice(-7)}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--muted)" />
+                <XAxis dataKey="day" tick={{ fontSize: 10 }} tickFormatter={(v: string) => v.slice(5)} />
+                <YAxis tick={{ fontSize: 10 }} />
+                <Tooltip contentStyle={{ fontSize: 11 }} />
+                <Line type="monotone" dataKey="classifications" stroke="#6366f1" strokeWidth={2} dot={false} name="Classifications" />
+                <Line type="monotone" dataKey="tools_narrowed" stroke="#10b981" strokeWidth={2} dot={false} name="Narrowed" />
+                <Line type="monotone" dataKey="avg_confidence" stroke="#f59e0b" strokeWidth={2} dot={false} name="Confidence" />
+                <Line type="monotone" dataKey="avg_llm_latency_ms" stroke="#ef4444" strokeWidth={1} dot={false} name="Latency p50" />
+              </LineChart>
+            </ResponsiveContainer>
+            <Legend items={[
+              { label: 'Classifications', color: '#6366f1' },
+              { label: 'Narrowed', color: '#10b981' },
+              { label: 'Confidence', color: '#f59e0b' },
+              { label: 'Latency p50', color: '#ef4444' },
+            ]} />
+          </>
+        )}
+      </Card>
+
+      {/* ===== DRIFT DETECTOR ===== */}
+      <Card title="Drift Detector (Last 12 Weeks)">
+        {!weeklyData?.hasData ? (
+          <div className="text-xs text-muted-foreground py-4">
+            No weekly data yet — first weekly run produces output on next Sunday 2 AM ET
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-muted-foreground">
+                  <th className="py-1 pr-2 text-left">Week</th>
+                  <th className="py-1 pr-2 text-right">Recall (live)</th>
+                  <th className="py-1 pr-2 text-right">Drift (pp)</th>
+                  <th className="py-1 pr-2 text-right">$ Saved</th>
+                  <th className="py-1 text-left">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {weeklyData.rows.map(r => (
+                  <tr key={r.week_start}
+                    className={`border-t border-muted/30 ${
+                      r.flagged_drift ? 'bg-red-500/10' : ''
+                    }`}>
+                    <td className="py-1 pr-2 font-mono">{r.week_start}</td>
+                    <td className="py-1 pr-2 text-right">
+                      {r.must_include_recall_live != null
+                        ? `${(r.must_include_recall_live * 100).toFixed(1)}%`
+                        : r.must_include_recall_curated != null
+                          ? `${(r.must_include_recall_curated * 100).toFixed(1)}%`
+                          : '—'}
+                    </td>
+                    <td className={`py-1 pr-2 text-right font-mono ${
+                      r.drift_delta_pp == null ? '' :
+                      r.drift_delta_pp < 0 ? 'text-red-500' : 'text-emerald-500'
+                    }`}>
+                      {r.drift_delta_pp != null
+                        ? `${r.drift_delta_pp >= 0 ? '+' : ''}${r.drift_delta_pp.toFixed(1)}`
+                        : '—'}
+                    </td>
+                    <td className="py-1 pr-2 text-right">
+                      {r.dollars_saved_total > 0 ? `$${r.dollars_saved_total.toFixed(2)}` : '—'}
+                    </td>
+                    <td className="py-1">
+                      {r.flagged_drift
+                        ? <span className="text-red-500 font-semibold">⚠ Drift</span>
+                        : <span className="text-emerald-500">✓</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      {/* ===== MODEL SELECTION CARD ===== */}
+      <Card title="Model Selection">
+        {tsLoading && !leaderboard ? (
+          <EmptyState loading />
+        ) : (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-4">
+              <div>
+                <div className="text-xs text-muted-foreground uppercase tracking-wider">Production Model</div>
+                <div className="mt-0.5 text-sm font-semibold font-mono">
+                  {modelHistory?.currentModel ?? 'Not set'}
+                </div>
+                {modelHistory?.currentSince && (
+                  <div className="text-xs text-muted-foreground">Since {modelHistory.currentSince}</div>
+                )}
+              </div>
+              {leaderboard?.runDate && (
+                <div className="border-l border-muted/40 pl-4">
+                  <div className="text-xs text-muted-foreground uppercase tracking-wider">Last Benchmark</div>
+                  <div className="mt-0.5 text-sm font-mono">{leaderboard.runDate}</div>
+                  <div className="text-xs text-muted-foreground">Next: 1st of month</div>
+                </div>
+              )}
+            </div>
+            {leaderboard?.hasData && leaderboard.rows.length > 0 ? (
+              <div className="overflow-x-auto mt-2">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-muted-foreground">
+                      <th className="py-1 pr-2 text-left">#</th>
+                      <th className="py-1 pr-2 text-left">Model</th>
+                      <th className="py-1 pr-2 text-right">Recall</th>
+                      <th className="py-1 pr-2 text-right">F1</th>
+                      <th className="py-1 pr-2 text-right">p50</th>
+                      <th className="py-1 text-left">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {leaderboard.rows.map(r => (
+                      <tr key={r.model_id}
+                        className={`border-t border-muted/30 ${
+                          r.is_recommended_production ? 'bg-emerald-500/5' : ''
+                        }`}>
+                        <td className="py-1 pr-2 text-muted-foreground">{r.rank_in_run}</td>
+                        <td className="py-1 pr-2 font-mono">{r.model_id}</td>
+                        <td className="py-1 pr-2 text-right">
+                          {r.must_include_recall != null ? `${(r.must_include_recall * 100).toFixed(1)}%` : '—'}
+                        </td>
+                        <td className="py-1 pr-2 text-right">
+                          {r.f1_score != null ? r.f1_score.toFixed(3) : '—'}
+                        </td>
+                        <td className="py-1 pr-2 text-right">
+                          {r.latency_p50_ms != null ? `${Math.round(r.latency_p50_ms)}ms` : '—'}
+                        </td>
+                        <td className="py-1">
+                          {r.is_recommended_production
+                            ? <span className="text-emerald-500 font-semibold">★ Rec</span>
+                            : ''}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="text-xs text-muted-foreground mt-2">
+                {leaderboard?.nextBenchmarkNote ?? 'No benchmark data yet — first run scheduled 2026-05-01'}
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      {/* ===== TOOL MISS HEATMAP ===== */}
+      <Card title="Tool Miss Heatmap (7 Days)">
+        {!toolMissData || toolMissData.tools.length === 0 ? (
+          <div className="text-xs text-muted-foreground py-4">
+            {tsLoading ? 'Loading…' : 'No miss data yet'}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-muted-foreground">
+                  <th className="py-1 pr-2 text-left">Tool</th>
+                  <th className="py-1 pr-2 text-right">Misses</th>
+                  <th className="py-1 pr-2 text-right">Selects</th>
+                  <th className="py-1 text-right">Miss Rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {toolMissData.tools.slice(0, 15).map(t => (
+                  <tr key={t.toolId} className="border-t border-muted/30">
+                    <td className="py-1 pr-2 font-mono">{t.toolId}</td>
+                    <td className="py-1 pr-2 text-right text-red-500">{t.missCount}</td>
+                    <td className="py-1 pr-2 text-right text-emerald-500">{t.selectCount}</td>
+                    <td className="py-1 text-right">
+                      <span className={t.missRate > 50 ? 'text-red-500 font-semibold' : 'text-muted-foreground'}>
+                        {t.missRate.toFixed(1)}%
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      {/* ===== LITELLM COST SPLIT ===== */}
+      <Card title="LiteLLM Cost Split">
+        {!costSplit ? (
+          <EmptyState loading={tsLoading} />
+        ) : costSplit.total_cost_usd === 0 ? (
+          <div className="text-xs text-muted-foreground py-4">No LiteLLM spend tracked yet</div>
+        ) : (
+          <div className="flex items-center gap-4">
+            <ResponsiveContainer width={120} height={120}>
+              <PieChart>
+                <Pie
+                  data={[
+                    { name: 'Resolver', value: costSplit.resolver_cost_usd },
+                    { name: 'Other', value: costSplit.other_cost_usd },
+                  ]}
+                  cx="50%" cy="50%" innerRadius={30} outerRadius={50}
+                  paddingAngle={2} dataKey="value">
+                  <Cell fill="#6366f1" />
+                  <Cell fill="#e2e8f0" />
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
+            <div className="flex flex-col gap-1 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="inline-block w-2.5 h-2.5 rounded-sm bg-indigo-500" />
+                <span>Resolver: <strong>${costSplit.resolver_cost_usd.toFixed(4)}</strong> ({costSplit.resolver_pct}%)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="inline-block w-2.5 h-2.5 rounded-sm bg-slate-200" />
+                <span>Other: <strong>${costSplit.other_cost_usd.toFixed(4)}</strong></span>
+              </div>
+              <div className="mt-1 text-muted-foreground">
+                Total: ${costSplit.total_cost_usd.toFixed(4)} · {fmtInt(costSplit.resolver_calls)} resolver calls
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
 
       {/* Cursor / ingest status */}
       {metrics?.cursor && (
