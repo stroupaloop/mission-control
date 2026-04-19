@@ -15,7 +15,7 @@
 
 import type { ComponentType } from 'react'
 import { registerPanel, registerNavItems, type PluginNavItem } from '@/lib/plugins'
-import { extensions } from './extensions.config'
+import { clientExtensions } from './manifest.client'
 
 // ── Panel component registry (string id \u2192 React component) ──────────────────
 //
@@ -25,11 +25,16 @@ import { extensions } from './extensions.config'
 // the server graph.
 
 import { ResolverIntelligencePanel } from './resolver/panels/intelligence-panel'
+import { OapApprovalsPanel } from './oap/panels/approvals-panel'
+import { AuditTrailPanel } from './oap/panels/audit-trail-panel'
+import { LitellmUsagePanel } from './litellm/panels/usage-panel'
 
 const componentMap: Record<string, ComponentType> = {
   'resolver-intelligence': ResolverIntelligencePanel,
-  // Additional panels wired in subsequent PRs: oap-audit, litellm-usage,
-  // mcp-audit, security-audit.
+  'oap-approvals': OapApprovalsPanel,
+  'oap-audit': AuditTrailPanel,
+  'litellm-usage': LitellmUsagePanel,
+  // mcp and security-audit are backend-only — no panels.
 }
 
 // ── Register nav items + panels (idempotent by construction) ────────────────
@@ -40,7 +45,7 @@ const componentMap: Record<string, ComponentType> = {
 
 const navItems: PluginNavItem[] = []
 
-for (const ext of extensions) {
+for (const ext of clientExtensions) {
   if (!ext.panels) continue
   for (const panel of ext.panels) {
     const component = componentMap[panel.id]

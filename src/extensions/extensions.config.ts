@@ -12,34 +12,11 @@
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export interface ApiRouteDescriptor {
-  /** URL path relative to /api, e.g. '/resolver/overrides' */
-  path: string
-  methods: Array<'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'>
-}
-
-export interface ScheduledTask {
-  name: string
-  intervalMs: number
-  fn: () => Promise<void>
-}
-
-/**
- * UI descriptor — a "panel" is a client-rendered page that appears under a
- * URL slug like /resolver-intelligence. The manifest only carries the string
- * id — the actual React component is registered in client.ts via a componentMap
- * so the manifest stays serializable and safe to import from the server graph.
- */
-export interface PanelDescriptor {
-  /** Stable panel id — used as URL slug and componentMap key */
-  id: string
-  /** Human-readable label shown in the nav rail */
-  label: string
-  /** Nav grouping — must match a group id recognized by nav-rail */
-  groupId: 'operations' | 'observability' | 'admin'
-  /** Optional lucide icon name (default sparkles) */
-  icon?: string
-}
+// Primitive descriptor types live in extensions.config.ts.types so they can
+// be safely imported by manifest.client.ts (client graph) without dragging
+// server-only code through the bundler.
+export type { ApiRouteDescriptor, ScheduledTask, PanelDescriptor } from './extensions.config.ts.types'
+import type { ApiRouteDescriptor, ScheduledTask, PanelDescriptor } from './extensions.config.ts.types'
 
 export interface ExtensionManifest {
   id: 'resolver' | 'litellm' | 'oap' | 'mcp' | 'security-audit'
@@ -67,6 +44,8 @@ const resolverExtension: ExtensionManifest = {
   id: 'resolver',
   displayName: 'Resolver Intelligence',
   apiRoutes: [
+    { path: '/resolver/metrics', methods: ['GET'] },
+    { path: '/resolver/recent', methods: ['GET'] },
     { path: '/resolver/recommendations', methods: ['GET'] },
     { path: '/resolver/overrides', methods: ['GET', 'POST'] },
     { path: '/resolver/overrides/:toolId', methods: ['DELETE'] },
@@ -119,6 +98,14 @@ const litellmExtension: ExtensionManifest = {
     { path: '/litellm/dashboard/records', methods: ['GET'] },
     { path: '/litellm/dashboard/summary', methods: ['GET'] },
   ],
+  panels: [
+    {
+      id: 'litellm-usage',
+      label: 'LiteLLM Usage',
+      groupId: 'observability',
+      icon: 'activity',
+    },
+  ],
 }
 
 // ── OAP Extension ──────────────────────────────────────────────────────────────
@@ -129,6 +116,20 @@ const oapExtension: ExtensionManifest = {
   apiRoutes: [
     { path: '/audit', methods: ['GET', 'POST'] },
     { path: '/oap/approvals', methods: ['GET', 'POST', 'PATCH'] },
+  ],
+  panels: [
+    {
+      id: 'oap-approvals',
+      label: 'OAP Approvals',
+      groupId: 'operations',
+      icon: 'shield-check',
+    },
+    {
+      id: 'oap-audit',
+      label: 'OAP Audit Trail',
+      groupId: 'observability',
+      icon: 'file-clock',
+    },
   ],
 }
 

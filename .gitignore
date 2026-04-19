@@ -45,3 +45,10 @@ playwright-report/
 # Claude Code context files (root CLAUDE.md is committed for AI agent discovery)
 **/CLAUDE.md
 !/CLAUDE.md
+
+# Local scratch / screenshots — never commit
+take_screenshot.js
+take_all_panels.js
+test_api.js
+panel_*.png
+resolver_panel*.png

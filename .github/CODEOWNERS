@@ -1,2 +1,15 @@
-# Default code owner: require review from nyk for non-admin merges
-* @0xNyk
+# CODEOWNERS — stroupaloop/mission-control (private fork)
+#
+# All AMS extension code requires owner review. Upstream-sensitive files
+# (db.ts, layout.tsx) also flagged so any change is visible.
+
+# Extensions — all custom code lives here
+/src/extensions/            @stroupaloop
+
+# Upstream touch-points — tightly controlled
+/src/lib/db.ts              @stroupaloop
+/src/app/layout.tsx         @stroupaloop
+
+# Fork policy + workflows
+/FORK.md                    @stroupaloop
+/.github/                   @stroupaloop
