@@ -58,13 +58,13 @@ afterEach(() => {
 
 describe('GET /api/litellm/usage/summary', () => {
   it('returns 401 without a token', async () => {
-    const mod = await import('../route')
+    const mod = await import('../api/usage-summary')
     const res = await mod.GET(makeRequest('http://localhost/api/litellm/usage/summary?window=24h'))
     expect(res.status).toBe(401)
   })
 
   it('returns 401 with wrong token', async () => {
-    const mod = await import('../route')
+    const mod = await import('../api/usage-summary')
     const res = await mod.GET(
       makeRequest('http://localhost/api/litellm/usage/summary?window=24h', {
         authorization: 'Bearer wrong-token',
@@ -74,7 +74,7 @@ describe('GET /api/litellm/usage/summary', () => {
   })
 
   it('returns empty totals with valid token and no data', async () => {
-    const mod = await import('../route')
+    const mod = await import('../api/usage-summary')
     const res = await mod.GET(
       makeRequest('http://localhost/api/litellm/usage/summary?window=24h', {
         authorization: 'Bearer test-token-123',
@@ -88,7 +88,7 @@ describe('GET /api/litellm/usage/summary', () => {
   })
 
   it('accepts x-mc-token header as well', async () => {
-    const mod = await import('../route')
+    const mod = await import('../api/usage-summary')
     const res = await mod.GET(
       makeRequest('http://localhost/api/litellm/usage/summary', {
         'x-mc-token': 'test-token-123',
@@ -103,7 +103,7 @@ describe('GET /api/litellm/usage/summary', () => {
       { response_cost: 2.0, total_tokens: 300, latency_ms: 3000, status: 'success' },
       { response_cost: 0.5, total_tokens: 75, latency_ms: 500, status: 'failure' },
     ])
-    const mod = await import('../route')
+    const mod = await import('../api/usage-summary')
     const res = await mod.GET(
       makeRequest('http://localhost/api/litellm/usage/summary?window=24h', {
         authorization: 'Bearer test-token-123',
@@ -123,7 +123,7 @@ describe('GET /api/litellm/usage/summary', () => {
       response_cost: i * 0.1,
     }))
     seed(rows)
-    const mod = await import('../route')
+    const mod = await import('../api/usage-summary')
     const res = await mod.GET(
       makeRequest('http://localhost/api/litellm/usage/summary?window=24h', {
         authorization: 'Bearer test-token-123',
@@ -137,7 +137,7 @@ describe('GET /api/litellm/usage/summary', () => {
 
   it('window=all has no by_hour bucketing', async () => {
     seed([{ response_cost: 1.0 }])
-    const mod = await import('../route')
+    const mod = await import('../api/usage-summary')
     const res = await mod.GET(
       makeRequest('http://localhost/api/litellm/usage/summary?window=all', {
         authorization: 'Bearer test-token-123',
@@ -154,7 +154,7 @@ describe('GET /api/litellm/usage/summary', () => {
       { response_cost: 1.0, created_at: now - 60 },
       { response_cost: 99.0, created_at: now - 25 * 3600 },
     ])
-    const mod = await import('../route')
+    const mod = await import('../api/usage-summary')
     const res = await mod.GET(
       makeRequest('http://localhost/api/litellm/usage/summary?window=24h', {
         authorization: 'Bearer test-token-123',

@@ -46,7 +46,7 @@ describe('GET /api/oap/approvals', () => {
       text: async () => JSON.stringify({ pending }),
     })
 
-    const mod = await import('../route')
+    const mod = await import('../api/approvals')
     const res = await mod.GET(makeRequest('http://localhost/api/oap/approvals'))
     const body = await res.json()
     expect(res.status).toBe(200)
@@ -55,7 +55,7 @@ describe('GET /api/oap/approvals', () => {
 
   it('returns 502 if the sidecar is unreachable', async () => {
     fetchMock.mockRejectedValueOnce(new Error('ECONNREFUSED'))
-    const mod = await import('../route')
+    const mod = await import('../api/approvals')
     const res = await mod.GET(makeRequest('http://localhost/api/oap/approvals'))
     expect(res.status).toBe(502)
     const body = await res.json()
@@ -71,7 +71,7 @@ describe('POST /api/oap/approvals', () => {
       text: async () => JSON.stringify({ ok: true, capability: 'exec:read:filesystem' }),
     })
 
-    const mod = await import('../route')
+    const mod = await import('../api/approvals')
     const res = await mod.POST(
       makeRequest('http://localhost/api/oap/approvals', {
         method: 'POST',
@@ -96,7 +96,7 @@ describe('POST /api/oap/approvals', () => {
       text: async () => JSON.stringify({ ok: true }),
     })
 
-    const mod = await import('../route')
+    const mod = await import('../api/approvals')
     const res = await mod.POST(
       makeRequest('http://localhost/api/oap/approvals', {
         method: 'POST',
@@ -114,7 +114,7 @@ describe('POST /api/oap/approvals', () => {
       text: async () => JSON.stringify({ ok: true, capability: 'net:outbound:*' }),
     })
 
-    const mod = await import('../route')
+    const mod = await import('../api/approvals')
     const res = await mod.POST(
       makeRequest('http://localhost/api/oap/approvals', {
         method: 'POST',
@@ -126,7 +126,7 @@ describe('POST /api/oap/approvals', () => {
   })
 
   it('returns 400 when action is invalid', async () => {
-    const mod = await import('../route')
+    const mod = await import('../api/approvals')
     const res = await mod.POST(
       makeRequest('http://localhost/api/oap/approvals', {
         method: 'POST',
@@ -139,7 +139,7 @@ describe('POST /api/oap/approvals', () => {
   })
 
   it('returns 400 when decision_id is missing', async () => {
-    const mod = await import('../route')
+    const mod = await import('../api/approvals')
     const res = await mod.POST(
       makeRequest('http://localhost/api/oap/approvals', {
         method: 'POST',
@@ -152,7 +152,7 @@ describe('POST /api/oap/approvals', () => {
   })
 
   it('returns 400 when body is not JSON', async () => {
-    const mod = await import('../route')
+    const mod = await import('../api/approvals')
     const res = await mod.POST(
       makeRequest('http://localhost/api/oap/approvals', {
         method: 'POST',

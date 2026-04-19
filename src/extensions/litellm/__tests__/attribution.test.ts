@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deriveAttribution } from '@/lib/litellm-attribution'
+import { deriveAttribution } from '@/extensions/litellm/attribution'
 
 describe('deriveAttribution', () => {
   it('prefers explicit body.user over everything else', () => {
