@@ -2210,7 +2210,7 @@
     "selectRow": "تحديد الصف",
     "selectedCount": "{count} محدّد",
     "approve": "موافقة",
-    "approveAndAdd": "موافقة + إضافة",
+    "approveAndAdd": "وافِق + أضِف",
     "approveAndAddHint": "يوافق على هذا القرار ويضيف قاعدة للطلبات المماثلة مستقبلاً.",
     "deny": "رفض",
     "bulkApprove": "الموافقة على المحدّد",

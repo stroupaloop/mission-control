@@ -2225,7 +2225,7 @@
     "statusDenied": "denegada",
     "showDetails": "Mostrar detalles",
     "hideDetails": "Ocultar detalles",
-    "toastActionFailed": "Error en la acción",
+    "toastActionFailed": "No se pudo completar la acción",
     "toastApproved": "Aprobada",
     "toastApprovedAndAdded": "Aprobada y regla agregada",
     "toastBulkDone": "{n, plural, one {# acción aplicada} other {# acciones aplicadas}}",

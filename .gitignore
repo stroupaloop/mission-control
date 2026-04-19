@@ -52,3 +52,4 @@ take_all_panels.js
 test_api.js
 panel_*.png
 resolver_panel*.png
+messages/.qa_review.json

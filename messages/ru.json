@@ -2196,15 +2196,15 @@
     "unreachable": "Недоступен"
   },
   "oapApprovals": {
-    "title": "Approvals",
+    "title": "Одобрения",
     "pendingBadge": "{count} на рассмотрении",
     "refresh": "Обновить",
     "refreshing": "Обновление…",
-    "filtersAria": "Фильтровать approvals по статусу",
+    "filtersAria": "Фильтровать одобрения по статусу",
     "filterAll": "Все",
     "filterPending": "На рассмотрении",
     "filterResolved": "Решённые",
-    "searchAria": "Поиск approvals",
+    "searchAria": "Поиск одобрений",
     "searchPlaceholder": "Поиск решений…",
     "selectAllVisible": "Выбрать все видимые",
     "selectRow": "Выбрать строку",
@@ -2216,9 +2216,9 @@
     "bulkApprove": "Одобрить выбранные",
     "bulkDeny": "Отклонить выбранные",
     "clear": "Снять выделение",
-    "emptyAll": "Нет записей об approvals.",
-    "emptyPending": "Нет ожидающих approvals. Всё в порядке.",
-    "loadError": "Не удалось загрузить approvals",
+    "emptyAll": "Нет записей об одобрениях.",
+    "emptyPending": "Нет ожидающих одобрений. Всё в порядке.",
+    "loadError": "Не удалось загрузить одобрения",
     "retry": "Повторить",
     "sidecarUnreachable": "OAP sidecar недоступен — убедитесь, что sidecar запущен.",
     "statusApproved": "одобрено",
@@ -2266,6 +2266,6 @@
     "loadError": "Не удалось загрузить данные об использовании",
     "retry": "Повторить",
     "empty": "Данных об использовании за этот период пока нет.",
-    "emptyRecords": "Ни один вызов не соответствует фильтру."
+    "emptyRecords": "Нет вызовов, соответствующих этому фильтру."
   }
 }

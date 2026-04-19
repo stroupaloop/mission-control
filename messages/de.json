@@ -2252,7 +2252,7 @@
     "colModel": "Modell",
     "colAgent": "Agent",
     "colCost": "Kosten",
-    "colCompletion": "Komp.",
+    "colCompletion": "Antw.",
     "colPrompt": "Prompt",
     "colStatus": "Status",
     "colTime": "Zeit",

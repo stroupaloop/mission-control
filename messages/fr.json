@@ -2255,7 +2255,7 @@
     "colCompletion": "Comp.",
     "colPrompt": "Prompt",
     "colStatus": "Statut",
-    "colTime": "Heure",
+    "colTime": "Temps",
     "colLatency": "Latence",
     "colCalls": "Appels",
     "colTokens": "Tokens",
