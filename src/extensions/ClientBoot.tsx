@@ -8,6 +8,7 @@
  * runs panel + nav-item registration at module-load time.
  *
  * This component renders nothing. All the work happens in the imported module.
+ * (Fork-level onboarding auto-dismiss lives in ForkHeadScript for timing.)
  */
 
 import './client'

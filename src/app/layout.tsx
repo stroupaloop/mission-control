@@ -7,6 +7,7 @@ import { getLocale, getMessages } from 'next-intl/server'
 import { THEME_IDS } from '@/lib/themes'
 import { ThemeBackground } from '@/components/ui/theme-background'
 import { ClientBoot } from '@/extensions/ClientBoot'
+import { ForkHeadScript } from '@/extensions/ForkHeadScript'
 import './globals.css'
 
 const inter = Inter({
@@ -104,6 +105,7 @@ export default async function RootLayout({
             __html: `(function(){try{var t=localStorage.getItem('theme')||'void';var light=['light','paper'];if(light.indexOf(t)===-1)document.documentElement.classList.add('dark')}catch(e){}})()`,
           }}
         />
+        <ForkHeadScript nonce={nonce} />
       </head>
       <body className={`${inter.variable} ${jetbrainsMono.variable} font-sans antialiased`} suppressHydrationWarning>
         <NextIntlClientProvider messages={messages}>

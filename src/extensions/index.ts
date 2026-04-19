@@ -15,6 +15,7 @@
 
 import { extensions } from './extensions.config'
 import type { ExtensionManifest } from './extensions.config'
+import { applyForkDefaults } from './fork-defaults'
 
 // Re-export the type for consumers
 export type { ExtensionManifest }
@@ -29,6 +30,11 @@ let mounted = false
 export async function mountExtensions(): Promise<void> {
   if (mounted) return
   mounted = true
+
+  // AMS fork-level default settings (onboarding bypass, etc.)
+  // Runs before any extension hooks so UI preferences are settled before
+  // the first page render touches the settings table.
+  applyForkDefaults()
 
   for (const ext of extensions) {
     // Run startup hooks
