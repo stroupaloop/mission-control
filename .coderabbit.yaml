@@ -1,0 +1,58 @@
+# CodeRabbit configuration
+# Docs: https://docs.coderabbit.ai/reference/configuration
+
+language: "en-US"
+
+reviews:
+  profile: "assertive"
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  request_changes_workflow: false
+  collapse_walkthrough: false
+  sequence_diagrams: true
+  changed_files_summary: true
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+
+  path_instructions:
+    - path: "src/**"
+      instructions: |
+        Focus on:
+        - Component architecture and state management
+        - API contract correctness
+        - Auth and permission checks on every route
+        - Error boundaries and graceful degradation
+        - Performance (no unnecessary re-renders, efficient queries)
+    - path: "tests/**"
+      instructions: |
+        Focus on:
+        - Test isolation (no shared state between tests)
+        - Edge case coverage
+        - Mock accuracy (mocks should reflect real API contracts)
+    - path: "ops/**"
+      instructions: |
+        Focus on:
+        - Deployment safety (rollback procedures)
+        - Secret handling
+        - Infrastructure correctness
+    - path: "scripts/**"
+      instructions: |
+        Focus on:
+        - set -euo pipefail at top
+        - Idempotency
+        - Error handling
+    - path: "docs/**"
+      instructions: |
+        Review for:
+        - Accuracy of technical descriptions
+        - Completeness of setup procedures
+        - Broken links or stale references
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: "auto"
