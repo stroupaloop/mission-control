@@ -1,0 +1,57 @@
+name: GPT-5.5 PR Review (pr-agent)
+
+# Independent GPT-5.5 review via Codium pr-agent. Runs alongside Claude Code
+# Review and Greptile — three independent perspectives. Deliberately broad
+# instructions so this is a true second opinion, not a duplicate of Claude's lens.
+#
+# Fork-only: requires PR_AGENT_OPENAI_API_KEY in repo secrets.
+#
+# Manual triggers: comment `/review`, `/describe`, `/ask <question>`, or
+# `/improve` on a PR to re-run pr-agent. See https://github.com/Codium-ai/pr-agent.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  pr_agent:
+    name: GPT-5.5 Code Review
+    if: >
+      github.repository == 'stroupaloop/mission-control' &&
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'issue_comment' && github.event.issue.pull_request))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run pr-agent (GPT-5.5)
+        uses: Codium-ai/pr-agent@main
+        env:
+          OPENAI_API_KEY: ${{ secrets.PR_AGENT_OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          config.model: "gpt-5.5"
+          config.fallback_models: '["gpt-5.4"]'
+          pr_reviewer.require_score_label: "false"
+          pr_reviewer.enable_review_labels_security: "true"
+          pr_reviewer.num_code_suggestions: "5"
+          pr_reviewer.extra_instructions: |
+            Mission Control is an open-source dashboard for AI agent orchestration:
+            agent fleet management, task tracking, cost monitoring, workflow
+            orchestration. Stack: Next.js 16 (App Router), React 19, TypeScript 5,
+            SQLite via better-sqlite3, Tailwind CSS 3, Zustand, pnpm. Three agent
+            control surfaces: MCP server, CLI (`pnpm mc`), and REST API (OpenAPI
+            in `openapi.json`).
+
+            This repo is a fork of `builderz-labs/mission-control` with a rebase
+            contract — fork-only changes live under namespaced extension paths
+            (see `FORK.md`, `EXTENSIONS.md`).
+
+            Do a thorough general review of this PR. Cover correctness, security,
+            operational readiness, and anything else you notice. Do not limit yourself
+            to specific categories — the goal is an independent second opinion
+            alongside separate Claude and Greptile reviews. Flag what you actually
+            find, not what you expect to find.
