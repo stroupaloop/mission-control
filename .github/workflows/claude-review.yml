@@ -20,6 +20,10 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
+  # anthropics/claude-code-action@v1 fetches an OIDC token via
+  # ACTIONS_ID_TOKEN_REQUEST_URL — this permission is required.
+  # Without it the action fails with "Could not fetch an OIDC token".
+  id-token: write
 
 jobs:
   claude-review:
