@@ -1,2 +1,8 @@
 # Default code owner: require review from nyk for non-admin merges
 * @0xNyk
+
+# Fork-only overrides (last-match-wins semantics).
+# Workflow files have access to all repo secrets — any change requires
+# explicit owner review for this fork.
+/.github/workflows/ @stroupaloop
+/.github/dependabot.yml @stroupaloop

@@ -34,12 +34,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20  # bounds blast radius if a --max-turns 30 session stalls
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
 
       - name: Claude Code review
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@a9ac9eb3a874922a7e34246afae3914113c6626f # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: |
