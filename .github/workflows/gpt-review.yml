@@ -47,6 +47,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           config.model: "gpt-5.5"
           config.fallback_models: '["gpt-5.4"]'
+          # gpt-5.5 / gpt-5.4 aren't in pr-agent v0.34's MAX_TOKENS table, which
+          # causes the model call to error out silently (action exits 0, no review
+          # posted). 200000 matches gpt-5.5's published context window.
+          config.custom_model_max_tokens: "200000"
           pr_reviewer.require_score_label: "false"
           pr_reviewer.enable_review_labels_security: "true"
           pr_reviewer.num_code_suggestions: "5"

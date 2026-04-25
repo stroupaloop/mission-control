@@ -20,6 +20,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
+  id-token: write # required by anthropics/claude-code-action for GitHub OIDC auth, even with anthropic_api_key
 
 jobs:
   claude-review:
