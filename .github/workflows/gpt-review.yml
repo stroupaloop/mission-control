@@ -39,6 +39,17 @@ jobs:
           pr_reviewer.enable_review_labels_security: "true"
           pr_reviewer.num_code_suggestions: "5"
           pr_reviewer.extra_instructions: |
+            You (GPT-5.5) are one of three independent reviewers on every PR —
+            alongside Claude Sonnet 4.6 and the Greptile GitHub App. The reviews
+            run with no shared context. Claude is doing a structured pass on
+            architecture, security, and the fork-rebase contract. Lean into what
+            GPT-5.5 catches well: code-quality patterns, idiomatic concerns,
+            tricky edge cases, performance smells, error-handling gaps, and
+            anything that doesn't fit a neat category. Don't try to replicate
+            Claude's lens — overlap dilutes the value of having multiple models
+            on the same diff. Flag what you actually find, not what you expect
+            to find.
+
             Mission Control is an open-source dashboard for AI agent orchestration:
             agent fleet management, task tracking, cost monitoring, workflow
             orchestration. Stack: Next.js 16 (App Router), React 19, TypeScript 5,
@@ -49,9 +60,3 @@ jobs:
             This repo is a fork of `builderz-labs/mission-control` with a rebase
             contract — fork-only changes live under namespaced extension paths
             (see `FORK.md`, `EXTENSIONS.md`).
-
-            Do a thorough general review of this PR. Cover correctness, security,
-            operational readiness, and anything else you notice. Do not limit yourself
-            to specific categories — the goal is an independent second opinion
-            alongside separate Claude and Greptile reviews. Flag what you actually
-            find, not what you expect to find.
