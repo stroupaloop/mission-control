@@ -14,6 +14,12 @@ on:
     types: [opened, synchronize, reopened]
   issue_comment:
 
+# Cancel in-flight runs on rapid pushes / repeated `/review` comments.
+# Falls back to the issue/run id when there's no PR number on the event.
+concurrency:
+  group: gpt-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: write
@@ -22,14 +28,20 @@ permissions:
 jobs:
   pr_agent:
     name: GPT-5.5 Code Review
+    # Skip on PRs from forks (secrets aren't exposed there) and on any
+    # non-fork checkout of this file.
     if: >
       github.repository == 'stroupaloop/mission-control' &&
-      (github.event_name == 'pull_request' ||
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
        (github.event_name == 'issue_comment' && github.event.issue.pull_request))
     runs-on: ubuntu-latest
     steps:
       - name: Run pr-agent (GPT-5.5)
-        uses: Codium-ai/pr-agent@main
+        # Pinned to SHA of v0.34 — `@main` runs whatever is on the upstream
+        # default branch at run time, with access to OPENAI_API_KEY +
+        # GITHUB_TOKEN write scopes. Bump deliberately when reviewing the diff.
+        uses: Codium-ai/pr-agent@d82f7d3e696cd00822694aaa3096265d3889f3f1 # v0.34
         env:
           OPENAI_API_KEY: ${{ secrets.PR_AGENT_OPENAI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
