@@ -9,7 +9,7 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
 
 # Cancel in-flight reviews on rapid pushes (avoids duplicate Claude comments
 # and double API spend when commits land in quick succession).
@@ -32,6 +32,7 @@ jobs:
       github.repository == 'stroupaloop/mission-control' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 20  # bounds blast radius if a --max-turns 30 session stalls
     steps:
       - uses: actions/checkout@v4
         with:
