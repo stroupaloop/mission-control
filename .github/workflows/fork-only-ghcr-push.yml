@@ -1,8 +1,13 @@
 name: fork-only-ghcr-push
 
-# Builds and pushes the Mission Control Docker image to GHCR on merges to
-# the fork's main branch, and on pushes to feat/* branches for iterative
-# testing of AWS deployment.
+# Builds and pushes the Mission Control Docker image to GHCR on pushes to
+# `feat/**` branches for iterative AWS-side testing of in-progress feature
+# work before merge.
+#
+# Main-branch and tag-release publishing is handled by the upstream-baseline
+# `docker-publish.yml` (byte-identical to builderz-labs/mission-control), so
+# we deliberately exclude `main` from the trigger branches here to avoid
+# duplicate builds on every main push.
 #
 # The `if: github.repository` guard makes this a no-op in the unlikely event
 # this file ever reaches `builderz-labs/mission-control` (it shouldn't —
@@ -11,7 +16,6 @@ name: fork-only-ghcr-push
 on:
   push:
     branches:
-      - main
       - 'feat/**'
   workflow_dispatch:
 
