@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm install)",
+      "Bash(pnpm build)",
+      "Bash(pnpm dev)",
+      "Bash(pnpm test)",
+      "Bash(pnpm test:*)",
+      "Bash(pnpm typecheck)",
+      "Bash(pnpm lint)",
+      "Bash(pnpm test:all)",
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Read(*)",
+      "Write(src/extensions/**)",
+      "Write(src/app/layout.tsx)",
+      "Write(src/lib/db.ts)",
+      "Write(AGENTS.md)",
+      "Write(docs/**)",
+      "Write(tests/**)"
+    ],
+    "deny": [
+      "Write(.claude/**)",
+      "Write(FORK.md)",
+      "Write(src/app/**)",
+      "Write(src/lib/**)",
+      "Write(src/components/**)",
+      "Write(src/store/**)",
+      "Write(src/plugins/**)",
+      "Write(.github/workflows/**)"
+    ]
+  }
+}
