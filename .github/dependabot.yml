@@ -1,0 +1,13 @@
+# Auto-bump GitHub Actions pinned to SHAs in our workflow files.
+# Dependabot opens PRs comparing the SHA + version comment so the diff is
+# reviewable. Monthly cadence keeps churn low for a single-maintainer fork.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: scope

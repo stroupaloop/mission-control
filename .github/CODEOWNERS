@@ -1,15 +1,20 @@
 # CODEOWNERS — stroupaloop/mission-control (private fork)
 #
-# All AMS extension code requires owner review. Upstream-sensitive files
-# (db.ts, layout.tsx) also flagged so any change is visible.
+# Default reviewer + AMS extension governance + fork-only CI controls.
+# Last-match-wins semantics: more specific paths override the default.
 
-# Extensions — all custom code lives here
+# Default code owner: require review from nyk for non-admin merges
+* @0xNyk
+
+# AMS extensions — all custom code lives here
 /src/extensions/            @stroupaloop
 
 # Upstream touch-points — tightly controlled
 /src/lib/db.ts              @stroupaloop
 /src/app/layout.tsx         @stroupaloop
 
-# Fork policy + workflows
+# Fork policy + CI surface (workflow files have access to repo secrets —
+# any change requires explicit owner review for this fork).
 /FORK.md                    @stroupaloop
-/.github/                   @stroupaloop
+/.github/workflows/         @stroupaloop
+/.github/dependabot.yml     @stroupaloop
