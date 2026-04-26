@@ -1,17 +1,30 @@
-# Summary
-Describe what changed and why.
+<!--
+⚠️  FORK POLICY — READ BEFORE OPENING THIS PR
 
-# Risk Level
-Low / Medium / High (pick one)
+This is a PRIVATE FORK of builderz-labs/mission-control.
+- This PR must target `stroupaloop/mission-control/main` ONLY.
+- NEVER open a PR from this fork to `builderz-labs/mission-control`.
+- All custom code must live in `src/extensions/`.
+- See FORK.md for full rules.
+-->
 
-# Tests
-List commands run and results.
+## Summary
 
-# Contribution Checklist
-- [ ] Tests added/updated for behavior changes
-- [ ] Lint/typecheck/build passing
-- [ ] Security review done if auth/data/crypto touched
-- [ ] DB migration tested if schema changed
+<!-- What does this change do? One-paragraph TL;DR. -->
 
-# Notes
-Anything reviewers should know.
+## Scope
+
+- [ ] All code changes live in `src/extensions/` (except allowed upstream touch-points: `src/lib/db.ts`, `src/app/layout.tsx`)
+- [ ] No files added to `.github/workflows/` that could run on upstream (guard with `if: github.repository == 'stroupaloop/mission-control'`)
+- [ ] Typecheck passes (`pnpm typecheck`)
+- [ ] Tests pass (`pnpm exec vitest run`)
+- [ ] If UI changed: browser-verified locally with screenshot attached
+
+## Fork-separation confirmation
+
+- [ ] This PR targets `stroupaloop/mission-control/main` — NOT `builderz-labs/mission-control`
+- [ ] No secrets, internal endpoints, or proprietary data in commit messages / code comments / PR description
+
+## Deployment notes
+
+<!-- Anything special about rolling this out? Migration steps? Env vars? -->

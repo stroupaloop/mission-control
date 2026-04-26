@@ -1,0 +1,18 @@
+'use client'
+
+/**
+ * ClientBoot — side-effect import of extensions/client.ts.
+ *
+ * Rendered once inside the root layout. The sole purpose is to ensure the
+ * client module graph loads src/extensions/client.ts at boot, which in turn
+ * runs panel + nav-item registration at module-load time.
+ *
+ * This component renders nothing. All the work happens in the imported module.
+ * (Fork-level onboarding auto-dismiss lives in ForkHeadScript for timing.)
+ */
+
+import './client'
+
+export function ClientBoot(): null {
+  return null
+}

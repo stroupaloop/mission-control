@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-04-18T00:00:00Z",
+  "model": "claude-haiku-4-5",
+  "total_cases": 116,
+  "must_include_accuracy": 0.985,
+  "avg_recall": 0.952,
+  "avg_precision": 0.801,
+  "errors": 1,
+  "latency_p50": 1200,
+  "latency_p95": 2400,
+  "latency_mean": 1350,
+  "usage": { "input_tokens": 120000, "output_tokens": 4000, "total_tokens": 124000, "cost_usd": 0.012 },
+  "votes": 1
+}

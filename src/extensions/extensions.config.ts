@@ -1,0 +1,164 @@
+/**
+ * Extension manifest declarations — @stroupaloop/mission-control
+ *
+ * Each entry describes an AMS extension: which API routes it provides,
+ * which startup hooks to run, and which recurring tasks to schedule.
+ *
+ * API routes are implemented as plain handler functions in
+ * src/extensions/<area>/api/*.ts and re-exported from Next.js route shims.
+ * This manifest is the authoritative registry — if an extension isn't listed
+ * here, it won't have its hooks or scheduled tasks wired at boot.
+ */
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+// Primitive descriptor types live in extensions.config.ts.types so they can
+// be safely imported by manifest.client.ts (client graph) without dragging
+// server-only code through the bundler.
+export type { ApiRouteDescriptor, ScheduledTask, PanelDescriptor } from './extensions.config.ts.types'
+import type { ApiRouteDescriptor, ScheduledTask, PanelDescriptor } from './extensions.config.ts.types'
+
+export interface ExtensionManifest {
+  id: 'resolver' | 'litellm' | 'oap' | 'mcp' | 'security-audit'
+  /** Human-readable extension name */
+  displayName: string
+  /** API routes provided by this extension */
+  apiRoutes: ApiRouteDescriptor[]
+  /** Hooks run once at application boot (before first request) */
+  startupHooks?: Array<() => void | Promise<void>>
+  /** Recurring tasks registered with the MC scheduler */
+  scheduledTasks?: ScheduledTask[]
+  /** UI panels provided by this extension (client-registered via client.ts) */
+  panels?: PanelDescriptor[]
+}
+
+// ── Resolver Extension ────────────────────────────────────────────────────────
+
+import { ingestResolverTelemetry, rebuildResolverDailyMetrics, ensureResolverTables } from './resolver/telemetry'
+import { getDatabase } from '@/lib/db'
+
+const RESOLVER_TICK_MS = 60 * 1000 // 60s — tail JSONL every minute
+const RESOLVER_ROLLUP_MS = 5 * 60 * 1000 // 5min — rebuild daily metrics
+
+const resolverExtension: ExtensionManifest = {
+  id: 'resolver',
+  displayName: 'Resolver Intelligence',
+  apiRoutes: [
+    { path: '/resolver/metrics', methods: ['GET'] },
+    { path: '/resolver/recent', methods: ['GET'] },
+    { path: '/resolver/recommendations', methods: ['GET'] },
+    { path: '/resolver/overrides', methods: ['GET', 'POST'] },
+    { path: '/resolver/overrides/:toolId', methods: ['DELETE'] },
+  ],
+  panels: [
+    {
+      id: 'resolver-intelligence',
+      label: 'Resolver Intelligence',
+      groupId: 'observability',
+      icon: 'brain-circuit',
+    },
+  ],
+  startupHooks: [
+    () => {
+      // Ensure resolver DB tables exist at boot time (idempotent migration)
+      try {
+        const db = getDatabase()
+        ensureResolverTables(db)
+      } catch {
+        // Non-fatal — tables will be created on first ingest
+      }
+    },
+  ],
+  scheduledTasks: [
+    {
+      name: 'resolver_telemetry_ingest',
+      intervalMs: RESOLVER_TICK_MS,
+      fn: async () => {
+        ingestResolverTelemetry()
+      },
+    },
+    {
+      name: 'resolver_metrics_rollup',
+      intervalMs: RESOLVER_ROLLUP_MS,
+      fn: async () => {
+        rebuildResolverDailyMetrics()
+      },
+    },
+  ],
+}
+
+// ── LiteLLM Extension ─────────────────────────────────────────────────────────
+
+const litellmExtension: ExtensionManifest = {
+  id: 'litellm',
+  displayName: 'LiteLLM Usage & Attribution',
+  apiRoutes: [
+    { path: '/litellm/usage', methods: ['GET', 'POST'] },
+    { path: '/litellm/usage/summary', methods: ['GET'] },
+    { path: '/litellm/dashboard/records', methods: ['GET'] },
+    { path: '/litellm/dashboard/summary', methods: ['GET'] },
+  ],
+  panels: [
+    {
+      id: 'litellm-usage',
+      label: 'LiteLLM Usage',
+      groupId: 'observability',
+      icon: 'activity',
+    },
+  ],
+}
+
+// ── OAP Extension ──────────────────────────────────────────────────────────────
+
+const oapExtension: ExtensionManifest = {
+  id: 'oap',
+  displayName: 'OAP Audit Ingest & Approvals',
+  apiRoutes: [
+    { path: '/audit', methods: ['GET', 'POST'] },
+    { path: '/oap/approvals', methods: ['GET', 'POST', 'PATCH'] },
+  ],
+  panels: [
+    {
+      id: 'oap-approvals',
+      label: 'OAP Approvals',
+      groupId: 'operations',
+      icon: 'shield-check',
+    },
+    {
+      id: 'oap-audit',
+      label: 'OAP Audit Trail',
+      groupId: 'observability',
+      icon: 'file-clock',
+    },
+  ],
+}
+
+// ── MCP Extension ──────────────────────────────────────────────────────────────
+
+const mcpExtension: ExtensionManifest = {
+  id: 'mcp',
+  displayName: 'MCP Audit Pipeline',
+  apiRoutes: [
+    { path: '/mcp-audit/verify', methods: ['GET'] },
+  ],
+}
+
+// ── Security-Audit Extension ───────────────────────────────────────────────────
+
+const securityAuditExtension: ExtensionManifest = {
+  id: 'security-audit',
+  displayName: 'Security Audit',
+  apiRoutes: [
+    { path: '/security-audit', methods: ['GET', 'POST'] },
+  ],
+}
+
+// ── Registry ──────────────────────────────────────────────────────────────────
+
+export const extensions: ExtensionManifest[] = [
+  resolverExtension,
+  litellmExtension,
+  oapExtension,
+  mcpExtension,
+  securityAuditExtension,
+]

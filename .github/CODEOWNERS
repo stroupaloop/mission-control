@@ -1,8 +1,20 @@
+# CODEOWNERS — stroupaloop/mission-control (private fork)
+#
+# Default reviewer + AMS extension governance + fork-only CI controls.
+# Last-match-wins semantics: more specific paths override the default.
+
 # Default code owner: require review from nyk for non-admin merges
 * @0xNyk
 
-# Fork-only overrides (last-match-wins semantics).
-# Workflow files have access to all repo secrets — any change requires
-# explicit owner review for this fork.
-/.github/workflows/ @stroupaloop
-/.github/dependabot.yml @stroupaloop
+# AMS extensions — all custom code lives here
+/src/extensions/            @stroupaloop
+
+# Upstream touch-points — tightly controlled
+/src/lib/db.ts              @stroupaloop
+/src/app/layout.tsx         @stroupaloop
+
+# Fork policy + CI surface (workflow files have access to repo secrets —
+# any change requires explicit owner review for this fork).
+/FORK.md                    @stroupaloop
+/.github/workflows/         @stroupaloop
+/.github/dependabot.yml     @stroupaloop

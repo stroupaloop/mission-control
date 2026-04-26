@@ -945,8 +945,13 @@ export const useMissionControl = create<MissionControlStore>()(
     // UI State — sidebar & layout persistence
     activeTab: 'overview',
     sidebarExpanded: (() => {
-      if (typeof window === 'undefined') return false
-      try { return localStorage.getItem('mc-sidebar-expanded') === 'true' } catch { return false }
+      // AMS fork default: sidebar expanded on first load (show nav labels).
+      // Still persists explicit user toggle via localStorage.
+      if (typeof window === 'undefined') return true
+      try {
+        const v = localStorage.getItem('mc-sidebar-expanded')
+        return v === null ? true : v === 'true'
+      } catch { return true }
     })(),
     collapsedGroups: (() => {
       if (typeof window === 'undefined') return [] as string[]
