@@ -13,12 +13,15 @@
       "Bash(gh *)",
       "Read(*)",
       "Write(src/extensions/**)",
+      "Write(src/app/layout.tsx)",
+      "Write(src/lib/db.ts)",
       "Write(AGENTS.md)",
-      "Write(FORK.md)",
       "Write(docs/**)",
       "Write(tests/**)"
     ],
     "deny": [
+      "Write(.claude/**)",
+      "Write(FORK.md)",
       "Write(src/app/**)",
       "Write(src/lib/**)",
       "Write(src/components/**)",
