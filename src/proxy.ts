@@ -191,7 +191,14 @@ export function proxy(request: NextRequest) {
     // allowed to pass through proxy auth gate.
     const looksLikeAgentApiKey = /^mca_[a-f0-9]{48}$/i.test(apiKey)
 
-    if (sessionToken || hasValidApiKey || looksLikeAgentApiKey) {
+    // Machine ingest tokens (LiteLLM callback, OAP audit adapter) use their own
+    // per-route token validation. Pass them through the proxy gate here so that
+    // route-level auth can handle the comparison.
+    const ingestPaths = ['/api/litellm/usage', '/api/audit']
+    const litellmIngestToken = (process.env.MC_LITELLM_INGEST_TOKEN || process.env.MC_AUDIT_INGEST_TOKEN || '').trim()
+    const isIngestRequest = ingestPaths.some(p => pathname === p) && Boolean(litellmIngestToken && apiKey && safeCompare(apiKey, litellmIngestToken))
+
+    if (sessionToken || hasValidApiKey || looksLikeAgentApiKey || isIngestRequest) {
       const { response, nonce } = nextResponseWithNonce(request)
       return addSecurityHeaders(response, request, nonce)
     }
