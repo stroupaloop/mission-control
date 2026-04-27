@@ -4,14 +4,17 @@ This is the per-namespace inventory for everything under `src/extensions/`. It c
 
 ## Upstream-Touch Contract (rebase surface)
 
-Per FORK.md: only **two** upstream files may be modified. These are the entire interface between the fork's customizations and the upstream `builderz-labs/mission-control` baseline:
+Per FORK.md: only **three** upstream files may be modified. These are the entire interface between the fork's customizations and the upstream `builderz-labs/mission-control` baseline:
 
 | File | What we add | Why |
 |---|---|---|
 | `src/lib/db.ts` | One call to `mountExtensions()` (registers extension API routes, startup hooks, scheduled tasks against the upstream router) | Upstream's DB module is the canonical boot point; mounting here ensures extensions activate before first request |
 | `src/app/layout.tsx` | One-line `<ClientBoot />` render | Next.js App Router has separate server + client module graphs. ClientBoot is the side-effect hook that registers panel components into the client `componentMap` and the nav items into `registerNavItems` |
+| `src/proxy.ts` | Allowlist for server-to-server ingest paths (e.g. `/api/litellm/usage`) so per-route bearer-token auth runs instead of the session/API_KEY gate | Upstream's middleware enforces session/API_KEY for every `/api/*` request. Extensions that own ingest endpoints with their own auth model (LiteLLM `generic_api` callback, future webhook integrations) need a path-specific bypass; the proxy is the only place this can express |
 
-**Anything outside these two files is a violation of FORK.md** and requires explicit owner approval. When rebasing against `builderz-labs/main`, conflicts on these two files are the canonical resolution surface — everything else should rebase cleanly because all custom code lives in `src/extensions/` (a directory upstream doesn't touch).
+**Anything outside these three files is a violation of FORK.md** and requires explicit owner approval. When rebasing against `builderz-labs/main`, conflicts on these three files are the canonical resolution surface — everything else should rebase cleanly because all custom code lives in `src/extensions/` (a directory upstream doesn't touch).
+
+**Long-term direction for `src/proxy.ts`:** the bypass list should ultimately be derived from `loadExtensionManifest()` (e.g. a `bypassProxyAuth?: string[]` field per extension) so adding new ingest endpoints stays inside `src/extensions/`. Until that hook exists, each new bypass entry is an explicit owner-approved touch.
 
 ## Extension Architecture
 
@@ -94,7 +97,7 @@ If/when MC needs cross-service queries or multi-instance HA, the migration path 
 2. Add an entry to the `extensions: ExtensionManifest[]` array in `src/extensions/extensions.config.ts`.
 3. If you have panels, also add them to `src/extensions/manifest.client.ts` (client-graph mirror) and import the components in `src/extensions/client.ts`.
 4. If you add API shims under `src/app/api/<area>/route.ts`, keep them ≤5 lines — they should delegate straight to the extension's handler.
-5. **Do not** modify any file outside `src/extensions/` other than the two upstream-touch points (and only if absolutely necessary).
+5. **Do not** modify any file outside `src/extensions/` other than the three upstream-touch points (and only if absolutely necessary).
 
 ## Rebasing Against `builderz-labs/main`
 
@@ -105,6 +108,7 @@ Per FORK.md procedure, with concrete contract:
 3. **Conflicts should appear in at most these files**:
    - `src/lib/db.ts` (extension mount line; resolve by keeping our line + upstream's changes)
    - `src/app/layout.tsx` (`<ClientBoot />` line; same)
+   - `src/proxy.ts` (allowlist for ingest endpoints; resolve by keeping our `isLiteLLMIngest` + bypass clause + upstream's other changes)
    - Anything under `src/extensions/` (only ours; no upstream changes)
 4. Anywhere else, conflicts are a sign that an extension grew tendrils outside the contract — investigate before resolving.
 5. `pnpm test`, then run the docker image and verify the four panel routes (`/resolver-intelligence`, `/oap-approvals`, `/oap-audit`, `/litellm-usage`) load with live data.

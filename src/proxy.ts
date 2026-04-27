@@ -172,16 +172,21 @@ export function proxy(request: NextRequest) {
   }
 
   // Allow login, setup, auth API, docs, and container health probe without session.
-  // Also allow server-to-server ingest endpoints that perform their own bearer-token
-  // auth in the route handler (against MC_LITELLM_INGEST_TOKEN / MC_AUDIT_INGEST_TOKEN
-  // env vars). These endpoints exist for callbacks from upstream services (LiteLLM
-  // proxy, OAP audit pipeline) that authenticate via a shared secret rather than the
-  // session/API_KEY model the rest of the API uses; gating them here would block
-  // every legitimate inbound webhook because the caller has no session and no
-  // global API_KEY.
+  // Also allow `/api/litellm/usage` — a server-to-server ingest endpoint that
+  // performs its own bearer-token auth in the route handler against
+  // `MC_LITELLM_INGEST_TOKEN`. The endpoint exists for callbacks from the
+  // LiteLLM proxy's `generic_api` callback, which authenticates via a shared
+  // secret rather than the session/API_KEY model the rest of the API uses;
+  // gating it here would block every legitimate inbound webhook because the
+  // caller has no session and no global API_KEY. The route handler's
+  // `isValidToken()` is the actual auth boundary for this path.
   const isPublicHealthProbe = pathname === '/api/status' && request.nextUrl.searchParams.get('action') === 'health'
-  const isIngestEndpoint = pathname === '/api/litellm/usage' || pathname === '/api/oap/audit'
-  if (pathname === '/login' || pathname === '/setup' || pathname.startsWith('/api/auth/') || pathname === '/api/setup' || pathname === '/api/docs' || pathname === '/docs' || isPublicHealthProbe || isIngestEndpoint) {
+  // Trailing-slash normalization: Next.js typically routes `/x` and `/x/` to
+  // the same handler; mirror that for the bypass match so a stray slash from
+  // a callback URL doesn't produce a 401.
+  const normalizedPathname = pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname
+  const isLiteLLMIngest = normalizedPathname === '/api/litellm/usage'
+  if (pathname === '/login' || pathname === '/setup' || pathname.startsWith('/api/auth/') || pathname === '/api/setup' || pathname === '/api/docs' || pathname === '/docs' || isPublicHealthProbe || isLiteLLMIngest) {
     const { response, nonce } = nextResponseWithNonce(request)
     return addSecurityHeaders(response, request, nonce)
   }
