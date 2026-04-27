@@ -1,26 +1,8 @@
-import crypto from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase } from '@/lib/db'
 import { deriveAttribution } from '@/extensions/litellm/attribution'
 import { logger } from '@/lib/logger'
-
-const LITELLM_INGEST_TOKEN = process.env.MC_LITELLM_INGEST_TOKEN || process.env.MC_AUDIT_INGEST_TOKEN || ''
-
-/** Constant-time string compare. Returns false on length mismatch (matches src/proxy.ts safeCompare). */
-function safeCompare(a: string, b: string): boolean {
-  if (typeof a !== 'string' || typeof b !== 'string') return false
-  const bufA = Buffer.from(a)
-  const bufB = Buffer.from(b)
-  if (bufA.length !== bufB.length) return false
-  return crypto.timingSafeEqual(bufA, bufB)
-}
-
-function isValidToken(request: NextRequest): boolean {
-  if (!LITELLM_INGEST_TOKEN) return false
-  const auth = request.headers.get('authorization') || ''
-  if (auth.startsWith('Bearer ')) return safeCompare(auth.slice(7).trim(), LITELLM_INGEST_TOKEN)
-  return safeCompare((request.headers.get('x-mc-token') || '').trim(), LITELLM_INGEST_TOKEN)
-}
+import { LITELLM_INGEST_TOKEN, isValidToken } from '@/extensions/litellm/auth'
 
 /**
  * POST /api/litellm/usage — Ingest per-request usage records from LiteLLM callback
@@ -64,7 +46,12 @@ export async function POST(request: NextRequest) {
 
   let ingested = 0
   try {
-    for (const body of records) {
+    // Wrap multi-record inserts in a transaction for atomicity and performance.
+    // Without this, each stmt.run is an implicit transaction — N records = N fsync
+    // calls. With the explicit transaction, it's a single fsync at COMMIT.
+    // Tracked: stroupaloop/ender-stack#124
+    const insertAll = db.transaction((recs: any[]) => {
+    for (const body of recs) {
       if (!body || typeof body !== 'object') continue
 
       // StandardLoggingPayload fields
@@ -111,6 +98,8 @@ export async function POST(request: NextRequest) {
       )
       ingested++
     }
+    })
+    insertAll(records)
 
     return NextResponse.json({ ok: true, ingested })
   } catch (err: any) {
