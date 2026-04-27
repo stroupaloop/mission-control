@@ -12,6 +12,12 @@ name: GPT-5.5 PR Review (pr-agent)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'LICENSE'
+      - 'CHANGELOG'
   issue_comment:
     types: [created]  # don't fire on edit/delete
 
