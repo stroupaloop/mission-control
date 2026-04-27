@@ -22,6 +22,8 @@ export interface ScheduledTask {
 export interface PanelDescriptor {
   id: string
   label: string
-  groupId: 'operations' | 'observability' | 'admin'
+  // Must match the nav group ids in src/components/layout/nav-rail.tsx
+  // ('core', 'observe', 'automate', 'admin')
+  groupId: 'observe' | 'automate' | 'admin'
   icon?: string
 }
