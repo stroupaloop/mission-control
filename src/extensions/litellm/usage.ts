@@ -83,6 +83,7 @@ export interface CacheDailyRow {
   cache_read_tokens: number
   cache_write_tokens: number
   est_savings_usd: number
+  hit_rate?: number
 }
 
 export interface RecordsQueryParams {

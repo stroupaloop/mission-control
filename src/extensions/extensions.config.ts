@@ -115,8 +115,9 @@ const litellmExtension: ExtensionManifest = {
         const db = getDatabase()
         ensureLitellmUsageTable(db)
         ensureCacheDailyTable(db)
-      } catch {
-        // Non-fatal
+      } catch (err) {
+        // Non-fatal — but log so startup failures are visible in container logs
+        console.error('[litellm] startup hook failed:', err)
       }
     },
   ],
@@ -126,7 +127,9 @@ const litellmExtension: ExtensionManifest = {
       intervalMs: 5 * 60 * 1000,
       fn: async () => {
         const db = getDatabase()
-        rollupCacheMetrics(db)
+        const result = rollupCacheMetrics(db)
+        // Log result for visibility in container logs
+        console.info(`[litellm] cache rollup: ${result.rows_upserted} day/model rows upserted`)
       },
     },
   ],

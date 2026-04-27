@@ -27,10 +27,19 @@ export function ensureCacheDailyTable(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_litellm_cache_daily_day ON litellm_cache_daily(day)`)
+  // Partial index to speed up the rollup query — only rows with cache activity
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_litellm_usage_cache ON litellm_usage(created_at) WHERE cache_read_tokens > 0 OR cache_write_tokens > 0`)
 }
+
+// Roll up the last N days to avoid unbounded full-table scans as the table grows.
+// Historical data older than this is already in litellm_cache_daily and won't change.
+const ROLLUP_WINDOW_DAYS = 90
 
 export function rollupCacheMetrics(db: Database.Database): { rows_upserted: number } {
   ensureCacheDailyTable(db)
+
+  const cutoffDate = new Date(Date.now() - ROLLUP_WINDOW_DAYS * 86400 * 1000)
+    .toISOString().slice(0, 10)
 
   const rows = db.prepare(`
     SELECT
@@ -41,9 +50,10 @@ export function rollupCacheMetrics(db: Database.Database): { rows_upserted: numb
       COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
       COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens
     FROM litellm_usage
-    WHERE cache_read_tokens > 0 OR cache_write_tokens > 0
+    WHERE (cache_read_tokens > 0 OR cache_write_tokens > 0)
+      AND created_at >= unixepoch(?)
     GROUP BY day, COALESCE(model, 'unknown')
-  `).all() as any[]
+  `).all(cutoffDate) as any[]
 
   const stmt = db.prepare(`
     INSERT INTO litellm_cache_daily (day, model, calls, input_tokens, cache_read_tokens, cache_write_tokens, est_savings_usd, updated_at)
@@ -121,24 +131,34 @@ export function queryCacheDailySummary(db: Database.Database, window: CacheWindo
 
   const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0)
   const total_read = n(totalsRow?.cache_read_tokens)
-  const total_inp = n(totalsRow?.input_tokens)
+  const total_write = n(totalsRow?.cache_write_tokens)
+  // Hit rate = cache_read / (cache_read + cache_write).
+  // Using input_tokens as denominator would include uncached calls
+  // and can produce ratios > 1 when LiteLLM reports cache_read > prompt_tokens.
+  const cache_denominator = total_read + total_write
 
   return {
-    rows: rows.map(r => ({
-      day: String(r.day),
-      model: 'all',
-      calls: n(r.calls),
-      input_tokens: n(r.input_tokens),
-      cache_read_tokens: n(r.cache_read_tokens),
-      cache_write_tokens: n(r.cache_write_tokens),
-      est_savings_usd: n(r.est_savings_usd),
-    })),
+    rows: rows.map(r => {
+      const row_read = n(r.cache_read_tokens)
+      const row_write = n(r.cache_write_tokens)
+      const row_denom = row_read + row_write
+      return {
+        day: String(r.day),
+        model: 'all',
+        calls: n(r.calls),
+        input_tokens: n(r.input_tokens),
+        cache_read_tokens: row_read,
+        cache_write_tokens: row_write,
+        est_savings_usd: n(r.est_savings_usd),
+        hit_rate: row_denom > 0 ? row_read / row_denom : 0,
+      }
+    }),
     totals: {
       calls: n(totalsRow?.calls),
-      input_tokens: total_inp,
+      input_tokens: n(totalsRow?.input_tokens),
       cache_read_tokens: total_read,
-      cache_write_tokens: n(totalsRow?.cache_write_tokens),
-      hit_rate: total_inp > 0 ? total_read / total_inp : 0,
+      cache_write_tokens: total_write,
+      hit_rate: cache_denominator > 0 ? total_read / cache_denominator : 0,
       est_savings_usd: n(totalsRow?.est_savings_usd),
     },
   }

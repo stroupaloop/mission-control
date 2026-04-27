@@ -50,39 +50,8 @@ export async function POST(request: NextRequest) {
 
   const db = getDatabase()
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS litellm_usage (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      call_id TEXT,
-      call_type TEXT,
-      model TEXT,
-      model_id TEXT,
-      api_base TEXT,
-      user_id TEXT,
-      prompt_tokens INTEGER,
-      completion_tokens INTEGER,
-      total_tokens INTEGER,
-      response_cost REAL,
-      status TEXT,
-      cache_hit INTEGER DEFAULT 0,
-      cache_read_tokens INTEGER DEFAULT 0,
-      cache_write_tokens INTEGER DEFAULT 0,
-      start_time TEXT,
-      end_time TEXT,
-      latency_ms REAL,
-      metadata TEXT,
-      created_at INTEGER DEFAULT (unixepoch())
-    )
-  `)
-
-  // Migrate existing tables — add cache columns if missing
-  const existingCols = (db.prepare("PRAGMA table_info(litellm_usage)").all() as any[]).map((r: any) => r.name)
-  if (!existingCols.includes('cache_read_tokens')) {
-    db.exec('ALTER TABLE litellm_usage ADD COLUMN cache_read_tokens INTEGER DEFAULT 0')
-  }
-  if (!existingCols.includes('cache_write_tokens')) {
-    db.exec('ALTER TABLE litellm_usage ADD COLUMN cache_write_tokens INTEGER DEFAULT 0')
-  }
+  // Schema migration is handled at startup by ensureLitellmUsageTable (src/extensions/litellm/usage.ts)
+  // called via the litellm extension startupHook. No DDL here to avoid per-request overhead.
 
   const stmt = db.prepare(`
     INSERT INTO litellm_usage (

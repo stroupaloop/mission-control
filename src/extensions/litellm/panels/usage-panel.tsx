@@ -96,6 +96,7 @@ interface CacheDailyRow {
   cache_read_tokens: number
   cache_write_tokens: number
   est_savings_usd: number
+  hit_rate?: number
 }
 
 interface CacheResponse {
@@ -675,7 +676,8 @@ function CacheMetricsSection() {
     day: r.day.slice(5),  // 'MM-DD'
     reads: r.cache_read_tokens,
     writes: r.cache_write_tokens,
-    hit_pct: r.input_tokens > 0 ? (r.cache_read_tokens / r.input_tokens) * 100 : 0,
+    // hit_rate is cache_read / (cache_read + cache_write) — computed server-side
+    hit_pct: ((r.hit_rate ?? 0) * 100),
   }))
 
   return (
