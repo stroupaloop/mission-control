@@ -171,6 +171,12 @@ export function proxy(request: NextRequest) {
     }
   }
 
+  // ORDERING NOTE: this block must stay BELOW the CSRF Origin check above —
+  // the bypass passes the request through to the route handler, which means
+  // a cross-origin POST should still be blocked by CSRF before reaching here.
+  // If the bypass moves above the CSRF block, /api/litellm/usage POST becomes
+  // CSRF-unguarded.
+  //
   // Allow login, setup, auth API, docs, and container health probe without session.
   // Also allow POST `/api/litellm/usage` — a server-to-server ingest endpoint
   // that performs its own bearer-token auth in the route handler against
