@@ -56,7 +56,7 @@ const resolverExtension: ExtensionManifest = {
     {
       id: 'resolver-intelligence',
       label: 'Resolver Intelligence',
-      groupId: 'observability',
+      groupId: 'observe',
       icon: 'brain-circuit',
     },
   ],
@@ -105,7 +105,7 @@ const litellmExtension: ExtensionManifest = {
     {
       id: 'litellm-usage',
       label: 'LiteLLM Usage',
-      groupId: 'observability',
+      groupId: 'observe',
       icon: 'activity',
     },
   ],
@@ -148,13 +148,13 @@ const oapExtension: ExtensionManifest = {
     {
       id: 'oap-approvals',
       label: 'OAP Approvals',
-      groupId: 'operations',
+      groupId: 'observe',
       icon: 'shield-check',
     },
     {
       id: 'oap-audit',
       label: 'OAP Audit Trail',
-      groupId: 'observability',
+      groupId: 'observe',
       icon: 'file-clock',
     },
   ],

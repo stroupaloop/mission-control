@@ -32,7 +32,7 @@ export const clientExtensions: ClientExtensionManifest[] = [
       {
         id: 'resolver-intelligence',
         label: 'Resolver Intelligence',
-        groupId: 'observability',
+        groupId: 'observe',
         icon: 'brain-circuit',
       },
     ],
@@ -44,13 +44,13 @@ export const clientExtensions: ClientExtensionManifest[] = [
       {
         id: 'oap-approvals',
         label: 'OAP Approvals',
-        groupId: 'operations',
+        groupId: 'observe',
         icon: 'shield-check',
       },
       {
         id: 'oap-audit',
         label: 'OAP Audit Trail',
-        groupId: 'observability',
+        groupId: 'observe',
         icon: 'file-clock',
       },
     ],
@@ -62,7 +62,7 @@ export const clientExtensions: ClientExtensionManifest[] = [
       {
         id: 'litellm-usage',
         label: 'LiteLLM Usage',
-        groupId: 'observability',
+        groupId: 'observe',
         icon: 'activity',
       },
     ],
