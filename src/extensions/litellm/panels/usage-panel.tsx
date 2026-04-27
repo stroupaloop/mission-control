@@ -202,6 +202,14 @@ export function LitellmUsagePanel() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const [expandedId, setExpandedId] = useState<number | null>(null)
+  // Cache summary — fetched once at mount for the secondary stats row (30d window)
+  const [cacheData, setCacheData] = useState<CacheResponse | null>(null)
+  useEffect(() => {
+    fetch('/api/litellm/cache?window=30d')
+      .then(r => r.ok ? r.json() : null)
+      .then((d: CacheResponse | null) => { if (d) setCacheData(d) })
+      .catch(() => {})
+  }, [])
 
   const [modelSort, setModelSort] = useState<{ key: ModelSortKey; dir: SortDir }>({ key: 'cost_usd', dir: 'desc' })
   const [userSort, setUserSort] = useState<{ key: UserSortKey; dir: SortDir }>({ key: 'cost_usd', dir: 'desc' })
@@ -428,10 +436,24 @@ export function LitellmUsagePanel() {
 
           {/* Secondary stats */}
           {totals && (
-            <div className="grid gap-3 grid-cols-3">
+            <div className="grid gap-3 grid-cols-4">
+              {/* Use Anthropic prompt cache hit rate if available; fall back to LiteLLM semantic cache_hit_rate */}
               <MiniStat
-                label={tFallback(t, 'cacheHitRate', 'Cache Hit Rate')}
-                value={`${(totals.cache_hit_rate * 100).toFixed(1)}%`}
+                label="Prompt Cache Hit"
+                value={cacheData?.totals.hit_rate != null && (cacheData.totals.cache_read_tokens + cacheData.totals.cache_write_tokens) > 0
+                  ? `${(cacheData.totals.hit_rate * 100).toFixed(1)}%`
+                  : `${(totals.cache_hit_rate * 100).toFixed(1)}%`}
+                valueClass={(() => {
+                  const rate = cacheData?.totals.hit_rate ?? totals.cache_hit_rate
+                  return rate >= 0.7 ? 'text-green-400' : rate >= 0.4 ? 'text-yellow-400' : 'text-foreground'
+                })()}
+              />
+              <MiniStat
+                label="Est. Cache Savings"
+                value={cacheData?.totals.est_savings_usd != null
+                  ? `$${cacheData.totals.est_savings_usd.toFixed(2)}`
+                  : '—'}
+                valueClass="text-sky-400"
               />
               <MiniStat
                 label={tFallback(t, 'errorRate', 'Error Rate')}
