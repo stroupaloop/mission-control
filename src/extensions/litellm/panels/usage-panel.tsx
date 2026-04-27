@@ -438,8 +438,10 @@ export function LitellmUsagePanel() {
           {totals && (
             <div className="grid gap-3 grid-cols-4">
               {/* Use Anthropic prompt cache hit rate if available; fall back to LiteLLM semantic cache_hit_rate */}
+              {/* Cache stats are fixed to 30d — labelled explicitly to avoid confusion
+                  with the per-window stats (error rate, success rate) in the same row */}
               <MiniStat
-                label="Prompt Cache Hit"
+                label="Cache Hit (30d)"
                 value={cacheData?.totals.hit_rate != null && (cacheData.totals.cache_read_tokens + cacheData.totals.cache_write_tokens) > 0
                   ? `${(cacheData.totals.hit_rate * 100).toFixed(1)}%`
                   : `${(totals.cache_hit_rate * 100).toFixed(1)}%`}
@@ -449,7 +451,7 @@ export function LitellmUsagePanel() {
                 })()}
               />
               <MiniStat
-                label="Est. Cache Savings"
+                label="Cache Savings (30d)"
                 value={cacheData?.totals.est_savings_usd != null
                   ? `$${cacheData.totals.est_savings_usd.toFixed(2)}`
                   : '—'}
