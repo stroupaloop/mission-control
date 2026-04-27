@@ -97,6 +97,30 @@ pnpm mc events watch --types agent,task
 ### REST API
 OpenAPI spec: `openapi.json`. Interactive docs at `/docs` when running.
 
+## Branch & PR Workflow (AMS Fork)
+
+**Always `git fetch origin` before branching**, then branch from `origin/<starting-branch>` — not from a local ref that may be behind remote. The starting branch is typically `main` but can be any intended base (feature branch, release branch, etc.).
+
+```bash
+git fetch origin
+git checkout -b feat/my-feature origin/main   # ← origin/<starting-branch>, not local ref
+```
+
+Local branches drift as PRs merge. Always resolve to the remote ref explicitly so you start from the actual current state.
+
+If a branch falls behind after new commits land on the starting branch:
+
+```bash
+# Create a clean replacement branch from the current remote starting branch
+git fetch origin
+git checkout -b feat/my-feature-v2 origin/main   # or origin/<whatever the base is>
+git cherry-pick <sha1> <sha2> ...   # replay only your commits
+git push origin feat/my-feature-v2
+# Close the stale PR, open a fresh one from the new branch
+```
+
+Never rebase a branch that already has an open PR without first checking for conflict risk. Cherry-pick onto a fresh branch is safer and produces a clean diff.
+
 ## Common Pitfalls
 
 - **Standalone mode**: Use `node .next/standalone/server.js`, not `pnpm start` (which requires full `node_modules`)
