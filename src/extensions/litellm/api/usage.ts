@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase } from '@/lib/db'
 import { deriveAttribution } from '@/extensions/litellm/attribution'
@@ -5,11 +6,20 @@ import { logger } from '@/lib/logger'
 
 const LITELLM_INGEST_TOKEN = process.env.MC_LITELLM_INGEST_TOKEN || process.env.MC_AUDIT_INGEST_TOKEN || ''
 
+/** Constant-time string compare. Returns false on length mismatch (matches src/proxy.ts safeCompare). */
+function safeCompare(a: string, b: string): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const bufA = Buffer.from(a)
+  const bufB = Buffer.from(b)
+  if (bufA.length !== bufB.length) return false
+  return crypto.timingSafeEqual(bufA, bufB)
+}
+
 function isValidToken(request: NextRequest): boolean {
   if (!LITELLM_INGEST_TOKEN) return false
   const auth = request.headers.get('authorization') || ''
-  if (auth.startsWith('Bearer ')) return auth.slice(7).trim() === LITELLM_INGEST_TOKEN
-  return (request.headers.get('x-mc-token') || '').trim() === LITELLM_INGEST_TOKEN
+  if (auth.startsWith('Bearer ')) return safeCompare(auth.slice(7).trim(), LITELLM_INGEST_TOKEN)
+  return safeCompare((request.headers.get('x-mc-token') || '').trim(), LITELLM_INGEST_TOKEN)
 }
 
 /**

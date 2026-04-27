@@ -108,7 +108,7 @@ Per FORK.md procedure, with concrete contract:
 3. **Conflicts should appear in at most these files**:
    - `src/lib/db.ts` (extension mount line; resolve by keeping our line + upstream's changes)
    - `src/app/layout.tsx` (`<ClientBoot />` line; same)
-   - `src/proxy.ts` (allowlist for ingest endpoints; resolve by keeping our `isLiteLLMIngest` + bypass clause + upstream's other changes)
+   - `src/proxy.ts` (the public-paths allowlist block immediately below the CSRF Origin check — keep our ingest-bypass clauses + upstream's other changes; the variable names may evolve, find the block by its `isPublicHealthProbe` neighbor)
    - Anything under `src/extensions/` (only ours; no upstream changes)
 4. Anywhere else, conflicts are a sign that an extension grew tendrils outside the contract — investigate before resolving.
 5. `pnpm test`, then run the docker image and verify the four panel routes (`/resolver-intelligence`, `/oap-approvals`, `/oap-audit`, `/litellm-usage`) load with live data.
