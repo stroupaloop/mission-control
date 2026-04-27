@@ -171,9 +171,17 @@ export function proxy(request: NextRequest) {
     }
   }
 
-  // Allow login, setup, auth API, docs, and container health probe without session
+  // Allow login, setup, auth API, docs, and container health probe without session.
+  // Also allow server-to-server ingest endpoints that perform their own bearer-token
+  // auth in the route handler (against MC_LITELLM_INGEST_TOKEN / MC_AUDIT_INGEST_TOKEN
+  // env vars). These endpoints exist for callbacks from upstream services (LiteLLM
+  // proxy, OAP audit pipeline) that authenticate via a shared secret rather than the
+  // session/API_KEY model the rest of the API uses; gating them here would block
+  // every legitimate inbound webhook because the caller has no session and no
+  // global API_KEY.
   const isPublicHealthProbe = pathname === '/api/status' && request.nextUrl.searchParams.get('action') === 'health'
-  if (pathname === '/login' || pathname === '/setup' || pathname.startsWith('/api/auth/') || pathname === '/api/setup' || pathname === '/api/docs' || pathname === '/docs' || isPublicHealthProbe) {
+  const isIngestEndpoint = pathname === '/api/litellm/usage' || pathname === '/api/oap/audit'
+  if (pathname === '/login' || pathname === '/setup' || pathname.startsWith('/api/auth/') || pathname === '/api/setup' || pathname === '/api/docs' || pathname === '/docs' || isPublicHealthProbe || isIngestEndpoint) {
     const { response, nonce } = nextResponseWithNonce(request)
     return addSecurityHeaders(response, request, nonce)
   }
