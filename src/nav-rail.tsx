@@ -1,9 +1,10 @@
 'use client'
 
 import Image from 'next/image'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useMissionControl } from '@/store'
 import { Button } from '@/components/ui/button'
+import { getPluginNavItems } from '@/lib/plugins'
 
 interface NavItem {
   id: string
@@ -62,11 +63,29 @@ const navGroups: NavGroup[] = [
   },
 ]
 
-// Flat list for mobile bar
-const allNavItems = navGroups.flatMap(g => g.items)
+// Flat list for mobile bar (static only; plugin items appended at runtime)
+const staticNavItems = navGroups.flatMap(g => g.items)
 
 export function NavRail() {
   const { activeTab, setActiveTab, connection, sidebarExpanded, collapsedGroups, toggleSidebar, toggleGroup } = useMissionControl()
+
+  // Merge plugin-registered nav items into their declared groups.
+  // getPluginNavItems() is idempotent and side-effect-free.
+  const activeNavGroups = useMemo(() => {
+    const pluginItems = getPluginNavItems()
+    if (pluginItems.length === 0) return navGroups
+    return navGroups.map(group => {
+      const extras = pluginItems.filter(p => (p.groupId ?? 'observe') === group.id)
+      if (extras.length === 0) return group
+      return {
+        ...group,
+        items: [
+          ...group.items,
+          ...extras.map(p => ({ id: p.id, label: p.label, icon: null, priority: false })),
+        ],
+      }
+    })
+  }, [])
 
   // Keyboard shortcut: [ to toggle sidebar
   useEffect(() => {
@@ -121,7 +140,7 @@ export function NavRail() {
 
         {/* Nav groups */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden py-1">
-          {navGroups.map((group, groupIndex) => (
+          {activeNavGroups.map((group, groupIndex) => (
             <div key={group.id}>
               {/* Divider between groups (not before first) */}
               {groupIndex > 0 && (
@@ -195,7 +214,7 @@ export function NavRail() {
       {/* Mobile: Bottom tab bar (unchanged) */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-card/95 backdrop-blur-lg border-t border-border safe-area-bottom">
         <div className="flex items-center justify-around px-2 py-1">
-          {allNavItems.filter(i => i.priority).map((item) => (
+          {staticNavItems.filter(i => i.priority).map((item) => (
             <Button
               key={item.id}
               variant="ghost"
@@ -211,7 +230,7 @@ export function NavRail() {
             </Button>
           ))}
           {/* More menu for non-priority items */}
-          <MobileMoreMenu items={allNavItems.filter(i => !i.priority)} activeTab={activeTab} setActiveTab={setActiveTab} />
+          <MobileMoreMenu items={staticNavItems.filter(i => !i.priority)} activeTab={activeTab} setActiveTab={setActiveTab} />
         </div>
       </nav>
     </>
