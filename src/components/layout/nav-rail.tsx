@@ -189,6 +189,19 @@ export function NavRail() {
       })
       .filter((i): i is NavItem => i !== null)
   }
+  // Map icon name strings (from extension manifests) to SVG components.
+  // Falls back to PluginIcon for any unrecognised name.
+  function resolvePluginIcon(name: string | undefined): React.ReactNode {
+    if (!name) return <PluginIcon />
+    const map: Record<string, React.ReactNode> = {
+      'activity':      <MonitorIcon />,
+      'brain-circuit': <MemoryIcon />,
+      'shield-check':  <AuditIcon />,
+      'file-clock':    <AuditIcon />,
+    }
+    return map[name] ?? <PluginIcon />
+  }
+
   // Translate nav item labels and merge plugin items
   function translateItems(items: NavItem[]): NavItem[] {
     return items.map(item => ({
@@ -203,7 +216,7 @@ export function NavRail() {
       .map(pi => ({
         id: pi.id,
         label: pi.label,
-        icon: pi.icon ? <span>{pi.icon}</span> : <PluginIcon />,
+        icon: resolvePluginIcon(pi.icon),
         priority: false,
       } as NavItem))
     const items = translateItems(pluginItems.length > 0 ? [...g.items, ...pluginItems] : g.items)
