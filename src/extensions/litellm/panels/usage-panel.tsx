@@ -73,6 +73,8 @@ interface UsageRecord {
   latency_ms: number | null
   status: string | null
   cache_hit: number
+  cache_read_tokens: number | null
+  cache_write_tokens: number | null
   created_at: number
 }
 
@@ -550,6 +552,7 @@ export function LitellmUsagePanel() {
                     <th className="py-1.5 pr-2">{tFallback(t, 'colAgent', 'Agent')}</th>
                     <th className="py-1.5 pr-2 text-right">{tFallback(t, 'colPrompt', 'Prompt')}</th>
                     <th className="py-1.5 pr-2 text-right">{tFallback(t, 'colCompletion', 'Comp')}</th>
+                    <th className="py-1.5 pr-2 text-right" title="Cache reads / (cache reads + cache writes)">Cache</th>
                     <th className="py-1.5 pr-2 text-right">{tFallback(t, 'colCost', 'Cost')}</th>
                     <th className="py-1.5 pr-2 text-right">{tFallback(t, 'colLatency', 'Latency')}</th>
                     <th className="py-1.5 pr-2">{tFallback(t, 'colStatus', 'Status')}</th>
@@ -558,13 +561,13 @@ export function LitellmUsagePanel() {
                 <tbody>
                   {recordsLoading && records.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="py-4 text-center text-muted-foreground">
+                      <td colSpan={9} className="py-4 text-center text-muted-foreground">
                         {tFallback(t, 'loadingRecords', 'Loading…')}
                       </td>
                     </tr>
                   ) : records.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="py-4 text-center text-muted-foreground">
+                      <td colSpan={9} className="py-4 text-center text-muted-foreground">
                         {tFallback(t, 'emptyRecords', 'No calls match this filter.')}
                       </td>
                     </tr>
@@ -584,6 +587,24 @@ export function LitellmUsagePanel() {
                             <td className="py-1.5 pr-2 font-mono text-[11px]">{r.user_id || '—'}</td>
                             <td className="py-1.5 pr-2 text-right">{formatNumber(r.prompt_tokens || 0)}</td>
                             <td className="py-1.5 pr-2 text-right">{formatNumber(r.completion_tokens || 0)}</td>
+                            <td className="py-1.5 pr-2 text-right">
+                              {(() => {
+                                const cr = r.cache_read_tokens || 0
+                                const cw = r.cache_write_tokens || 0
+                                if (cr === 0 && cw === 0) return <span className="text-muted-foreground">—</span>
+                                const hitPct = cr + cw > 0 ? Math.round(cr / (cr + cw) * 100) : 0
+                                return (
+                                  <span className="inline-flex items-center gap-1">
+                                    <span>{formatNumber(cr)}</span>
+                                    <span className={`text-[10px] px-1 rounded-full ${
+                                      hitPct >= 70 ? 'bg-green-500/20 text-green-400'
+                                      : hitPct >= 40 ? 'bg-yellow-500/20 text-yellow-400'
+                                      : 'bg-muted text-muted-foreground'
+                                    }`}>{hitPct}%</span>
+                                  </span>
+                                )
+                              })()}
+                            </td>
                             <td className="py-1.5 pr-2 text-right">{formatCost(r.response_cost || 0)}</td>
                             <td className={`py-1.5 pr-2 text-right ${latencyColorClass(r.latency_ms || 0)}`}>
                               {formatLatency(r.latency_ms || 0)}
@@ -602,7 +623,7 @@ export function LitellmUsagePanel() {
                           </tr>
                           {isExpanded && (
                             <tr key={`${r.id}-exp`}>
-                              <td colSpan={8} className="bg-secondary/40 p-2">
+                              <td colSpan={9} className="bg-secondary/40 p-2">
                                 <pre className="text-[10px] font-mono whitespace-pre-wrap break-all">
                                   {JSON.stringify(r, null, 2)}
                                 </pre>
