@@ -86,6 +86,30 @@ interface RecordsResponse {
 type ModelSortKey = 'cost_usd' | 'calls' | 'avg_latency_ms' | 'total_tokens'
 type UserSortKey = 'cost_usd' | 'calls' | 'total_tokens'
 type SortDir = 'asc' | 'desc'
+type CacheWindow2 = '7d' | '30d' | 'all'
+
+interface CacheDailyRow {
+  day: string
+  model: string
+  calls: number
+  input_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  est_savings_usd: number
+  hit_rate?: number
+}
+
+interface CacheResponse {
+  rows: CacheDailyRow[]
+  totals: {
+    calls: number
+    input_tokens: number
+    cache_read_tokens: number
+    cache_write_tokens: number
+    hit_rate: number
+    est_savings_usd: number
+  }
+}
 
 // ---------- Helpers ----------
 
@@ -492,6 +516,9 @@ export function LitellmUsagePanel() {
             />
           </div>
 
+          {/* Cache metrics */}
+          <CacheMetricsSection />
+
           {/* Recent calls */}
           <div className="rounded-lg border border-border bg-card p-3">
             <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -618,6 +645,131 @@ export function LitellmUsagePanel() {
             )}
           </div>
         </>
+      )}
+    </div>
+  )
+}
+
+// ---------- Cache metrics section ----------
+
+function CacheMetricsSection() {
+  const [cacheData, setCacheData] = useState<CacheResponse | null>(null)
+  const [cacheLoading, setCacheLoading] = useState(true)
+  const [cacheError, setCacheError] = useState<string | null>(null)
+  const [cacheWindow, setCacheWindow] = useState<CacheWindow2>('30d')
+
+  useEffect(() => {
+    setCacheLoading(true)
+    setCacheError(null)
+    fetch(`/api/litellm/cache?window=${cacheWindow}`)
+      .then(r => {
+        if (!r.ok) return r.json().then(d => { throw new Error(d.error || `HTTP ${r.status}`) })
+        return r.json()
+      })
+      .then((d: CacheResponse) => setCacheData(d))
+      .catch(e => setCacheError(e?.message || 'Failed to load cache data'))
+      .finally(() => setCacheLoading(false))
+  }, [cacheWindow])
+
+  const totals = cacheData?.totals
+  const chartData = (cacheData?.rows ?? []).map(r => ({
+    day: r.day.slice(5),  // 'MM-DD'
+    reads: r.cache_read_tokens,
+    writes: r.cache_write_tokens,
+    // hit_rate is cache_read / (cache_read + cache_write) — computed server-side
+    hit_pct: ((r.hit_rate ?? 0) * 100),
+  }))
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-3 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs text-muted-foreground font-medium">Anthropic Cache Performance</div>
+        <div className="flex gap-1">
+          {(['7d', '30d', 'all'] as CacheWindow2[]).map(w => (
+            <button
+              key={w}
+              onClick={() => setCacheWindow(w)}
+              className={`px-2 py-0.5 text-[10px] rounded uppercase transition-colors ${
+                cacheWindow === w
+                  ? 'bg-secondary text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {w}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {cacheError && (
+        <div className="text-xs text-red-400">{cacheError}</div>
+      )}
+
+      {cacheLoading && !cacheData ? (
+        <div className="h-24 rounded bg-secondary/40 animate-pulse" />
+      ) : totals ? (
+        <>
+          <div className="grid gap-2 grid-cols-2 md:grid-cols-4">
+            <StatCard
+              label="Hit Rate"
+              value={`${((totals.hit_rate ?? 0) * 100).toFixed(1)}%`}
+              valueClass="text-blue-400"
+            />
+            <StatCard
+              label="Est. Savings"
+              value={`$${(totals.est_savings_usd ?? 0).toFixed(4)}`}
+              valueClass="text-green-400"
+            />
+            <StatCard
+              label="Cache Reads"
+              value={`${((totals.cache_read_tokens ?? 0) / 1_000_000).toFixed(2)}M`}
+            />
+            <StatCard
+              label="Cache Writes"
+              value={`${((totals.cache_write_tokens ?? 0) / 1_000_000).toFixed(2)}M`}
+              valueClass="text-amber-400"
+            />
+          </div>
+
+          {chartData.length > 0 && (
+            <div className="h-48">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                  <XAxis dataKey="day" tick={{ fontSize: 9, fill: 'rgb(148 163 184)' }} />
+                  <YAxis
+                    yAxisId="left"
+                    tick={{ fontSize: 9, fill: 'rgb(148 163 184)' }}
+                    tickFormatter={(v: number) => `${(v / 1_000).toFixed(0)}K`}
+                  />
+                  <YAxis
+                    yAxisId="right"
+                    orientation="right"
+                    tick={{ fontSize: 9, fill: 'rgb(148 163 184)' }}
+                    tickFormatter={(v: number) => `${v.toFixed(0)}%`}
+                  />
+                  <Tooltip
+                    contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', fontSize: 11 }}
+                    labelStyle={{ color: 'hsl(var(--foreground))' }}
+                  />
+                  <Bar yAxisId="left" dataKey="reads" name="cache reads" fill="#38bdf8" stackId="a" />
+                  <Bar yAxisId="left" dataKey="writes" name="cache writes" fill="#f59e0b" stackId="a" />
+                  <Line
+                    yAxisId="right"
+                    type="monotone"
+                    dataKey="hit_pct"
+                    name="hit rate %"
+                    stroke="#4ade80"
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="text-xs text-muted-foreground py-4 text-center">No cache data for this window.</div>
       )}
     </div>
   )

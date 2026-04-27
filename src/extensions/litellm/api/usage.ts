@@ -50,35 +50,16 @@ export async function POST(request: NextRequest) {
 
   const db = getDatabase()
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS litellm_usage (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      call_id TEXT,
-      call_type TEXT,
-      model TEXT,
-      model_id TEXT,
-      api_base TEXT,
-      user_id TEXT,
-      prompt_tokens INTEGER,
-      completion_tokens INTEGER,
-      total_tokens INTEGER,
-      response_cost REAL,
-      status TEXT,
-      cache_hit INTEGER DEFAULT 0,
-      start_time TEXT,
-      end_time TEXT,
-      latency_ms REAL,
-      metadata TEXT,
-      created_at INTEGER DEFAULT (unixepoch())
-    )
-  `)
+  // Schema migration is handled at startup by ensureLitellmUsageTable (src/extensions/litellm/usage.ts)
+  // called via the litellm extension startupHook. No DDL here to avoid per-request overhead.
 
   const stmt = db.prepare(`
     INSERT INTO litellm_usage (
       call_id, call_type, model, model_id, api_base, user_id,
       prompt_tokens, completion_tokens, total_tokens, response_cost,
-      status, cache_hit, start_time, end_time, latency_ms, metadata
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      status, cache_hit, cache_read_tokens, cache_write_tokens,
+      start_time, end_time, latency_ms, metadata
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
 
   let ingested = 0
@@ -103,6 +84,11 @@ export async function POST(request: NextRequest) {
 
       const attribution = deriveAttribution({ user: body.user, metadata: body.metadata })
 
+      // Anthropic cache tokens (sent by openclaw_cache_split callback in metadata)
+      const metaObj = typeof body.metadata === 'object' && body.metadata !== null ? body.metadata : {}
+      const cacheReadTokens: number = typeof metaObj.cache_read_tokens === 'number' ? metaObj.cache_read_tokens : 0
+      const cacheWriteTokens: number = typeof metaObj.cache_write_tokens === 'number' ? metaObj.cache_write_tokens : 0
+
       stmt.run(
         body.id || body.litellm_call_id || null,
         body.call_type || 'completion',
@@ -116,6 +102,8 @@ export async function POST(request: NextRequest) {
         cost,
         body.status || (body.call_type?.includes('failure') ? 'failure' : 'success'),
         body.cache_hit ? 1 : 0,
+        cacheReadTokens,
+        cacheWriteTokens,
         startTime,
         endTime,
         latencyMs,
