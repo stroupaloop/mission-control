@@ -66,11 +66,23 @@ export interface UsageRecord {
   response_cost: number | null
   status: string | null
   cache_hit: number
+  cache_read_tokens?: number
+  cache_write_tokens?: number
   start_time: string | null
   end_time: string | null
   latency_ms: number | null
   metadata: string | null
   created_at: number
+}
+
+export interface CacheDailyRow {
+  day: string
+  model: string
+  calls: number
+  input_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  est_savings_usd: number
 }
 
 export interface RecordsQueryParams {
@@ -145,6 +157,8 @@ export function ensureLitellmUsageTable(db: Database.Database): void {
       response_cost REAL,
       status TEXT,
       cache_hit INTEGER DEFAULT 0,
+      cache_read_tokens INTEGER DEFAULT 0,
+      cache_write_tokens INTEGER DEFAULT 0,
       start_time TEXT,
       end_time TEXT,
       latency_ms REAL,
@@ -152,6 +166,15 @@ export function ensureLitellmUsageTable(db: Database.Database): void {
       created_at INTEGER DEFAULT (unixepoch())
     )
   `)
+
+  // Migrate existing tables — add cache columns if missing
+  const existingCols = (db.prepare("PRAGMA table_info(litellm_usage)").all() as any[]).map((r: any) => r.name)
+  if (!existingCols.includes('cache_read_tokens')) {
+    db.exec('ALTER TABLE litellm_usage ADD COLUMN cache_read_tokens INTEGER DEFAULT 0')
+  }
+  if (!existingCols.includes('cache_write_tokens')) {
+    db.exec('ALTER TABLE litellm_usage ADD COLUMN cache_write_tokens INTEGER DEFAULT 0')
+  }
 }
 
 function emptyTotals(): UsageTotals {
