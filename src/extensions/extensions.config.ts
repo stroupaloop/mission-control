@@ -36,6 +36,8 @@ export interface ExtensionManifest {
 
 import { ingestResolverTelemetry, rebuildResolverDailyMetrics, ensureResolverTables } from './resolver/telemetry'
 import { getDatabase } from '@/lib/db'
+import { ensureCacheDailyTable, rollupCacheMetrics } from './litellm/cache-metrics'
+import { ensureLitellmUsageTable } from './litellm/usage'
 
 const RESOLVER_TICK_MS = 60 * 1000 // 60s — tail JSONL every minute
 const RESOLVER_ROLLUP_MS = 5 * 60 * 1000 // 5min — rebuild daily metrics
@@ -97,6 +99,7 @@ const litellmExtension: ExtensionManifest = {
     { path: '/litellm/usage/summary', methods: ['GET'] },
     { path: '/litellm/dashboard/records', methods: ['GET'] },
     { path: '/litellm/dashboard/summary', methods: ['GET'] },
+    { path: '/litellm/cache', methods: ['GET'] },
   ],
   panels: [
     {
@@ -104,6 +107,27 @@ const litellmExtension: ExtensionManifest = {
       label: 'LiteLLM Usage',
       groupId: 'observability',
       icon: 'activity',
+    },
+  ],
+  startupHooks: [
+    () => {
+      try {
+        const db = getDatabase()
+        ensureLitellmUsageTable(db)
+        ensureCacheDailyTable(db)
+      } catch {
+        // Non-fatal
+      }
+    },
+  ],
+  scheduledTasks: [
+    {
+      name: 'litellm_cache_rollup',
+      intervalMs: 5 * 60 * 1000,
+      fn: async () => {
+        const db = getDatabase()
+        rollupCacheMetrics(db)
+      },
     },
   ],
 }
