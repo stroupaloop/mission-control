@@ -171,9 +171,33 @@ export function proxy(request: NextRequest) {
     }
   }
 
-  // Allow login, setup, auth API, docs, and container health probe without session
+  // ORDERING NOTE: this block must stay BELOW the CSRF Origin check above —
+  // the bypass passes the request through to the route handler, which means
+  // a cross-origin POST should still be blocked by CSRF before reaching here.
+  // If the bypass moves above the CSRF block, /api/litellm/usage POST becomes
+  // CSRF-unguarded.
+  //
+  // Allow login, setup, auth API, docs, and container health probe without session.
+  // Also allow POST `/api/litellm/usage` — a server-to-server ingest endpoint
+  // that performs its own bearer-token auth in the route handler against
+  // `MC_LITELLM_INGEST_TOKEN`. The endpoint exists for callbacks from the
+  // LiteLLM proxy's `generic_api` callback, which authenticates via a shared
+  // secret rather than the session/API_KEY model the rest of the API uses;
+  // gating it here would block every legitimate inbound webhook because the
+  // caller has no session and no global API_KEY. The route handler's
+  // `isValidToken()` is the actual auth boundary for the POST path.
+  //
+  // Bypass is gated on `request.method === 'POST'` so the GET handler on the
+  // same path (which returns the full `litellm_usage` table on a token-auth
+  // basis) still requires session/API_KEY at the proxy layer — the bearer
+  // token alone shouldn't be sufficient to read all usage records.
   const isPublicHealthProbe = pathname === '/api/status' && request.nextUrl.searchParams.get('action') === 'health'
-  if (pathname === '/login' || pathname === '/setup' || pathname.startsWith('/api/auth/') || pathname === '/api/setup' || pathname === '/api/docs' || pathname === '/docs' || isPublicHealthProbe) {
+  // Trailing-slash normalization: Next.js typically routes `/x` and `/x/` to
+  // the same handler; mirror that for the bypass match so a stray slash from
+  // a callback URL doesn't produce a 401.
+  const normalizedPathname = pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname
+  const isLiteLLMIngest = method === 'POST' && normalizedPathname === '/api/litellm/usage'
+  if (pathname === '/login' || pathname === '/setup' || pathname.startsWith('/api/auth/') || pathname === '/api/setup' || pathname === '/api/docs' || pathname === '/docs' || isPublicHealthProbe || isLiteLLMIngest) {
     const { response, nonce } = nextResponseWithNonce(request)
     return addSecurityHeaders(response, request, nonce)
   }

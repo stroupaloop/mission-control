@@ -5,10 +5,13 @@
 ## Hard Rules
 
 1. **NEVER open a PR to `builderz-labs/mission-control`** from this fork. Not a single line. Not "just a typo fix." Not anything.
-2. **All customizations live in `src/extensions/`.** Only two upstream files may be touched:
+2. **All customizations live in `src/extensions/`.** Only three upstream files may be touched:
    - `src/lib/db.ts` — to call `mountExtensions()`
    - `src/app/layout.tsx` — to render `<ClientBoot />`
+   - `src/proxy.ts` — to allowlist server-to-server ingest endpoints (`/api/litellm/usage`) that authenticate via per-route bearer tokens instead of the session/API_KEY model
    Any change outside these paths requires explicit owner approval.
+
+   **Long-term direction for `src/proxy.ts`:** the public-paths allowlist should be derived from `loadExtensionManifest()` (e.g. a `bypassProxyAuth?: string[]` field per extension) so adding new ingest endpoints stays inside `src/extensions/`. Until that hook exists, the touch is owner-approved on a case-by-case basis.
 3. **Workflows in `.github/workflows/` guard with `if: github.repository == 'stroupaloop/mission-control'`** so they no-op if the file ever leaks upstream.
 4. **Docker images push only to `ghcr.io/stroupaloop/mission-control`.** Never to `builderz-labs` or any public namespace.
 
