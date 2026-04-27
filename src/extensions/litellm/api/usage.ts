@@ -55,6 +55,8 @@ export async function POST(request: NextRequest) {
       response_cost REAL,
       status TEXT,
       cache_hit INTEGER DEFAULT 0,
+      cache_read_tokens INTEGER DEFAULT 0,
+      cache_write_tokens INTEGER DEFAULT 0,
       start_time TEXT,
       end_time TEXT,
       latency_ms REAL,
@@ -63,12 +65,22 @@ export async function POST(request: NextRequest) {
     )
   `)
 
+  // Migrate existing tables — add cache columns if missing
+  const existingCols = (db.prepare("PRAGMA table_info(litellm_usage)").all() as any[]).map((r: any) => r.name)
+  if (!existingCols.includes('cache_read_tokens')) {
+    db.exec('ALTER TABLE litellm_usage ADD COLUMN cache_read_tokens INTEGER DEFAULT 0')
+  }
+  if (!existingCols.includes('cache_write_tokens')) {
+    db.exec('ALTER TABLE litellm_usage ADD COLUMN cache_write_tokens INTEGER DEFAULT 0')
+  }
+
   const stmt = db.prepare(`
     INSERT INTO litellm_usage (
       call_id, call_type, model, model_id, api_base, user_id,
       prompt_tokens, completion_tokens, total_tokens, response_cost,
-      status, cache_hit, start_time, end_time, latency_ms, metadata
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      status, cache_hit, cache_read_tokens, cache_write_tokens,
+      start_time, end_time, latency_ms, metadata
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
 
   let ingested = 0
@@ -93,6 +105,11 @@ export async function POST(request: NextRequest) {
 
       const attribution = deriveAttribution({ user: body.user, metadata: body.metadata })
 
+      // Anthropic cache tokens (sent by openclaw_cache_split callback in metadata)
+      const metaObj = typeof body.metadata === 'object' && body.metadata !== null ? body.metadata : {}
+      const cacheReadTokens: number = typeof metaObj.cache_read_tokens === 'number' ? metaObj.cache_read_tokens : 0
+      const cacheWriteTokens: number = typeof metaObj.cache_write_tokens === 'number' ? metaObj.cache_write_tokens : 0
+
       stmt.run(
         body.id || body.litellm_call_id || null,
         body.call_type || 'completion',
@@ -106,6 +123,8 @@ export async function POST(request: NextRequest) {
         cost,
         body.status || (body.call_type?.includes('failure') ? 'failure' : 'success'),
         body.cache_hit ? 1 : 0,
+        cacheReadTokens,
+        cacheWriteTokens,
         startTime,
         endTime,
         latencyMs,
