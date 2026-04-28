@@ -113,11 +113,19 @@ export function queryCacheDailySummary(db: Database.Database, window: CacheWindo
 } {
   ensureCacheDailyTable(db)
 
-  const since = window === 'all' ? null
+  // Window bounds. Both the cache-daily numerator and the workload denominator
+  // MUST anchor to the same UTC-midnight boundary, otherwise the daily query
+  // (truncated to YYYY-MM-DD) covers up to 24h more than the workload query
+  // (exact seconds), which inflates effective_hit_rate by ~3% on 30d / ~14% on 7d.
+  // Fix: derive sinceUnix from the same UTC midnight as sinceDate so both queries
+  // start at the same moment.
+  const rawSince = window === 'all' ? null
     : window === '7d' ? Math.floor(Date.now() / 1000) - 7 * 86400
     : Math.floor(Date.now() / 1000) - 30 * 86400
 
-  const sinceDate = since ? new Date(since * 1000).toISOString().slice(0, 10) : null
+  const sinceDate = rawSince ? new Date(rawSince * 1000).toISOString().slice(0, 10) : null
+  // Re-derive sinceUnix from sinceDate so both queries share the same UTC midnight anchor.
+  const since = sinceDate ? Math.floor(new Date(sinceDate + 'T00:00:00Z').getTime() / 1000) : null
   const whereClause = sinceDate ? `WHERE day >= ?` : ''
   const whereParams: any[] = sinceDate ? [sinceDate] : []
 
