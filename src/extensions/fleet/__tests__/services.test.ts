@@ -215,28 +215,42 @@ describe('GET /api/fleet/services', () => {
     expect(body.services[0].taskDefinition).not.toContain('arn:aws')
   })
 
-  it('logs DescribeServices.failures via logger.warn', async () => {
+  it('logs DescribeServices.failures via logger.warn AND returns surviving services', async () => {
+    // TOCTOU window: ListServices returned both ARNs, but by the time
+    // DescribeServices ran, svc-deleted was gone. The handler should log
+    // the failure AND continue to surface the surviving service in the
+    // response body (not 502).
     const { logger } = await import('@/lib/logger')
     const warnSpy = vi.mocked(logger.warn)
     warnSpy.mockClear()
 
     sendMock.mockResolvedValueOnce({
       serviceArns: [
-        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-1',
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-alive',
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-deleted',
       ],
     })
     sendMock.mockResolvedValueOnce({
-      services: [],
+      services: [
+        {
+          serviceArn:
+            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-alive',
+          serviceName: 'svc-alive',
+          status: 'ACTIVE',
+          deployments: [],
+        },
+      ],
       failures: [
         {
-          arn: 'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-1',
+          arn: 'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-deleted',
           reason: 'MISSING',
         },
       ],
     })
 
     const GET = await importHandler()
-    await GET(mkRequest())
+    const resp = await GET(mkRequest())
+    const body = await resp.json()
 
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -246,6 +260,10 @@ describe('GET /api/fleet/services', () => {
       }),
       expect.stringContaining('DescribeServices reported per-ARN failures'),
     )
+    // Surviving service still surfaces — partial failure ≠ 502
+    expect(resp.status).toBe(200)
+    expect(body.services).toHaveLength(1)
+    expect(body.services[0].name).toBe('svc-alive')
   })
 
   it('does NOT mark truncated when AWS returns no nextToken (boundary case)', async () => {
