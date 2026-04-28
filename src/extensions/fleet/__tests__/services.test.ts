@@ -36,9 +36,10 @@ const importHandler = async () => {
   return mod.GET
 }
 
-// Minimal NextRequest stub — the handler never reads it (auth is stubbed).
-const mkRequest = () =>
-  ({ url: 'http://localhost/api/fleet/services' }) as unknown as Parameters<
+// Minimal NextRequest stub. Handler reads `url` to parse query params for
+// the optional `?harness=true` filter.
+const mkRequest = (search = '') =>
+  ({ url: `http://localhost/api/fleet/services${search}` }) as unknown as Parameters<
     Awaited<ReturnType<typeof importHandler>>
   >[0]
 
@@ -304,6 +305,109 @@ describe('GET /api/fleet/services', () => {
 
     expect(resp.status).toBe(200)
     expect(body.truncated).toBe(true)
+  })
+})
+
+describe('GET /api/fleet/services — ?harness filter', () => {
+  it('returns all services when ?harness is absent', async () => {
+    sendMock.mockResolvedValueOnce({
+      serviceArns: [
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw-svc',
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
+      ],
+    })
+    sendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn:
+            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw-svc',
+          serviceName: 'openclaw-svc',
+          status: 'ACTIVE',
+          deployments: [],
+          tags: [{ key: 'Component', value: 'agent-harness' }],
+        },
+        {
+          serviceArn:
+            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
+          serviceName: 'litellm',
+          status: 'ACTIVE',
+          deployments: [],
+          tags: [{ key: 'Component', value: 'platform-service' }],
+        },
+      ],
+    })
+
+    const GET = await importHandler()
+    const resp = await GET(mkRequest())
+    const body = await resp.json()
+
+    expect(resp.status).toBe(200)
+    expect(body.services).toHaveLength(2)
+  })
+
+  it('filters to Component=agent-harness when ?harness=true', async () => {
+    sendMock.mockResolvedValueOnce({
+      serviceArns: [
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw-svc',
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/untagged-svc',
+      ],
+    })
+    sendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn:
+            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw-svc',
+          serviceName: 'openclaw-svc',
+          status: 'ACTIVE',
+          deployments: [],
+          tags: [
+            { key: 'Project', value: 'ender-stack' },
+            { key: 'Component', value: 'agent-harness' },
+          ],
+        },
+        {
+          serviceArn:
+            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
+          serviceName: 'litellm',
+          status: 'ACTIVE',
+          deployments: [],
+          tags: [{ key: 'Component', value: 'platform-service' }],
+        },
+        {
+          serviceArn:
+            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/untagged-svc',
+          serviceName: 'untagged-svc',
+          status: 'ACTIVE',
+          deployments: [],
+          // No tags array — filter must skip rather than crash
+        },
+      ],
+    })
+
+    const GET = await importHandler()
+    const resp = await GET(mkRequest('?harness=true'))
+    const body = await resp.json()
+
+    expect(resp.status).toBe(200)
+    expect(body.services).toHaveLength(1)
+    expect(body.services[0].name).toBe('openclaw-svc')
+  })
+
+  it('passes include:[TAGS] to DescribeServices so tags are returned', async () => {
+    sendMock.mockResolvedValueOnce({
+      serviceArns: [
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-1',
+      ],
+    })
+    sendMock.mockResolvedValueOnce({ services: [] })
+
+    const GET = await importHandler()
+    await GET(mkRequest())
+
+    // Second send call is DescribeServices; assert it carried include:['TAGS']
+    const describeCall = sendMock.mock.calls[1][0]
+    expect(describeCall.input.include).toEqual(['TAGS'])
   })
 })
 

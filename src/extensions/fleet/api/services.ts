@@ -108,11 +108,35 @@ function summarizeService(service: Service): FleetServiceSummary {
   }
 }
 
+// Tag-based filter for the optional `?harness=true` query param. Services
+// must carry `Component=agent-harness` to pass — the convention applied to
+// companion/openclaw + worker/hermes Terraform modules. Platform services
+// (mission-control, litellm, langfuse, mem0) are tagged
+// `Component=platform-service` and excluded by this filter.
+const HARNESS_TAG_KEY = 'Component'
+const HARNESS_TAG_VALUE = 'agent-harness'
+
+function isAgentHarness(service: Service): boolean {
+  return (
+    service.tags?.some(
+      (t) => t.key === HARNESS_TAG_KEY && t.value === HARNESS_TAG_VALUE,
+    ) ?? false
+  )
+}
+
 export async function GET(request: NextRequest) {
   const auth = requireRole(request, 'viewer')
   if ('error' in auth) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })
   }
+
+  // `?harness=true` (or `harness=1`) → filter to agent-harness-tagged services
+  // only. Default = unfiltered (all services in the cluster, including
+  // platform services like MC + LiteLLM).
+  const url = new URL(request.url)
+  const harnessOnly =
+    url.searchParams.get('harness') === 'true' ||
+    url.searchParams.get('harness') === '1'
 
   try {
     const listResp = await ecsClient.send(
@@ -142,7 +166,9 @@ export async function GET(request: NextRequest) {
 
     // DescribeServices caps at 10 ARNs per call. Chunk and run in parallel —
     // 10 chunks worst-case (LIST_SERVICES_MAX_RESULTS=100) collapse from
-    // 10 serial RTTs to 1.
+    // 10 serial RTTs to 1. `include: ['TAGS']` is required to receive the
+    // tag array — without it the field is absent and the harness filter
+    // would always return zero results.
     const chunks: string[][] = []
     for (let i = 0; i < arns.length; i += MAX_SERVICES_PER_DESCRIBE) {
       chunks.push(arns.slice(i, i + MAX_SERVICES_PER_DESCRIBE))
@@ -154,6 +180,7 @@ export async function GET(request: NextRequest) {
           new DescribeServicesCommand({
             cluster: CLUSTER_NAME,
             services: chunk,
+            include: ['TAGS'],
           }),
         ),
       ),
@@ -177,11 +204,13 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    const filtered = harnessOnly ? all.filter(isAgentHarness) : all
+
     return NextResponse.json(
       {
         cluster: CLUSTER_NAME,
         region: AWS_REGION,
-        services: all.map(summarizeService),
+        services: filtered.map(summarizeService),
         truncated,
       },
       { headers: { 'Cache-Control': 'no-store' } },

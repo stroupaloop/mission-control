@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { FleetPanel } from '../panels/fleet-panel'
 
 // Use vitest's globalThis.fetch mocking pattern (matches MC fork's litellm
@@ -103,8 +103,45 @@ describe('<FleetPanel />', () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(/No agents currently deployed in/),
+        screen.getByText(/No services in/),
       ).toBeInTheDocument(),
+    )
+  })
+
+  it('passes ?harness=true on the fetch when the toggle is on', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            cluster: 'ender-stack-dev',
+            region: 'us-east-1',
+            services: [],
+            truncated: false,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ) as unknown as Response,
+      )
+
+    render(<FleetPanel />)
+
+    // First load — toggle off, no query string
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/fleet/services')
+
+    // Click the harness-only checkbox; wrap in act() so the resulting
+    // useEffect-driven refetch flushes before assertion.
+    const checkbox = screen.getByLabelText(/Agent harnesses only/)
+    await act(async () => {
+      checkbox.click()
+    })
+
+    await waitFor(() =>
+      expect(
+        fetchSpy.mock.calls.some(
+          (c) => c[0] === '/api/fleet/services?harness=true',
+        ),
+      ).toBe(true),
     )
   })
 
