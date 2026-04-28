@@ -394,6 +394,49 @@ describe('GET /api/fleet/services — ?harness filter', () => {
     expect(body.services[0].name).toBe('openclaw-svc')
   })
 
+  it.each(['1', 'false', 'TRUE', 'yes', 'on'])(
+    'treats ?harness=%s as unfiltered (only literal "true" filters)',
+    async (val) => {
+      // Strict `=== 'true'` semantics — anything other than the literal
+      // canonical value passes through as unfiltered. Guards against a
+      // future refactor introducing broader truthiness (e.g., a Boolean
+      // coercion) which would silently change API behavior.
+      sendMock.mockResolvedValueOnce({
+        serviceArns: [
+          'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw',
+          'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
+        ],
+      })
+      sendMock.mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn:
+              'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw',
+            serviceName: 'openclaw',
+            status: 'ACTIVE',
+            deployments: [],
+            tags: [{ key: 'Component', value: 'agent-harness' }],
+          },
+          {
+            serviceArn:
+              'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
+            serviceName: 'litellm',
+            status: 'ACTIVE',
+            deployments: [],
+            tags: [{ key: 'Component', value: 'platform-service' }],
+          },
+        ],
+      })
+
+      const GET = await importHandler()
+      const resp = await GET(mkRequest(`?harness=${val}`))
+      const body = await resp.json()
+
+      expect(resp.status).toBe(200)
+      expect(body.services).toHaveLength(2)
+    },
+  )
+
   it('passes include:[TAGS] to DescribeServices so tags are returned', async () => {
     sendMock.mockResolvedValueOnce({
       serviceArns: [
