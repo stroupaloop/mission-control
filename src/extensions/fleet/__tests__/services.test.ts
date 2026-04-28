@@ -159,7 +159,7 @@ describe('GET /api/fleet/services', () => {
         desiredCount: 1,
         runningCount: 1,
         pendingCount: 0,
-        deployments: [{}],
+        deployments: [{ rolloutState: 'COMPLETED' }],
       })),
     })
     sendMock.mockResolvedValueOnce({
@@ -170,7 +170,7 @@ describe('GET /api/fleet/services', () => {
         desiredCount: 1,
         runningCount: 1,
         pendingCount: 0,
-        deployments: [{}],
+        deployments: [{ rolloutState: 'COMPLETED' }],
       })),
     })
 
@@ -180,8 +180,72 @@ describe('GET /api/fleet/services', () => {
 
     expect(resp.status).toBe(200)
     expect(body.services).toHaveLength(12)
-    // 1 ListServices + 2 DescribeServices = 3 SDK calls
+    // 1 ListServices + 2 DescribeServices (run in parallel via Promise.all)
+    // = 3 SDK calls.
     expect(sendMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('strips the account-id-bearing prefix from the task-definition ARN', async () => {
+    sendMock.mockResolvedValueOnce({
+      serviceArns: [
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc',
+      ],
+    })
+    sendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn:
+            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc',
+          serviceName: 'svc',
+          status: 'ACTIVE',
+          taskDefinition:
+            'arn:aws:ecs:us-east-1:111122223333:task-definition/ender-stack-dev-svc:7',
+          deployments: [],
+        },
+      ],
+    })
+
+    const GET = await importHandler()
+    const resp = await GET(mkRequest())
+    const body = await resp.json()
+
+    // Should be just `family:revision`, NOT the full ARN
+    expect(body.services[0].taskDefinition).toBe('ender-stack-dev-svc:7')
+    expect(body.services[0].taskDefinition).not.toContain('111122223333')
+    expect(body.services[0].taskDefinition).not.toContain('arn:aws')
+  })
+
+  it('logs DescribeServices.failures via logger.warn', async () => {
+    const { logger } = await import('@/lib/logger')
+    const warnSpy = vi.mocked(logger.warn)
+    warnSpy.mockClear()
+
+    sendMock.mockResolvedValueOnce({
+      serviceArns: [
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-1',
+      ],
+    })
+    sendMock.mockResolvedValueOnce({
+      services: [],
+      failures: [
+        {
+          arn: 'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-1',
+          reason: 'MISSING',
+        },
+      ],
+    })
+
+    const GET = await importHandler()
+    await GET(mkRequest())
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failures: expect.arrayContaining([
+          expect.objectContaining({ reason: 'MISSING' }),
+        ]),
+      }),
+      expect.stringContaining('DescribeServices reported per-ARN failures'),
+    )
   })
 
   it('does NOT mark truncated when AWS returns no nextToken (boundary case)', async () => {

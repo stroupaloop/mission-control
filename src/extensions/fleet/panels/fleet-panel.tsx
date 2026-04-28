@@ -3,30 +3,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
-
-// ---------- Types ----------
-
-interface FleetService {
-  name: string
-  status: string | undefined
-  desiredCount: number | undefined
-  runningCount: number | undefined
-  pendingCount: number | undefined
-  taskDefinition: string | undefined
-  launchType: string | undefined
-  activeDeployments: number
-}
-
-interface ServicesResponse {
-  cluster: string
-  region: string
-  services: FleetService[]
-  truncated: boolean
-}
-
-interface ErrorResponse {
-  error: string
-}
+// `import type` elides at compile time — no runtime import of the
+// AWS SDK / NextRequest from the server module reaches the client bundle.
+import type {
+  FleetServicesResponse as ServicesResponse,
+  FleetServicesErrorResponse as ErrorResponse,
+} from '../api/services'
 
 // ---------- Component ----------
 

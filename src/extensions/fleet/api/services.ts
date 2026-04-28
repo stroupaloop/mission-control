@@ -55,6 +55,11 @@ export interface FleetServiceSummary {
   desiredCount: number | undefined
   runningCount: number | undefined
   pendingCount: number | undefined
+  /**
+   * Family + revision only (e.g. `ender-stack-dev-litellm:7`). The full ECS
+   * task-definition ARN embeds the AWS account ID, which we strip at the
+   * response boundary so it never reaches the browser.
+   */
   taskDefinition: string | undefined
   launchType: string | undefined
   /**
@@ -83,13 +88,19 @@ function summarizeService(service: Service): FleetServiceSummary {
   const arn = service.serviceArn || ''
   const name = arn.split('/').pop() || service.serviceName || '(unknown)'
 
+  // Strip the account-id-bearing prefix from the task-def ARN, returning
+  // only `family:revision`. Full ARN is in CloudWatch via DescribeServices.
+  // Format: arn:aws:ecs:region:account:task-definition/family:revision
+  const taskDef = service.taskDefinition
+  const taskDefShort = taskDef ? taskDef.split('/').pop() : undefined
+
   return {
     name,
     status: service.status,
     desiredCount: service.desiredCount,
     runningCount: service.runningCount,
     pendingCount: service.pendingCount,
-    taskDefinition: service.taskDefinition,
+    taskDefinition: taskDefShort,
     launchType: service.launchType,
     activeDeployments:
       service.deployments?.filter((d) => d.rolloutState === 'IN_PROGRESS')
@@ -118,28 +129,38 @@ export async function GET(request: NextRequest) {
     const truncated = !!listResp.nextToken
 
     if (arns.length === 0) {
-      return NextResponse.json({
-        cluster: CLUSTER_NAME,
-        region: AWS_REGION,
-        services: [],
-        truncated,
-      })
+      return NextResponse.json(
+        {
+          cluster: CLUSTER_NAME,
+          region: AWS_REGION,
+          services: [],
+          truncated,
+        },
+        { headers: { 'Cache-Control': 'no-store' } },
+      )
     }
 
-    // DescribeServices caps at 10 ARNs per call. Chunk and concat.
+    // DescribeServices caps at 10 ARNs per call. Chunk and run in parallel —
+    // 10 chunks worst-case (LIST_SERVICES_MAX_RESULTS=100) collapse from
+    // 10 serial RTTs to 1.
     const chunks: string[][] = []
     for (let i = 0; i < arns.length; i += MAX_SERVICES_PER_DESCRIBE) {
       chunks.push(arns.slice(i, i + MAX_SERVICES_PER_DESCRIBE))
     }
 
+    const descs = await Promise.all(
+      chunks.map((chunk) =>
+        ecsClient.send(
+          new DescribeServicesCommand({
+            cluster: CLUSTER_NAME,
+            services: chunk,
+          }),
+        ),
+      ),
+    )
+
     const all: Service[] = []
-    for (const chunk of chunks) {
-      const desc = await ecsClient.send(
-        new DescribeServicesCommand({
-          cluster: CLUSTER_NAME,
-          services: chunk,
-        }),
-      )
+    for (const desc of descs) {
       if (desc.services) {
         all.push(...desc.services)
       }
@@ -156,12 +177,15 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    return NextResponse.json({
-      cluster: CLUSTER_NAME,
-      region: AWS_REGION,
-      services: all.map(summarizeService),
-      truncated,
-    })
+    return NextResponse.json(
+      {
+        cluster: CLUSTER_NAME,
+        region: AWS_REGION,
+        services: all.map(summarizeService),
+        truncated,
+      },
+      { headers: { 'Cache-Control': 'no-store' } },
+    )
   } catch (err) {
     const error = err as { name?: string; message?: string; stack?: string }
     logger.error(
