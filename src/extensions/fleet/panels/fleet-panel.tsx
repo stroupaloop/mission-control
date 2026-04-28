@@ -76,6 +76,10 @@ export function FleetPanel() {
             type="checkbox"
             checked={harnessOnly}
             onChange={(e) => setHarnessOnly(e.target.checked)}
+            // Disable during in-flight load so rapid toggling can't queue
+            // two concurrent fetches whose `setData` resolutions race —
+            // last-to-resolve would otherwise stomp the toggle's state.
+            disabled={loading}
           />
           <span>Agent harnesses only</span>
         </label>
