@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { FleetPanel } from '../panels/fleet-panel'
 
 // Use vitest's globalThis.fetch mocking pattern (matches MC fork's litellm
@@ -11,7 +11,7 @@ beforeEach(() => {
 })
 
 describe('<FleetPanel />', () => {
-  it('renders services from the API', async () => {
+  it('renders agents from the API', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -45,10 +45,47 @@ describe('<FleetPanel />', () => {
     expect(screen.getByText('ACTIVE')).toBeInTheDocument()
     expect(screen.getByText(/Cluster:/)).toBeInTheDocument()
     // Truncation banner only appears when truncated=true
-    expect(screen.queryByText(/Result truncated/)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('truncation-banner')).not.toBeInTheDocument()
   })
 
-  it('renders truncation warning when API reports truncated=true', async () => {
+  it('renders truncation warning when API reports truncated=true AND agents are present', async () => {
+    // Truncation banner now agent-flavored — Fleet always-filters, so the
+    // copy talks about "agents may be missing" not "services truncated".
+    // Banner is only shown when services.length > 0; when there are zero
+    // agents the empty-state copy carries the same warning, so showing
+    // both would just duplicate the message.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          cluster: 'ender-stack-dev',
+          region: 'us-east-1',
+          services: [
+            {
+              name: 'ender-stack-dev-companion-openclaw-smoke-test',
+              status: 'ACTIVE',
+              desiredCount: 1,
+              runningCount: 1,
+              pendingCount: 0,
+              taskDefinition: 'family:1',
+              launchType: 'FARGATE',
+              activeDeployments: 0,
+            },
+          ],
+          truncated: true,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ) as unknown as Response,
+    )
+
+    render(<FleetPanel />)
+
+    const banner = await screen.findByTestId('truncation-banner')
+    expect(banner.textContent).toMatch(/some agents may be missing/)
+  })
+
+  it('suppresses truncation banner when services=[] (empty-state copy carries the warning)', async () => {
+    // Joint state truncated=true + services=[] — the empty-state alone is
+    // sufficient. Banner would be redundant.
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -63,22 +100,34 @@ describe('<FleetPanel />', () => {
 
     render(<FleetPanel />)
 
-    await waitFor(() =>
-      expect(screen.getByText(/Result truncated/)).toBeInTheDocument(),
-    )
+    // Empty-state is shown
+    const empty = await screen.findByTestId('empty-state')
+    expect(empty.textContent).toMatch(/More services may exist beyond the page cap/)
+    // Banner is suppressed
+    expect(screen.queryByTestId('truncation-banner')).not.toBeInTheDocument()
   })
 
-  it('renders harness-aware copy when truncated AND no results AND harnessOnly', async () => {
-    // Simulates the joint state Claude Auditor + Greptile flagged: cluster
-    // has > 100 services but none of the first 100 carry Component=agent-harness.
-    // Generic empty-state would say "no harnesses found" without acknowledging
-    // the truncation; harness-aware copy explains the page cap explicitly.
-    //
-    // mockImplementation (not mockResolvedValue) constructs a fresh Response
-    // for each call — Response body streams are single-use, so a shared
-    // mocked Response throws on the second `.json()` and the panel
-    // silently drops to its NetworkError branch.
-    const mkResp = () =>
+  it('renders agent-flavored empty-state when API returns zero agents', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          cluster: 'ender-stack-dev',
+          region: 'us-east-1',
+          services: [],
+          truncated: false,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ) as unknown as Response,
+    )
+
+    render(<FleetPanel />)
+
+    const empty = await screen.findByTestId('empty-state')
+    expect(empty.textContent).toMatch(/No agents currently deployed/)
+  })
+
+  it('renders truncation-aware empty-state when truncated AND no agents', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(
         JSON.stringify({
           cluster: 'ender-stack-dev',
@@ -87,27 +136,15 @@ describe('<FleetPanel />', () => {
           truncated: true,
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockImplementation(() => Promise.resolve(mkResp()))
+      ) as unknown as Response,
+    )
 
     render(<FleetPanel />)
 
-    await waitFor(() => expect(fetchSpy).toHaveBeenCalled())
-    const checkbox = screen.getByLabelText(/Agent harnesses only/) as HTMLInputElement
-    await act(async () => {
-      checkbox.click()
-    })
-
-    // Match via data-testid since JSX-rendered multi-line strings can be
-    // split across text nodes that defeat regex/string matchers.
-    const banner = await screen.findByTestId('truncation-banner')
-    expect(banner.textContent).toMatch(
-      /the harness filter only sees the first 100/,
-    )
     const empty = await screen.findByTestId('empty-state')
-    expect(empty.textContent).toMatch(/More services may exist beyond the page cap/)
+    expect(empty.textContent).toMatch(
+      /No agents found in the first 100 services\. More services may exist/,
+    )
   })
 
   it('renders error state on 502 from API', async () => {
@@ -128,8 +165,11 @@ describe('<FleetPanel />', () => {
     expect(screen.getByText('AccessDeniedException')).toBeInTheDocument()
   })
 
-  it('renders empty-state when API returns zero services', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+  it('fetches /api/fleet/services without query params (no opt-in filter)', async () => {
+    // Fleet's filter is always-on server-side — the panel never sends
+    // `?harness=...`. Test guards against accidental reintroduction of
+    // an opt-in toggle.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(
         JSON.stringify({
           cluster: 'ender-stack-dev',
@@ -143,55 +183,11 @@ describe('<FleetPanel />', () => {
 
     render(<FleetPanel />)
 
-    await waitFor(() =>
-      expect(
-        screen.getByText(/No services in/),
-      ).toBeInTheDocument(),
-    )
-  })
-
-  it('passes ?harness=true on the fetch when the toggle is on', async () => {
-    // Use mockImplementation so each fetch call gets a fresh Response —
-    // body streams are single-use and a shared Response would throw on
-    // the second `.json()`, dropping the panel into its NetworkError
-    // branch. Today this test only asserts on URL inspection so the
-    // hidden failure isn't visible, but matching the documented pattern
-    // here (see truncated+harness test below) keeps the trap from biting
-    // a future maintainer adding output assertions.
-    const mkResp = () =>
-      new Response(
-        JSON.stringify({
-          cluster: 'ender-stack-dev',
-          region: 'us-east-1',
-          services: [],
-          truncated: false,
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockImplementation(() => Promise.resolve(mkResp()))
-
-    render(<FleetPanel />)
-
-    // First load — toggle off, no query string
     await waitFor(() => expect(fetchSpy).toHaveBeenCalled())
     expect(fetchSpy.mock.calls[0][0]).toBe('/api/fleet/services')
-
-    // Click the harness-only checkbox; wrap in act() so the resulting
-    // useEffect-driven refetch flushes before assertion.
-    const checkbox = screen.getByLabelText(/Agent harnesses only/)
-    await act(async () => {
-      checkbox.click()
-    })
-
-    await waitFor(() =>
-      expect(
-        fetchSpy.mock.calls.some(
-          (c) => c[0] === '/api/fleet/services?harness=true',
-        ),
-      ).toBe(true),
-    )
+    // No checkbox in the UI — the toggle was removed when the filter
+    // moved to always-on.
+    expect(screen.queryByLabelText(/Agent harnesses only/)).not.toBeInTheDocument()
   })
 
   it('renders the Refresh button in loading state on initial mount', async () => {
