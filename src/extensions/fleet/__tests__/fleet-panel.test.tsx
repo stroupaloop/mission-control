@@ -52,8 +52,8 @@ describe('<FleetPanel />', () => {
     // Truncation banner now agent-flavored — Fleet always-filters, so the
     // copy talks about "agents may be missing" not "services truncated".
     // Banner is only shown when services.length > 0; when there are zero
-    // agents the empty-state copy carries the same warning (avoids the
-    // dual-display Auditor flagged in #32 review).
+    // agents the empty-state copy carries the same warning, so showing
+    // both would just duplicate the message.
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(
         JSON.stringify({
