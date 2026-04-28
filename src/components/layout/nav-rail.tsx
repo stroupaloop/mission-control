@@ -198,6 +198,7 @@ export function NavRail() {
       'brain-circuit': <MemoryIcon />,
       'shield-check':  <AuditIcon />,
       'file-clock':    <AuditIcon />,
+      'cpu':           <CpuIcon />,
     }
     return map[name] ?? <PluginIcon />
   }
@@ -1533,6 +1534,16 @@ function MonitorIcon() {
       <rect x="1" y="2" width="14" height="10" rx="1.5" />
       <polyline points="4,9 6,6 8,8 12,4" />
       <path d="M5 14h6" />
+    </svg>
+  )
+}
+
+function CpuIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="10" height="10" rx="1.5" />
+      <rect x="6" y="6" width="4" height="4" />
+      <path d="M5 1v2M8 1v2M11 1v2M5 13v2M8 13v2M11 13v2M1 5h2M1 8h2M1 11h2M13 5h2M13 8h2M13 11h2" />
     </svg>
   )
 }

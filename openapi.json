@@ -12566,6 +12566,108 @@
         }
       }
     },
+    "/api/fleet/services": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List ECS services in the deployment cluster (Fleet view)",
+        "description": "Read-only listing of production-deployed agents — ECS services in the cluster configured by MC_FLEET_CLUSTER_NAME. Calls ecs:ListServices + ecs:DescribeServices. taskDefinition is returned as `family:revision` only (the account-id-bearing ARN prefix is stripped at the response boundary). Distinct from `/agents` which serves the local/docker dev-iteration flow.",
+        "operationId": "listFleetServices",
+        "responses": {
+          "200": {
+            "description": "Fleet services in this deployment's cluster",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "cluster",
+                    "region",
+                    "services",
+                    "truncated"
+                  ],
+                  "properties": {
+                    "cluster": {
+                      "type": "string"
+                    },
+                    "region": {
+                      "type": "string"
+                    },
+                    "services": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "name",
+                          "activeDeployments"
+                        ],
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "desiredCount": {
+                            "type": "integer"
+                          },
+                          "runningCount": {
+                            "type": "integer"
+                          },
+                          "pendingCount": {
+                            "type": "integer"
+                          },
+                          "taskDefinition": {
+                            "type": "string",
+                            "description": "family:revision (no AWS account ID)"
+                          },
+                          "launchType": {
+                            "type": "string"
+                          },
+                          "activeDeployments": {
+                            "type": "integer",
+                            "description": "Count of deployments in IN_PROGRESS rolloutState"
+                          }
+                        }
+                      }
+                    },
+                    "truncated": {
+                      "type": "boolean",
+                      "description": "True when AWS returned a nextToken; the response is a partial first page."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "502": {
+            "description": "AWS SDK error (e.g. AccessDeniedException). Response body returns only the error name; the message is suppressed to avoid leaking IAM ARNs / account IDs to the browser.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/security-audit": {
       "get": {
         "tags": [

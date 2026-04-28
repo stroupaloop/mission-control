@@ -77,6 +77,16 @@ Recurring security scans across the deployment surface. API-only (no panels yet)
 
 - **`api/`** — `/api/security-audit/...` replacing upstream `security-audit/route.ts` with the extension version.
 
+### `fleet/` — Production-Deployed Agents (ECS)
+
+Read-only view of production-deployed agents (ECS services in this deployment's cluster), distinct from upstream's `/agents` page which serves the local/docker dev-iteration story. Phase-2.0 of the ender-stack vertical-slice rollout — Deploy + Create-agent actions land in subsequent phases. Calls AWS SDK ECS server-side using the MC task role's IAM grant (`ecs:ListServices` + `ecs:DescribeServices`, scoped to the configured cluster — provisioned in ender-stack PR #150).
+
+- **`api/services.ts`** — `GET /api/fleet/services`. Auth-gated by `requireRole(request, 'viewer')`. `taskDefinition` ARNs are stripped to `family:revision` at the response boundary so the AWS account ID never reaches the browser.
+- **`panels/fleet-panel.tsx`** — `FleetPanel`. Table view (status, counts, launch type, in-progress deployments). Cross-link banner to `/agents` makes the layer distinction explicit.
+- **`MC_FLEET_CLUSTER_NAME`** — env var, defaults to `ender-stack-dev`.
+
+Future unification path: an upstream `deploymentModeRegistry` hook (tracked separately) would let ender-stack register `ecs-fargate` against upstream's `/agents` Create-Agent flow, at which point the parallel Fleet view either deprecates or pivots to ECS-deployed-agents observability.
+
 ## Tables Touched By Extensions
 
 These tables are owned by the extension layer (created in extension `startupHooks` or via the database initialization path). They live alongside upstream's tables in the same SQLite database (`/app/.data/`) on dev deployments.

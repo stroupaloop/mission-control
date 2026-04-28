@@ -19,7 +19,7 @@ export type { ApiRouteDescriptor, ScheduledTask, PanelDescriptor } from './exten
 import type { ApiRouteDescriptor, ScheduledTask, PanelDescriptor } from './extensions.config.ts.types'
 
 export interface ExtensionManifest {
-  id: 'resolver' | 'litellm' | 'oap' | 'mcp' | 'security-audit'
+  id: 'resolver' | 'litellm' | 'oap' | 'mcp' | 'security-audit' | 'fleet'
   /** Human-readable extension name */
   displayName: string
   /** API routes provided by this extension */
@@ -180,6 +180,37 @@ const securityAuditExtension: ExtensionManifest = {
   ],
 }
 
+// ── Fleet Extension ────────────────────────────────────────────────────────────
+//
+// Phase-2.0 of the ender-stack vertical-slice rollout
+// (stroupaloop/ender-stack#149). Read-only "Fleet" page that lists
+// production-deployed agents (ECS services in this deployment's cluster),
+// paving the way for Phase-2.2's Deploy button + 2.3's Create-agent flow.
+// Calls AWS SDK ECS server-side using the MC task role's IAM grant
+// (provisioned in ender-stack PR #150 — `ecs:ListServices` +
+// `ecs:DescribeServices`, scoped to the ender-stack-{env} cluster).
+//
+// Distinct from upstream's /agents page (which serves the local/docker
+// dev-iteration workflow). Two views, two layers — see Phase-2.X tracker
+// for the future upstream `deploymentModeRegistry` hook that would unify
+// them.
+
+const fleetExtension: ExtensionManifest = {
+  id: 'fleet',
+  displayName: 'Fleet',
+  apiRoutes: [
+    { path: '/fleet/services', methods: ['GET'] },
+  ],
+  panels: [
+    {
+      id: 'fleet',
+      label: 'Fleet',
+      groupId: 'automate',
+      icon: 'cpu',
+    },
+  ],
+}
+
 // ── Registry ──────────────────────────────────────────────────────────────────
 
 export const extensions: ExtensionManifest[] = [
@@ -188,4 +219,5 @@ export const extensions: ExtensionManifest[] = [
   oapExtension,
   mcpExtension,
   securityAuditExtension,
+  fleetExtension,
 ]

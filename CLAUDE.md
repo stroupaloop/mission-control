@@ -64,6 +64,13 @@ Path alias: `@/*` maps to `./src/*`
 Set `MISSION_CONTROL_DATA_DIR` env var to change the data location (defaults to `.data/`).
 Database path: defaults to `<MISSION_CONTROL_DATA_DIR>/mission-control.db`.
 
+## Fork Extension Env Vars
+
+Fork-only env vars consumed by extensions under `src/extensions/`:
+
+- `MC_FLEET_CLUSTER_NAME` — ECS cluster name the Fleet panel reads (`ecs:ListServices` + `ecs:DescribeServices`). Defaults to `ender-stack-dev`. Used only by the `fleet/` extension; ignored on non-AWS deployments.
+- `AWS_REGION` — read by the Fleet panel's `ECSClient`. Set automatically by Fargate task metadata; falls back to `us-east-1` for local dev.
+
 ## Conventions
 
 - **Commits**: Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`)
