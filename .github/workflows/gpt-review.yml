@@ -22,9 +22,32 @@ on:
     types: [created]  # don't fire on edit/delete
 
 # Cancel in-flight runs on rapid pushes / repeated `/review` comments.
-# Falls back to the issue/run id when there's no PR number on the event.
+#
+# Subtlety: this workflow also fires on every `issue_comment.created` event
+# (so slash commands re-run pr-agent). The job-level `if:` below filters
+# non-slash comments out, so they exit immediately — but concurrency is
+# evaluated *before* the job-level `if:`, which means a plain PR comment
+# would still enter the `gpt-review-${PR}` group and cancel the in-flight
+# push-triggered review (which is the one we want to keep). Rapid PR
+# discussion would silently kill every review.
+#
+# Fix: route non-slash comments to a unique-per-run noop group so they
+# only collide with themselves. Push events and slash-command comments
+# stay in the shared `gpt-review-${PR}` group where cancel-in-progress
+# does the right thing — newer pushes / explicit /review re-runs cancel
+# stale in-flight reviews against an outdated diff.
 concurrency:
-  group: gpt-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  group: >-
+    ${{
+      github.event_name == 'issue_comment' &&
+      !startsWith(github.event.comment.body, '/') &&
+      format('gpt-review-noop-{0}', github.run_id)
+      ||
+      format(
+        'gpt-review-{0}',
+        github.event.pull_request.number || github.event.issue.number || github.run_id
+      )
+    }}
   cancel-in-progress: true
 
 permissions:
