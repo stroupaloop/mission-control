@@ -753,8 +753,8 @@ function CacheMetricsSection() {
         <div>
           <div className="text-xs text-muted-foreground font-medium">Anthropic Cache Performance</div>
           <div className="text-[10px] text-muted-foreground/70 mt-0.5">
-            Hit rate computed across cache-eligible calls only (cache_read / cache_read + cache_write).
-            For full-workload context, see Cache Hit (effective) above.
+            Hit rate computed across cache-eligible calls only (cache_read / (cache_read + cache_write)).
+            For full-workload context, see Cache Hit (30d, effective) above.
           </div>
         </div>
         <div className="flex gap-1">

@@ -29,6 +29,11 @@ export function ensureCacheDailyTable(db: Database.Database): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_litellm_cache_daily_day ON litellm_cache_daily(day)`)
   // Partial index to speed up the rollup query — only rows with cache activity
   db.exec(`CREATE INDEX IF NOT EXISTS idx_litellm_usage_cache ON litellm_usage(created_at) WHERE cache_read_tokens > 0 OR cache_write_tokens > 0`)
+  // Full index on created_at for the workload query in queryCacheDailySummary().
+  // The partial index above only covers cache-eligible rows; the workload query
+  // scans ALL rows (cache + non-cache) by created_at and would do a full table
+  // scan without this. Critical as litellm_usage grows on EFS-backed SQLite.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_litellm_usage_created_at ON litellm_usage(created_at)`)
 }
 
 // Roll up the last N days to avoid unbounded full-table scans as the table grows.
