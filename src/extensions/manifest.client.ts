@@ -13,7 +13,7 @@
 import type { PanelDescriptor } from './extensions.config.ts.types'
 
 export interface ClientExtensionManifest {
-  id: 'resolver' | 'litellm' | 'oap' | 'mcp' | 'security-audit'
+  id: 'resolver' | 'litellm' | 'oap' | 'mcp' | 'security-audit' | 'fleet'
   displayName: string
   panels?: PanelDescriptor[]
 }
@@ -64,6 +64,18 @@ export const clientExtensions: ClientExtensionManifest[] = [
         label: 'LiteLLM Usage',
         groupId: 'observe',
         icon: 'activity',
+      },
+    ],
+  },
+  {
+    id: 'fleet',
+    displayName: 'Fleet',
+    panels: [
+      {
+        id: 'fleet',
+        label: 'Fleet',
+        groupId: 'automate',
+        icon: 'cpu',
       },
     ],
   },

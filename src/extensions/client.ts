@@ -28,12 +28,14 @@ import { ResolverIntelligencePanel } from './resolver/panels/intelligence-panel'
 import { OapApprovalsPanel } from './oap/panels/approvals-panel'
 import { AuditTrailPanel } from './oap/panels/audit-trail-panel'
 import { LitellmUsagePanel } from './litellm/panels/usage-panel'
+import { FleetPanel } from './fleet/panels/fleet-panel'
 
 const componentMap: Record<string, ComponentType> = {
   'resolver-intelligence': ResolverIntelligencePanel,
   'oap-approvals': OapApprovalsPanel,
   'oap-audit': AuditTrailPanel,
   'litellm-usage': LitellmUsagePanel,
+  fleet: FleetPanel,
   // mcp and security-audit are backend-only — no panels.
 }
 
