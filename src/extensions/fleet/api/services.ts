@@ -108,11 +108,14 @@ function summarizeService(service: Service): FleetServiceSummary {
   }
 }
 
-// Tag-based filter for the optional `?harness=true` query param. Services
-// must carry `Component=agent-harness` to pass — the convention applied to
-// companion/openclaw + worker/hermes Terraform modules. Platform services
-// (mission-control, litellm, langfuse, mem0) are tagged
-// `Component=platform-service` and excluded by this filter.
+// Tag-based filter — services must carry `Component=agent-harness` to be
+// included in the response. Always-on, no query param: Fleet is the
+// agent-control-plane page, not a cluster-wide service inventory. Platform
+// services (mission-control, litellm, langfuse, mem0) carry
+// `Component=platform-service` per the ender-stack convention and are
+// excluded. Untagged services (no Component tag at all) are also excluded —
+// any new ECS service module needs to declare a Component value to render
+// in Fleet.
 const HARNESS_TAG_KEY = 'Component'
 const HARNESS_TAG_VALUE = 'agent-harness'
 
@@ -129,13 +132,6 @@ export async function GET(request: NextRequest) {
   if ('error' in auth) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })
   }
-
-  // `?harness=true` → filter to agent-harness-tagged services only.
-  // Default = unfiltered (all services in the cluster, including platform
-  // services like MC + LiteLLM). Single canonical truthy value matches the
-  // panel and the OpenAPI spec; alternative spellings are not accepted.
-  const url = new URL(request.url)
-  const harnessOnly = url.searchParams.get('harness') === 'true'
 
   try {
     const listResp = await ecsClient.send(
@@ -203,7 +199,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const filtered = harnessOnly ? all.filter(isAgentHarness) : all
+    const filtered = all.filter(isAgentHarness)
 
     return NextResponse.json(
       {

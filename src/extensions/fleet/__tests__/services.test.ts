@@ -36,10 +36,11 @@ const importHandler = async () => {
   return mod.GET
 }
 
-// Minimal NextRequest stub. Handler reads `url` to parse query params for
-// the optional `?harness=true` filter.
-const mkRequest = (search = '') =>
-  ({ url: `http://localhost/api/fleet/services${search}` }) as unknown as Parameters<
+// Minimal NextRequest stub. Handler reads `url` only for the auth gate
+// path-resolution; query params are no longer consulted (filter is
+// always-on, server-side).
+const mkRequest = () =>
+  ({ url: 'http://localhost/api/fleet/services' }) as unknown as Parameters<
     Awaited<ReturnType<typeof importHandler>>
   >[0]
 
@@ -64,10 +65,15 @@ describe('GET /api/fleet/services', () => {
     expect(sendMock).toHaveBeenCalledTimes(1)
   })
 
-  it('summarizes services when DescribeServices returns metadata', async () => {
+  it('summarizes harness-tagged services and excludes platform services', async () => {
+    // Server-side filter is always-on: only services tagged
+    // Component=agent-harness pass through. Platform services (LiteLLM, MC,
+    // etc.) carry Component=platform-service and are excluded by design —
+    // Fleet is the agent-control-plane page, not a cluster-wide inventory.
     sendMock.mockResolvedValueOnce({
       serviceArns: [
         'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/ender-stack-dev-companion-openclaw-smoke-test',
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/ender-stack-dev-companion-openclaw-mid-rollout',
         'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/ender-stack-dev-litellm',
       ],
     })
@@ -85,8 +91,27 @@ describe('GET /api/fleet/services', () => {
           launchType: 'FARGATE',
           // Steady-state PRIMARY only — activeDeployments should be 0
           deployments: [{ id: 'ecs-svc/1', rolloutState: 'COMPLETED' }],
+          tags: [{ key: 'Component', value: 'agent-harness' }],
         },
         {
+          serviceArn:
+            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/ender-stack-dev-companion-openclaw-mid-rollout',
+          serviceName: 'ender-stack-dev-companion-openclaw-mid-rollout',
+          status: 'ACTIVE',
+          desiredCount: 1,
+          runningCount: 1,
+          pendingCount: 0,
+          taskDefinition: 'arn:aws:ecs:...:task-definition/ender-stack-dev-companion-openclaw-mid-rollout:7',
+          launchType: 'FARGATE',
+          // Mid-rollout — IN_PROGRESS deployment should be counted
+          deployments: [
+            { id: 'ecs-svc/2-old', rolloutState: 'COMPLETED' },
+            { id: 'ecs-svc/2-new', rolloutState: 'IN_PROGRESS' },
+          ],
+          tags: [{ key: 'Component', value: 'agent-harness' }],
+        },
+        {
+          // Platform service — must be filtered out
           serviceArn:
             'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/ender-stack-dev-litellm',
           serviceName: 'ender-stack-dev-litellm',
@@ -94,13 +119,9 @@ describe('GET /api/fleet/services', () => {
           desiredCount: 1,
           runningCount: 1,
           pendingCount: 0,
-          taskDefinition: 'arn:aws:ecs:...:task-definition/ender-stack-dev-litellm:7',
           launchType: 'FARGATE',
-          // Mid-rollout — IN_PROGRESS deployment should be counted
-          deployments: [
-            { id: 'ecs-svc/2-old', rolloutState: 'COMPLETED' },
-            { id: 'ecs-svc/2-new', rolloutState: 'IN_PROGRESS' },
-          ],
+          deployments: [{ rolloutState: 'COMPLETED' }],
+          tags: [{ key: 'Component', value: 'platform-service' }],
         },
       ],
     })
@@ -110,16 +131,49 @@ describe('GET /api/fleet/services', () => {
     const body = await resp.json()
 
     expect(resp.status).toBe(200)
+    // Only the 2 harness-tagged services pass; LiteLLM filtered out.
     expect(body.services).toHaveLength(2)
     expect(body.services[0].name).toBe('ender-stack-dev-companion-openclaw-smoke-test')
     expect(body.services[0].status).toBe('ACTIVE')
     expect(body.services[0].runningCount).toBe(1)
     // Steady-state COMPLETED deployment is NOT counted as active
     expect(body.services[0].activeDeployments).toBe(0)
-    expect(body.services[1].name).toBe('ender-stack-dev-litellm')
+    expect(body.services[1].name).toBe('ender-stack-dev-companion-openclaw-mid-rollout')
     // Mid-rollout — only the IN_PROGRESS entry counts
     expect(body.services[1].activeDeployments).toBe(1)
+    // Platform-service tagged service is absent
+    expect(body.services.find((s: { name: string }) => s.name.includes('litellm'))).toBeUndefined()
     expect(body.truncated).toBe(false)
+  })
+
+  it('excludes services with no Component tag (untagged services are not agents)', async () => {
+    // New ECS modules that forget to tag should NOT appear in Fleet — same
+    // semantic as platform-service (not an agent). Forces the convention
+    // that Fleet entries are explicitly opted-in via Component=agent-harness.
+    sendMock.mockResolvedValueOnce({
+      serviceArns: [
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/untagged-svc',
+      ],
+    })
+    sendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn:
+            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/untagged-svc',
+          serviceName: 'untagged-svc',
+          status: 'ACTIVE',
+          deployments: [],
+          // No tags array at all
+        },
+      ],
+    })
+
+    const GET = await importHandler()
+    const resp = await GET(mkRequest())
+    const body = await resp.json()
+
+    expect(resp.status).toBe(200)
+    expect(body.services).toHaveLength(0)
   })
 
   it('returns 502 with SDK error name only (no detail) on AWS error', async () => {
@@ -152,6 +206,7 @@ describe('GET /api/fleet/services', () => {
     sendMock.mockResolvedValueOnce({ serviceArns: arns })
 
     // Two DescribeServices chunks
+    const harnessTags = [{ key: 'Component', value: 'agent-harness' }]
     sendMock.mockResolvedValueOnce({
       services: arns.slice(0, 10).map((arn, i) => ({
         serviceArn: arn,
@@ -161,6 +216,7 @@ describe('GET /api/fleet/services', () => {
         runningCount: 1,
         pendingCount: 0,
         deployments: [{ rolloutState: 'COMPLETED' }],
+        tags: harnessTags,
       })),
     })
     sendMock.mockResolvedValueOnce({
@@ -172,6 +228,7 @@ describe('GET /api/fleet/services', () => {
         runningCount: 1,
         pendingCount: 0,
         deployments: [{ rolloutState: 'COMPLETED' }],
+        tags: harnessTags,
       })),
     })
 
@@ -180,6 +237,7 @@ describe('GET /api/fleet/services', () => {
     const body = await resp.json()
 
     expect(resp.status).toBe(200)
+    // All 12 services tagged as agent-harness pass the always-on filter.
     expect(body.services).toHaveLength(12)
     // 1 ListServices + 2 DescribeServices (run in parallel via Promise.all)
     // = 3 SDK calls.
@@ -202,6 +260,7 @@ describe('GET /api/fleet/services', () => {
           taskDefinition:
             'arn:aws:ecs:us-east-1:111122223333:task-definition/ender-stack-dev-svc:7',
           deployments: [],
+          tags: [{ key: 'Component', value: 'agent-harness' }],
         },
       ],
     })
@@ -239,6 +298,7 @@ describe('GET /api/fleet/services', () => {
           serviceName: 'svc-alive',
           status: 'ACTIVE',
           deployments: [],
+          tags: [{ key: 'Component', value: 'agent-harness' }],
         },
       ],
       failures: [
@@ -308,136 +368,11 @@ describe('GET /api/fleet/services', () => {
   })
 })
 
-describe('GET /api/fleet/services — ?harness filter', () => {
-  it('returns all services when ?harness is absent', async () => {
-    sendMock.mockResolvedValueOnce({
-      serviceArns: [
-        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw-svc',
-        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
-      ],
-    })
-    sendMock.mockResolvedValueOnce({
-      services: [
-        {
-          serviceArn:
-            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw-svc',
-          serviceName: 'openclaw-svc',
-          status: 'ACTIVE',
-          deployments: [],
-          tags: [{ key: 'Component', value: 'agent-harness' }],
-        },
-        {
-          serviceArn:
-            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
-          serviceName: 'litellm',
-          status: 'ACTIVE',
-          deployments: [],
-          tags: [{ key: 'Component', value: 'platform-service' }],
-        },
-      ],
-    })
-
-    const GET = await importHandler()
-    const resp = await GET(mkRequest())
-    const body = await resp.json()
-
-    expect(resp.status).toBe(200)
-    expect(body.services).toHaveLength(2)
-  })
-
-  it('filters to Component=agent-harness when ?harness=true', async () => {
-    sendMock.mockResolvedValueOnce({
-      serviceArns: [
-        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw-svc',
-        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
-        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/untagged-svc',
-      ],
-    })
-    sendMock.mockResolvedValueOnce({
-      services: [
-        {
-          serviceArn:
-            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw-svc',
-          serviceName: 'openclaw-svc',
-          status: 'ACTIVE',
-          deployments: [],
-          tags: [
-            { key: 'Project', value: 'ender-stack' },
-            { key: 'Component', value: 'agent-harness' },
-          ],
-        },
-        {
-          serviceArn:
-            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
-          serviceName: 'litellm',
-          status: 'ACTIVE',
-          deployments: [],
-          tags: [{ key: 'Component', value: 'platform-service' }],
-        },
-        {
-          serviceArn:
-            'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/untagged-svc',
-          serviceName: 'untagged-svc',
-          status: 'ACTIVE',
-          deployments: [],
-          // No tags array — filter must skip rather than crash
-        },
-      ],
-    })
-
-    const GET = await importHandler()
-    const resp = await GET(mkRequest('?harness=true'))
-    const body = await resp.json()
-
-    expect(resp.status).toBe(200)
-    expect(body.services).toHaveLength(1)
-    expect(body.services[0].name).toBe('openclaw-svc')
-  })
-
-  it.each(['1', 'false', 'TRUE', 'yes', 'on'])(
-    'treats ?harness=%s as unfiltered (only literal "true" filters)',
-    async (val) => {
-      // Strict `=== 'true'` semantics — anything other than the literal
-      // canonical value passes through as unfiltered. Guards against a
-      // future refactor introducing broader truthiness (e.g., a Boolean
-      // coercion) which would silently change API behavior.
-      sendMock.mockResolvedValueOnce({
-        serviceArns: [
-          'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw',
-          'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
-        ],
-      })
-      sendMock.mockResolvedValueOnce({
-        services: [
-          {
-            serviceArn:
-              'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/openclaw',
-            serviceName: 'openclaw',
-            status: 'ACTIVE',
-            deployments: [],
-            tags: [{ key: 'Component', value: 'agent-harness' }],
-          },
-          {
-            serviceArn:
-              'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/litellm',
-            serviceName: 'litellm',
-            status: 'ACTIVE',
-            deployments: [],
-            tags: [{ key: 'Component', value: 'platform-service' }],
-          },
-        ],
-      })
-
-      const GET = await importHandler()
-      const resp = await GET(mkRequest(`?harness=${val}`))
-      const body = await resp.json()
-
-      expect(resp.status).toBe(200)
-      expect(body.services).toHaveLength(2)
-    },
-  )
-
+describe('GET /api/fleet/services — DescribeServices wiring', () => {
   it('passes include:[TAGS] to DescribeServices so tags are returned', async () => {
+    // Without include:[TAGS], the Service response omits the tags array
+    // entirely and the always-on filter would silently return zero
+    // services. This is the wiring assertion.
     sendMock.mockResolvedValueOnce({
       serviceArns: [
         'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-1',
