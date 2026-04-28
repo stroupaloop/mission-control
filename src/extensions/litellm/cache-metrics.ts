@@ -29,6 +29,11 @@ export function ensureCacheDailyTable(db: Database.Database): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_litellm_cache_daily_day ON litellm_cache_daily(day)`)
   // Partial index to speed up the rollup query — only rows with cache activity
   db.exec(`CREATE INDEX IF NOT EXISTS idx_litellm_usage_cache ON litellm_usage(created_at) WHERE cache_read_tokens > 0 OR cache_write_tokens > 0`)
+  // Full index on created_at for the workload query in queryCacheDailySummary().
+  // The partial index above only covers cache-eligible rows; the workload query
+  // scans ALL rows (cache + non-cache) by created_at and would do a full table
+  // scan without this. Critical as litellm_usage grows on EFS-backed SQLite.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_litellm_usage_created_at ON litellm_usage(created_at)`)
 }
 
 // Roll up the last N days to avoid unbounded full-table scans as the table grows.
@@ -89,17 +94,38 @@ export function queryCacheDailySummary(db: Database.Database, window: CacheWindo
     input_tokens: number
     cache_read_tokens: number
     cache_write_tokens: number
+    /** Hit rate computed across cache-eligible calls only (cache_read / (cache_read + cache_write)). */
     hit_rate: number
+    /**
+     * Effective hit rate computed across ALL calls in the window — includes calls
+     * with no cache activity in the denominator. cache_read / SUM(prompt_tokens).
+     * This is the headline number the dashboard should show: "of all input tokens
+     * we sent, X% came from cache". The classic hit_rate (above) is the cache-eligible
+     * subset rate — useful for diagnosing cache quality but inflates ROI vs. total spend.
+     */
+    effective_hit_rate: number
+    /** Total prompt tokens across ALL calls (not just cache-eligible). Denominator for effective_hit_rate. */
+    total_prompt_tokens_workload: number
+    /** Total calls in the window across ALL calls (not just cache-eligible). */
+    total_calls_workload: number
     est_savings_usd: number
   }
 } {
   ensureCacheDailyTable(db)
 
-  const since = window === 'all' ? null
+  // Window bounds. Both the cache-daily numerator and the workload denominator
+  // MUST anchor to the same UTC-midnight boundary, otherwise the daily query
+  // (truncated to YYYY-MM-DD) covers up to 24h more than the workload query
+  // (exact seconds), which inflates effective_hit_rate by ~3% on 30d / ~14% on 7d.
+  // Fix: derive sinceUnix from the same UTC midnight as sinceDate so both queries
+  // start at the same moment.
+  const rawSince = window === 'all' ? null
     : window === '7d' ? Math.floor(Date.now() / 1000) - 7 * 86400
     : Math.floor(Date.now() / 1000) - 30 * 86400
 
-  const sinceDate = since ? new Date(since * 1000).toISOString().slice(0, 10) : null
+  const sinceDate = rawSince ? new Date(rawSince * 1000).toISOString().slice(0, 10) : null
+  // Re-derive sinceUnix from sinceDate so both queries share the same UTC midnight anchor.
+  const since = sinceDate ? Math.floor(new Date(sinceDate + 'T00:00:00Z').getTime() / 1000) : null
   const whereClause = sinceDate ? `WHERE day >= ?` : ''
   const whereParams: any[] = sinceDate ? [sinceDate] : []
 
@@ -132,10 +158,28 @@ export function queryCacheDailySummary(db: Database.Database, window: CacheWindo
   const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0)
   const total_read = n(totalsRow?.cache_read_tokens)
   const total_write = n(totalsRow?.cache_write_tokens)
-  // Hit rate = cache_read / (cache_read + cache_write).
-  // Using input_tokens as denominator would include uncached calls
-  // and can produce ratios > 1 when LiteLLM reports cache_read > prompt_tokens.
+  // Hit rate (cache-eligible subset only) = cache_read / (cache_read + cache_write).
+  // Used as the denominator for the per-row daily breakdown so the chart shows
+  // cache quality on cached calls.
   const cache_denominator = total_read + total_write
+
+  // Effective hit rate (full workload) = cache_read / SUM(prompt_tokens) across ALL
+  // litellm_usage rows in the window — not just cache-eligible ones. This includes
+  // calls that didn't hit cache at all (non-Anthropic, cold cache, etc.).
+  // We have to query litellm_usage directly because litellm_cache_daily only
+  // aggregates rows where cache_read > 0 OR cache_write > 0.
+  const sinceUnix = since ?? null
+  const workloadWhereClause = sinceUnix ? `WHERE created_at >= ?` : ''
+  const workloadParams: any[] = sinceUnix ? [sinceUnix] : []
+  const workloadRow = db.prepare(`
+    SELECT
+      COALESCE(SUM(prompt_tokens), 0) AS total_prompt_tokens,
+      COUNT(*) AS total_calls
+    FROM litellm_usage
+    ${workloadWhereClause}
+  `).get(...workloadParams) as any
+  const total_prompt_tokens_workload = n(workloadRow?.total_prompt_tokens)
+  const total_calls_workload = n(workloadRow?.total_calls)
 
   return {
     rows: rows.map(r => {
@@ -159,6 +203,11 @@ export function queryCacheDailySummary(db: Database.Database, window: CacheWindo
       cache_read_tokens: total_read,
       cache_write_tokens: total_write,
       hit_rate: cache_denominator > 0 ? total_read / cache_denominator : 0,
+      effective_hit_rate: total_prompt_tokens_workload > 0
+        ? total_read / total_prompt_tokens_workload
+        : 0,
+      total_prompt_tokens_workload,
+      total_calls_workload,
       est_savings_usd: n(totalsRow?.est_savings_usd),
     },
   }

@@ -108,7 +108,14 @@ interface CacheResponse {
     input_tokens: number
     cache_read_tokens: number
     cache_write_tokens: number
+    /** Cache-eligible-only hit rate: cache_read / (cache_read + cache_write). */
     hit_rate: number
+    /** Full-workload hit rate: cache_read / SUM(prompt_tokens) across all calls in window. */
+    effective_hit_rate?: number
+    /** Total prompt tokens across all litellm_usage rows in window (denominator for effective_hit_rate). */
+    total_prompt_tokens_workload?: number
+    /** Total calls across all litellm_usage rows in window. */
+    total_calls_workload?: number
     est_savings_usd: number
   }
 }
@@ -437,17 +444,32 @@ export function LitellmUsagePanel() {
           {/* Secondary stats */}
           {totals && (
             <div className="grid gap-3 grid-cols-4">
-              {/* Use Anthropic prompt cache hit rate if available; fall back to LiteLLM semantic cache_hit_rate */}
-              {/* Cache stats are fixed to 30d — labelled explicitly to avoid confusion
-                  with the per-window stats (error rate, success rate) in the same row */}
+              {/* Cache stats: effective_hit_rate is the headline number — it's computed
+                  across the FULL workload (cache_read / SUM(prompt_tokens) across ALL calls).
+                  This is the honest "% of input tokens served from cache" figure that
+                  matches user mental model ("out of 1.3K calls, X% hit cache").
+                  The cache-eligible-only hit_rate is preserved in the Anthropic Cache
+                  Performance panel below for cache quality diagnostics.
+                  Stats are fixed to 30d — labelled explicitly. */}
               <MiniStat
-                label="Cache Hit (30d)"
-                value={cacheData?.totals.hit_rate != null && (cacheData.totals.cache_read_tokens + cacheData.totals.cache_write_tokens) > 0
-                  ? `${(cacheData.totals.hit_rate * 100).toFixed(1)}%`
-                  : `${(totals.cache_hit_rate * 100).toFixed(1)}%`}
+                label="Cache Hit (30d, effective)"
+                value={(() => {
+                  // Prefer the new effective_hit_rate (full-workload denominator).
+                  // Fall back to legacy cache-eligible-only hit_rate if missing.
+                  const eff = cacheData?.totals.effective_hit_rate
+                  if (eff != null && cacheData?.totals.total_prompt_tokens_workload && cacheData.totals.total_prompt_tokens_workload > 0) {
+                    return `${(eff * 100).toFixed(1)}%`
+                  }
+                  if (cacheData?.totals.hit_rate != null && (cacheData.totals.cache_read_tokens + cacheData.totals.cache_write_tokens) > 0) {
+                    return `${(cacheData.totals.hit_rate * 100).toFixed(1)}%`
+                  }
+                  return `${(totals.cache_hit_rate * 100).toFixed(1)}%`
+                })()}
                 valueClass={(() => {
-                  const rate = cacheData?.totals.hit_rate ?? totals.cache_hit_rate
-                  return rate >= 0.7 ? 'text-green-400' : rate >= 0.4 ? 'text-yellow-400' : 'text-foreground'
+                  const rate = cacheData?.totals.effective_hit_rate
+                    ?? cacheData?.totals.hit_rate
+                    ?? totals.cache_hit_rate
+                  return rate >= 0.5 ? 'text-green-400' : rate >= 0.2 ? 'text-yellow-400' : 'text-foreground'
                 })()}
               />
               <MiniStat
@@ -728,7 +750,13 @@ function CacheMetricsSection() {
   return (
     <div className="rounded-lg border border-border bg-card p-3 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-xs text-muted-foreground font-medium">Anthropic Cache Performance</div>
+        <div>
+          <div className="text-xs text-muted-foreground font-medium">Anthropic Cache Performance</div>
+          <div className="text-[10px] text-muted-foreground/70 mt-0.5">
+            Hit rate computed across cache-eligible calls only (cache_read / (cache_read + cache_write)).
+            For full-workload context, see Cache Hit (30d, effective) above.
+          </div>
+        </div>
         <div className="flex gap-1">
           {(['7d', '30d', 'all'] as CacheWindow2[]).map(w => (
             <button
@@ -756,7 +784,7 @@ function CacheMetricsSection() {
         <>
           <div className="grid gap-2 grid-cols-2 md:grid-cols-4">
             <StatCard
-              label="Hit Rate"
+              label="Hit Rate (cache-eligible)"
               value={`${((totals.hit_rate ?? 0) * 100).toFixed(1)}%`}
               valueClass="text-blue-400"
             />
