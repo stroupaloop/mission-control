@@ -82,7 +82,8 @@ describe('GET /api/fleet/services', () => {
           pendingCount: 0,
           taskDefinition: 'arn:aws:ecs:...:task-definition/ender-stack-dev-companion-openclaw-smoke-test:1',
           launchType: 'FARGATE',
-          deployments: [{ id: 'ecs-svc/1' }],
+          // Steady-state PRIMARY only — activeDeployments should be 0
+          deployments: [{ id: 'ecs-svc/1', rolloutState: 'COMPLETED' }],
         },
         {
           serviceArn:
@@ -94,7 +95,11 @@ describe('GET /api/fleet/services', () => {
           pendingCount: 0,
           taskDefinition: 'arn:aws:ecs:...:task-definition/ender-stack-dev-litellm:7',
           launchType: 'FARGATE',
-          deployments: [{ id: 'ecs-svc/2' }],
+          // Mid-rollout — IN_PROGRESS deployment should be counted
+          deployments: [
+            { id: 'ecs-svc/2-old', rolloutState: 'COMPLETED' },
+            { id: 'ecs-svc/2-new', rolloutState: 'IN_PROGRESS' },
+          ],
         },
       ],
     })
@@ -108,8 +113,11 @@ describe('GET /api/fleet/services', () => {
     expect(body.services[0].name).toBe('ender-stack-dev-companion-openclaw-smoke-test')
     expect(body.services[0].status).toBe('ACTIVE')
     expect(body.services[0].runningCount).toBe(1)
-    expect(body.services[0].activeDeployments).toBe(1)
+    // Steady-state COMPLETED deployment is NOT counted as active
+    expect(body.services[0].activeDeployments).toBe(0)
     expect(body.services[1].name).toBe('ender-stack-dev-litellm')
+    // Mid-rollout — only the IN_PROGRESS entry counts
+    expect(body.services[1].activeDeployments).toBe(1)
     expect(body.truncated).toBe(false)
   })
 
@@ -176,18 +184,37 @@ describe('GET /api/fleet/services', () => {
     expect(sendMock).toHaveBeenCalledTimes(3)
   })
 
-  it('marks response truncated when ListServices fills the first page', async () => {
+  it('does NOT mark truncated when AWS returns no nextToken (boundary case)', async () => {
+    // Exactly 100 ARNs but no nextToken — cluster has exactly 100 services,
+    // not truncated. (Earlier count-based heuristic produced a false positive.)
     const arns = Array.from(
       { length: 100 },
       (_, i) =>
         `arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-${i}`,
     )
-    sendMock.mockResolvedValueOnce({ serviceArns: arns })
+    sendMock.mockResolvedValueOnce({ serviceArns: arns /* no nextToken */ })
     // 10 chunks of 10 — return one stub service per chunk so the test
     // doesn't have to materialize 100 service objects.
     for (let i = 0; i < 10; i++) {
       sendMock.mockResolvedValueOnce({ services: [] })
     }
+
+    const GET = await importHandler()
+    const resp = await GET(mkRequest())
+    const body = await resp.json()
+
+    expect(resp.status).toBe(200)
+    expect(body.truncated).toBe(false)
+  })
+
+  it('marks response truncated when AWS returns a nextToken', async () => {
+    sendMock.mockResolvedValueOnce({
+      serviceArns: [
+        'arn:aws:ecs:us-east-1:111122223333:service/ender-stack-dev/svc-0',
+      ],
+      nextToken: 'opaque-cursor-string',
+    })
+    sendMock.mockResolvedValueOnce({ services: [] })
 
     const GET = await importHandler()
     const resp = await GET(mkRequest())

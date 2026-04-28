@@ -57,7 +57,11 @@ export interface FleetServiceSummary {
   pendingCount: number | undefined
   taskDefinition: string | undefined
   launchType: string | undefined
-  /** Number of active deployments (>1 means a rollout is mid-flight). */
+  /**
+   * Number of deployments currently in `IN_PROGRESS` rolloutState — non-zero
+   * means an active rollout is mid-flight. (ECS keeps PRIMARY/ACTIVE/INACTIVE
+   * deployments in `service.deployments`, so a raw `.length` over-counts.)
+   */
   activeDeployments: number
 }
 
@@ -87,15 +91,15 @@ function summarizeService(service: Service): FleetServiceSummary {
     pendingCount: service.pendingCount,
     taskDefinition: service.taskDefinition,
     launchType: service.launchType,
-    activeDeployments: service.deployments?.length ?? 0,
+    activeDeployments:
+      service.deployments?.filter((d) => d.rolloutState === 'IN_PROGRESS')
+        .length ?? 0,
   }
 }
 
-export async function GET(
-  request: NextRequest,
-): Promise<NextResponse<FleetServicesResponse | FleetServicesErrorResponse>> {
+export async function GET(request: NextRequest) {
   const auth = requireRole(request, 'viewer')
-  if ('error' in auth && auth.error) {
+  if ('error' in auth) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })
   }
 
@@ -108,7 +112,10 @@ export async function GET(
     )
 
     const arns = listResp.serviceArns ?? []
-    const truncated = arns.length === LIST_SERVICES_MAX_RESULTS
+    // Use AWS's authoritative pagination signal (nextToken) instead of
+    // count comparison — a cluster with exactly LIST_SERVICES_MAX_RESULTS
+    // services has no nextToken and is NOT truncated.
+    const truncated = !!listResp.nextToken
 
     if (arns.length === 0) {
       return NextResponse.json({
