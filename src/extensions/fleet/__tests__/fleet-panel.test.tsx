@@ -151,19 +151,26 @@ describe('<FleetPanel />', () => {
   })
 
   it('passes ?harness=true on the fetch when the toggle is on', async () => {
+    // Use mockImplementation so each fetch call gets a fresh Response —
+    // body streams are single-use and a shared Response would throw on
+    // the second `.json()`, dropping the panel into its NetworkError
+    // branch. Today this test only asserts on URL inspection so the
+    // hidden failure isn't visible, but matching the documented pattern
+    // here (see truncated+harness test below) keeps the trap from biting
+    // a future maintainer adding output assertions.
+    const mkResp = () =>
+      new Response(
+        JSON.stringify({
+          cluster: 'ender-stack-dev',
+          region: 'us-east-1',
+          services: [],
+          truncated: false,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            cluster: 'ender-stack-dev',
-            region: 'us-east-1',
-            services: [],
-            truncated: false,
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        ) as unknown as Response,
-      )
+      .mockImplementation(() => Promise.resolve(mkResp()))
 
     render(<FleetPanel />)
 
