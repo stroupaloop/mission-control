@@ -21,11 +21,11 @@ interface ServicesResponse {
   cluster: string
   region: string
   services: FleetService[]
+  truncated: boolean
 }
 
 interface ErrorResponse {
   error: string
-  detail?: string
 }
 
 // ---------- Component ----------
@@ -33,7 +33,9 @@ interface ErrorResponse {
 export function FleetPanel() {
   const [data, setData] = useState<ServicesResponse | null>(null)
   const [error, setError] = useState<ErrorResponse | null>(null)
-  const [loading, setLoading] = useState(false)
+  // Initial render is mid-fetch (load() fires from useEffect); keep the
+  // Refresh button in its loading state from t=0 to avoid an empty body.
+  const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -49,11 +51,12 @@ export function FleetPanel() {
       } else {
         setData(body as ServicesResponse)
       }
-    } catch (err) {
-      setError({
-        error: 'NetworkError',
-        detail: err instanceof Error ? err.message : String(err),
-      })
+    } catch {
+      // Bare network failure (DNS, offline, etc.) — surface a stable
+      // generic. Browser dev-tools still show the underlying error;
+      // we don't echo it into the UI to keep this consistent with the
+      // server-side policy of not leaking error detail.
+      setError({ error: 'NetworkError' })
       setData(null)
     } finally {
       setLoading(false)
@@ -92,7 +95,6 @@ export function FleetPanel() {
           <div className="font-medium">Failed to load fleet</div>
           <div className="text-sm mt-1">
             <code>{error.error}</code>
-            {error.detail ? <>: {error.detail}</> : null}
           </div>
           <div className="text-xs text-muted-foreground mt-2">
             Common causes: MC task role missing <code>ecs:ListServices</code> /
@@ -110,6 +112,13 @@ export function FleetPanel() {
             {' · '}
             {data.services.length} service{data.services.length === 1 ? '' : 's'}
           </div>
+
+          {data.truncated ? (
+            <div className="mb-2 rounded border border-amber-500/50 bg-amber-500/10 p-2 text-xs">
+              Result truncated — only the first 100 services are shown.
+              Pagination support lands in a follow-up.
+            </div>
+          ) : null}
 
           {data.services.length === 0 ? (
             <div className="rounded border p-4 text-sm text-muted-foreground">

@@ -29,6 +29,7 @@ describe('<FleetPanel />', () => {
               activeDeployments: 1,
             },
           ],
+          truncated: false,
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       ) as unknown as Response,
@@ -43,6 +44,28 @@ describe('<FleetPanel />', () => {
     )
     expect(screen.getByText('ACTIVE')).toBeInTheDocument()
     expect(screen.getByText(/Cluster:/)).toBeInTheDocument()
+    // Truncation banner only appears when truncated=true
+    expect(screen.queryByText(/Result truncated/)).not.toBeInTheDocument()
+  })
+
+  it('renders truncation warning when API reports truncated=true', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          cluster: 'ender-stack-dev',
+          region: 'us-east-1',
+          services: [],
+          truncated: true,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ) as unknown as Response,
+    )
+
+    render(<FleetPanel />)
+
+    await waitFor(() =>
+      expect(screen.getByText(/Result truncated/)).toBeInTheDocument(),
+    )
   })
 
   it('renders error state on 502 from API', async () => {
@@ -50,7 +73,6 @@ describe('<FleetPanel />', () => {
       new Response(
         JSON.stringify({
           error: 'AccessDeniedException',
-          detail: 'User: ... is not authorized',
         }),
         { status: 502, headers: { 'content-type': 'application/json' } },
       ) as unknown as Response,
@@ -71,6 +93,7 @@ describe('<FleetPanel />', () => {
           cluster: 'ender-stack-dev',
           region: 'us-east-1',
           services: [],
+          truncated: false,
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       ) as unknown as Response,
@@ -82,6 +105,37 @@ describe('<FleetPanel />', () => {
       expect(
         screen.getByText(/No agents currently deployed in/),
       ).toBeInTheDocument(),
+    )
+  })
+
+  it('renders the Refresh button in loading state on initial mount', async () => {
+    // Hold fetch open so we can observe the initial-loading state.
+    let resolveFetch: (resp: Response) => void = () => {}
+    const fetchPromise = new Promise<Response>((resolve) => {
+      resolveFetch = resolve
+    })
+    vi.spyOn(globalThis, 'fetch').mockReturnValueOnce(fetchPromise)
+
+    render(<FleetPanel />)
+
+    // Loading text should be visible from t=0 because we initialize
+    // useState(true) — not after useEffect fires.
+    expect(screen.getByText(/Loading…/)).toBeInTheDocument()
+
+    resolveFetch(
+      new Response(
+        JSON.stringify({
+          cluster: 'ender-stack-dev',
+          region: 'us-east-1',
+          services: [],
+          truncated: false,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    )
+
+    await waitFor(() =>
+      expect(screen.getByText(/Refresh/)).toBeInTheDocument(),
     )
   })
 })

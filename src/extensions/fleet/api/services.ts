@@ -1,10 +1,11 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import {
   ECSClient,
   ListServicesCommand,
   DescribeServicesCommand,
   type Service,
 } from '@aws-sdk/client-ecs'
+import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 
 /**
@@ -22,12 +23,12 @@ import { logger } from '@/lib/logger'
  * (`ender-stack-dev`). Region from AWS_REGION (set automatically on
  * Fargate task metadata; falls back to us-east-1 for local dev).
  *
- * Returns:
- *   { services: [{ name, status, desiredCount, runningCount, pendingCount,
- *                  taskDefinition, launchType, deployments }] }
+ * Auth: gated by `requireRole(request, 'viewer')` — same minimum tier
+ * as other read-only extension endpoints (litellm/cache, etc.).
  *
- * On AWS error: 502 with the SDK's error name + message. CloudWatch
- * captures the full stack via the logger.error call.
+ * Error responses return only the SDK error name (no message detail) to
+ * avoid leaking IAM ARNs / account IDs into the browser. Full stack
+ * remains in CloudWatch via the logger.error call.
  */
 
 const CLUSTER_NAME = process.env.MC_FLEET_CLUSTER_NAME || 'ender-stack-dev'
@@ -38,6 +39,15 @@ const AWS_REGION = process.env.AWS_REGION || 'us-east-1'
 // current ender-stack-dev has well under 10. If this ever grows, the
 // chunked-paginate dance lands in a follow-up PR.
 const MAX_SERVICES_PER_DESCRIBE = 10
+
+// ListServices first-page cap. Past this size, the response is marked
+// truncated and the UI warns; nextToken pagination is a follow-up.
+const LIST_SERVICES_MAX_RESULTS = 100
+
+// Module-level singleton — reuses connection pool + credential cache
+// across requests. (Per-request `new ECSClient()` triggers fresh IMDS
+// resolution on Fargate.)
+const ecsClient = new ECSClient({ region: AWS_REGION })
 
 export interface FleetServiceSummary {
   name: string
@@ -55,15 +65,15 @@ export interface FleetServicesResponse {
   cluster: string
   region: string
   services: FleetServiceSummary[]
+  /** True when ListServices hit its first-page cap; UI should warn. */
+  truncated: boolean
 }
 
 export interface FleetServicesErrorResponse {
   error: string
-  detail?: string
 }
 
 function summarizeService(service: Service): FleetServiceSummary {
-  // (renamed from AgentServiceSummary per fleet rename)
   // ECS service ARN format (post-2023): arn:aws:ecs:region:account:service/cluster/name
   // Extract the friendly name (the last path segment).
   const arn = service.serviceArn || ''
@@ -81,27 +91,31 @@ function summarizeService(service: Service): FleetServiceSummary {
   }
 }
 
-export async function GET(): Promise<NextResponse<FleetServicesResponse | FleetServicesErrorResponse>> {
-  const client = new ECSClient({ region: AWS_REGION })
+export async function GET(
+  request: NextRequest,
+): Promise<NextResponse<FleetServicesResponse | FleetServicesErrorResponse>> {
+  const auth = requireRole(request, 'viewer')
+  if ('error' in auth && auth.error) {
+    return NextResponse.json({ error: auth.error }, { status: auth.status })
+  }
 
   try {
-    const listResp = await client.send(
+    const listResp = await ecsClient.send(
       new ListServicesCommand({
         cluster: CLUSTER_NAME,
-        // ECS supports up to 100 service ARNs per page; we only need a
-        // first page for now (Phase-2 dev has well under that). When MC
-        // scales to >100 services, paginate via nextToken.
-        maxResults: 100,
+        maxResults: LIST_SERVICES_MAX_RESULTS,
       }),
     )
 
     const arns = listResp.serviceArns ?? []
+    const truncated = arns.length === LIST_SERVICES_MAX_RESULTS
 
     if (arns.length === 0) {
       return NextResponse.json({
         cluster: CLUSTER_NAME,
         region: AWS_REGION,
         services: [],
+        truncated,
       })
     }
 
@@ -113,7 +127,7 @@ export async function GET(): Promise<NextResponse<FleetServicesResponse | FleetS
 
     const all: Service[] = []
     for (const chunk of chunks) {
-      const desc = await client.send(
+      const desc = await ecsClient.send(
         new DescribeServicesCommand({
           cluster: CLUSTER_NAME,
           services: chunk,
@@ -122,12 +136,24 @@ export async function GET(): Promise<NextResponse<FleetServicesResponse | FleetS
       if (desc.services) {
         all.push(...desc.services)
       }
+      // Surface any per-ARN failures (e.g. service deleted between
+      // ListServices and DescribeServices) so they don't silently vanish.
+      if (desc.failures && desc.failures.length > 0) {
+        logger.warn(
+          {
+            cluster: CLUSTER_NAME,
+            failures: desc.failures,
+          },
+          '[fleet] DescribeServices reported per-ARN failures',
+        )
+      }
     }
 
     return NextResponse.json({
       cluster: CLUSTER_NAME,
       region: AWS_REGION,
       services: all.map(summarizeService),
+      truncated,
     })
   } catch (err) {
     const error = err as { name?: string; message?: string; stack?: string }
@@ -142,7 +168,6 @@ export async function GET(): Promise<NextResponse<FleetServicesResponse | FleetS
     return NextResponse.json(
       {
         error: error.name || 'AWSError',
-        detail: error.message,
       },
       { status: 502 },
     )
