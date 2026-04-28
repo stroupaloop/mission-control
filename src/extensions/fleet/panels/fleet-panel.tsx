@@ -85,7 +85,11 @@ export function FleetPanel() {
             {data.services.length} agent{data.services.length === 1 ? '' : 's'}
           </div>
 
-          {data.truncated ? (
+          {/* Banner only when there ARE agents to show + truncation is real
+              risk. When there are zero agents AND truncated, the empty-state
+              copy below carries the same warning — duplicating both was
+              inherited noise. Auditor flagged the dual display as confusing. */}
+          {data.truncated && data.services.length > 0 ? (
             <div
               className="mb-2 rounded border border-amber-500/50 bg-amber-500/10 p-2 text-xs"
               data-testid="truncation-banner"

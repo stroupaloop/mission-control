@@ -35,9 +35,10 @@ const CLUSTER_NAME = process.env.MC_FLEET_CLUSTER_NAME || 'ender-stack-dev'
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1'
 
 // Service-arn page size cap on DescribeServicesCommand is 10 (AWS-side
-// limit). For deployments with more services we'd need to chunk; the
-// current ender-stack-dev has well under 10. If this ever grows, the
-// chunked-paginate dance lands in a follow-up PR.
+// limit). The handler chunks ARNs across multiple parallel Describe calls
+// — see the Promise.all block below. The follow-up still pending is
+// ListServices nextToken pagination (i.e. clusters with > 100 services),
+// not Describe chunking.
 const MAX_SERVICES_PER_DESCRIBE = 10
 
 // ListServices first-page cap. Past this size, the response is marked

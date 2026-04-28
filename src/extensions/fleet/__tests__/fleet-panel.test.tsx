@@ -48,9 +48,44 @@ describe('<FleetPanel />', () => {
     expect(screen.queryByTestId('truncation-banner')).not.toBeInTheDocument()
   })
 
-  it('renders truncation warning when API reports truncated=true', async () => {
+  it('renders truncation warning when API reports truncated=true AND agents are present', async () => {
     // Truncation banner now agent-flavored — Fleet always-filters, so the
     // copy talks about "agents may be missing" not "services truncated".
+    // Banner is only shown when services.length > 0; when there are zero
+    // agents the empty-state copy carries the same warning (avoids the
+    // dual-display Auditor flagged in #32 review).
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          cluster: 'ender-stack-dev',
+          region: 'us-east-1',
+          services: [
+            {
+              name: 'ender-stack-dev-companion-openclaw-smoke-test',
+              status: 'ACTIVE',
+              desiredCount: 1,
+              runningCount: 1,
+              pendingCount: 0,
+              taskDefinition: 'family:1',
+              launchType: 'FARGATE',
+              activeDeployments: 0,
+            },
+          ],
+          truncated: true,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ) as unknown as Response,
+    )
+
+    render(<FleetPanel />)
+
+    const banner = await screen.findByTestId('truncation-banner')
+    expect(banner.textContent).toMatch(/some agents may be missing/)
+  })
+
+  it('suppresses truncation banner when services=[] (empty-state copy carries the warning)', async () => {
+    // Joint state truncated=true + services=[] — the empty-state alone is
+    // sufficient. Banner would be redundant.
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -65,8 +100,11 @@ describe('<FleetPanel />', () => {
 
     render(<FleetPanel />)
 
-    const banner = await screen.findByTestId('truncation-banner')
-    expect(banner.textContent).toMatch(/some agents may be missing/)
+    // Empty-state is shown
+    const empty = await screen.findByTestId('empty-state')
+    expect(empty.textContent).toMatch(/More services may exist beyond the page cap/)
+    // Banner is suppressed
+    expect(screen.queryByTestId('truncation-banner')).not.toBeInTheDocument()
   })
 
   it('renders agent-flavored empty-state when API returns zero agents', async () => {
