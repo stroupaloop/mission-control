@@ -77,15 +77,17 @@ Recurring security scans across the deployment surface. API-only (no panels yet)
 
 - **`api/`** — `/api/security-audit/...` replacing upstream `security-audit/route.ts` with the extension version.
 
-### `fleet/` — Production-Deployed Agents (ECS)
+### `fleet/` — Cluster Services (ECS)
 
-Read-only view of production-deployed agents (ECS services in this deployment's cluster), distinct from upstream's `/agents` page which serves the local/docker dev-iteration story. Phase-2.0 of the ender-stack vertical-slice rollout — Deploy + Create-agent actions land in subsequent phases. Calls AWS SDK ECS server-side using the MC task role's IAM grant (`ecs:ListServices` + `ecs:DescribeServices`, scoped to the configured cluster — provisioned in ender-stack PR #150).
+Read-only view of every ECS service in the deployment's cluster — agent harnesses (OpenClaw companions, Hermes workers in future) alongside platform services (Mission Control, LiteLLM, Langfuse). Phase-2.0 of the ender-stack vertical-slice rollout — deploy + configure + observe controls land in subsequent phases (2.1+). Calls AWS SDK ECS server-side using the MC task role's IAM grant (`ecs:ListServices` + `ecs:DescribeServices`, scoped to the configured cluster — provisioned in ender-stack PR #150).
 
-- **`api/services.ts`** — `GET /api/fleet/services`. Auth-gated by `requireRole(request, 'viewer')`. `taskDefinition` ARNs are stripped to `family:revision` at the response boundary so the AWS account ID never reaches the browser.
-- **`panels/fleet-panel.tsx`** — `FleetPanel`. Table view (status, counts, launch type, in-progress deployments). Cross-link banner to `/agents` makes the layer distinction explicit.
+- **`api/services.ts`** — `GET /api/fleet/services` (optional `?harness=true` query param filters response to services tagged `Component=agent-harness`). Auth-gated by `requireRole(request, 'viewer')`. Calls `DescribeServices` with `include: ['TAGS']` so the tag array is available for filtering. `taskDefinition` ARNs are stripped to `family:revision` at the response boundary so the AWS account ID never reaches the browser.
+- **`panels/fleet-panel.tsx`** — `FleetPanel`. Header is "Cluster Services". Table view (status, counts, launch type, in-progress deployments) with an "Agent harnesses only" checkbox that toggles the harness filter. Empty/error/truncation copy varies by filter state to avoid misleading operators when the filter is on but the cluster has > 100 services.
 - **`MC_FLEET_CLUSTER_NAME`** — env var, defaults to `ender-stack-dev`.
 
-Future unification path: an upstream `deploymentModeRegistry` hook (tracked separately) would let ender-stack register `ecs-fargate` against upstream's `/agents` Create-Agent flow, at which point the parallel Fleet view either deprecates or pivots to ECS-deployed-agents observability.
+Distinct from upstream's `/agents` page which serves the local/docker dev-iteration story. The two surfaces stay separate by deliberate choice (see Phase-2 plan locked decisions: extending upstream `/agents` for ECS deploys would breach the 2-touchpoint contract). When MC has its own deploy/configure flow (Phase 2.2+), `/agents` will be hideable behind `MC_HIDE_UPSTREAM_AGENTS` env flag.
+
+Companion ender-stack convention: agent harness modules tag their `aws_ecs_service` resources with `Component = "agent-harness"`; platform services (LiteLLM, MC, etc.) carry `Component = "platform-service"`. The filter consumes these tags, so any new ECS module needs to declare one of those values for Fleet to render it correctly.
 
 ## Tables Touched By Extensions
 

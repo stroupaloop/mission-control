@@ -1,7 +1,6 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 // `import type` elides at compile time — no runtime import of the
 // AWS SDK / NextRequest from the server module reaches the client bundle.
@@ -18,14 +17,19 @@ export function FleetPanel() {
   // Initial render is mid-fetch (load() fires from useEffect); keep the
   // Refresh button in its loading state from t=0 to avoid an empty body.
   const [loading, setLoading] = useState(true)
+  // When true, hide platform services (mission-control, litellm, etc.) and
+  // show only services tagged Component=agent-harness — the OpenClaw
+  // companions and Hermes workers operators actually deploy.
+  const [harnessOnly, setHarnessOnly] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const resp = await fetch('/api/fleet/services', {
-        cache: 'no-store',
-      })
+      const url = harnessOnly
+        ? '/api/fleet/services?harness=true'
+        : '/api/fleet/services'
+      const resp = await fetch(url, { cache: 'no-store' })
       const body = (await resp.json()) as ServicesResponse | ErrorResponse
       if (!resp.ok) {
         setError(body as ErrorResponse)
@@ -43,7 +47,7 @@ export function FleetPanel() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [harnessOnly])
 
   useEffect(() => {
     void load()
@@ -53,11 +57,12 @@ export function FleetPanel() {
     <div className="p-6">
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h1 className="text-2xl font-semibold">Fleet</h1>
+          <h1 className="text-2xl font-semibold">Cluster Services</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Production-deployed agents — ECS services in this deployment&apos;s
-            cluster (read-only). Phase-2.0 — deploy + create-agent actions land
-            in subsequent steps.
+            ECS services in this deployment&apos;s cluster — agent harnesses
+            (OpenClaw, Hermes) alongside platform services (Mission Control,
+            LiteLLM). Read-only today; deploy + configure actions ship in
+            subsequent phases.
           </p>
         </div>
         <Button variant="outline" onClick={load} disabled={loading}>
@@ -65,11 +70,22 @@ export function FleetPanel() {
         </Button>
       </div>
 
-      <div className="mb-4 rounded border border-muted bg-muted/30 p-3 text-sm text-muted-foreground">
-        Looking to spin up a local agent for dev iteration?{' '}
-        <Link href="/agents" className="underline font-medium">
-          Use Agents →
-        </Link>
+      <div className="mb-4 flex items-center gap-2 text-sm">
+        <label className="inline-flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={harnessOnly}
+            onChange={(e) => setHarnessOnly(e.target.checked)}
+            // Disable during in-flight load so rapid toggling can't queue
+            // two concurrent fetches whose `setData` resolutions race —
+            // last-to-resolve would otherwise stomp the toggle's state.
+            disabled={loading}
+          />
+          <span>Agent harnesses only</span>
+        </label>
+        <span className="text-xs text-muted-foreground">
+          (filters by <code>Component=agent-harness</code> tag)
+        </span>
       </div>
 
       {error ? (
@@ -96,15 +112,26 @@ export function FleetPanel() {
           </div>
 
           {data.truncated ? (
-            <div className="mb-2 rounded border border-amber-500/50 bg-amber-500/10 p-2 text-xs">
-              Result truncated — only the first 100 services are shown.
-              Pagination support lands in a follow-up.
+            <div
+              className="mb-2 rounded border border-amber-500/50 bg-amber-500/10 p-2 text-xs"
+              data-testid="truncation-banner"
+            >
+              {harnessOnly
+                ? 'Cluster has > 100 services; the harness filter only sees the first 100. Some agent harnesses may be missing from this view. Pagination support lands in a follow-up.'
+                : 'Result truncated — only the first 100 services are shown. Pagination support lands in a follow-up.'}
             </div>
           ) : null}
 
           {data.services.length === 0 ? (
-            <div className="rounded border p-4 text-sm text-muted-foreground">
-              No agents currently deployed in <code>{data.cluster}</code>.
+            <div
+              className="rounded border p-4 text-sm text-muted-foreground"
+              data-testid="empty-state"
+            >
+              {harnessOnly && data.truncated
+                ? 'No agent harnesses found in the first 100 services. More services may exist beyond the page cap.'
+                : harnessOnly
+                  ? `No services in ${data.cluster} tagged as agent harnesses.`
+                  : `No services in ${data.cluster}.`}
             </div>
           ) : (
             <div className="overflow-x-auto rounded border">

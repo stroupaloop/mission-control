@@ -12572,8 +12572,20 @@
           "Admin"
         ],
         "summary": "List ECS services in the deployment cluster (Fleet view)",
-        "description": "Read-only listing of production-deployed agents — ECS services in the cluster configured by MC_FLEET_CLUSTER_NAME. Calls ecs:ListServices + ecs:DescribeServices. taskDefinition is returned as `family:revision` only (the account-id-bearing ARN prefix is stripped at the response boundary). Distinct from `/agents` which serves the local/docker dev-iteration flow.",
+        "description": "Read-only listing of ECS services in the cluster configured by MC_FLEET_CLUSTER_NAME. Returns agent harnesses (companion/openclaw, worker/hermes) alongside platform services (mission-control, litellm, etc.). Calls ecs:ListServices + ecs:DescribeServices with include:[TAGS]. taskDefinition is returned as `family:revision` only (the account-id-bearing ARN prefix is stripped at the response boundary). Optional `harness=true` query param filters to services tagged Component=agent-harness — useful when the page is just for managing agent deploys, not platform infra.",
         "operationId": "listFleetServices",
+        "parameters": [
+          {
+            "name": "harness",
+            "in": "query",
+            "required": false,
+            "description": "When the literal string \"true\", filter response to services tagged Component=agent-harness. Default: unfiltered. Note: filtering is post-fetch — the `truncated` field in the response reflects whether the raw cluster ListServices was page-capped at 100, NOT whether the filtered results are complete. A truncated response with this filter on means harnesses MAY exist beyond the cap; the API cannot confirm or deny without pagination (a follow-up). Typed as a string enum rather than boolean to keep the URL surface aligned with the panel's literal `?harness=true` construction.",
+            "schema": {
+              "type": "string",
+              "enum": ["true"]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Fleet services in this deployment's cluster",
@@ -12634,7 +12646,7 @@
                     },
                     "truncated": {
                       "type": "boolean",
-                      "description": "True when AWS returned a nextToken; the response is a partial first page."
+                      "description": "True when AWS returned a nextToken — the raw cluster ListServices response was page-capped at 100. Reflects the pre-filter cluster cap, not the post-filter result count. With ?harness=true and truncated=true, harnesses MAY exist beyond the cap; pagination support is a follow-up."
                     }
                   }
                 }
