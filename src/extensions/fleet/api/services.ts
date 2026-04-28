@@ -130,13 +130,12 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })
   }
 
-  // `?harness=true` (or `harness=1`) → filter to agent-harness-tagged services
-  // only. Default = unfiltered (all services in the cluster, including
-  // platform services like MC + LiteLLM).
+  // `?harness=true` → filter to agent-harness-tagged services only.
+  // Default = unfiltered (all services in the cluster, including platform
+  // services like MC + LiteLLM). Single canonical truthy value matches the
+  // panel and the OpenAPI spec; alternative spellings are not accepted.
   const url = new URL(request.url)
-  const harnessOnly =
-    url.searchParams.get('harness') === 'true' ||
-    url.searchParams.get('harness') === '1'
+  const harnessOnly = url.searchParams.get('harness') === 'true'
 
   try {
     const listResp = await ecsClient.send(

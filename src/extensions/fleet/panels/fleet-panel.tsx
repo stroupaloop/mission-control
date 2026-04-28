@@ -108,16 +108,26 @@ export function FleetPanel() {
           </div>
 
           {data.truncated ? (
-            <div className="mb-2 rounded border border-amber-500/50 bg-amber-500/10 p-2 text-xs">
-              Result truncated — only the first 100 services are shown.
-              Pagination support lands in a follow-up.
+            <div
+              className="mb-2 rounded border border-amber-500/50 bg-amber-500/10 p-2 text-xs"
+              data-testid="truncation-banner"
+            >
+              {harnessOnly
+                ? 'Cluster has > 100 services; the harness filter only sees the first 100. Some agent harnesses may be missing from this view. Pagination support lands in a follow-up.'
+                : 'Result truncated — only the first 100 services are shown. Pagination support lands in a follow-up.'}
             </div>
           ) : null}
 
           {data.services.length === 0 ? (
-            <div className="rounded border p-4 text-sm text-muted-foreground">
-              No services in <code>{data.cluster}</code>
-              {harnessOnly ? ' tagged as agent harnesses' : ''}.
+            <div
+              className="rounded border p-4 text-sm text-muted-foreground"
+              data-testid="empty-state"
+            >
+              {harnessOnly && data.truncated
+                ? 'No agent harnesses found in the first 100 services. More services may exist beyond the page cap.'
+                : harnessOnly
+                  ? `No services in ${data.cluster} tagged as agent harnesses.`
+                  : `No services in ${data.cluster}.`}
             </div>
           ) : (
             <div className="overflow-x-auto rounded border">

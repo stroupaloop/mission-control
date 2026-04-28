@@ -68,6 +68,48 @@ describe('<FleetPanel />', () => {
     )
   })
 
+  it('renders harness-aware copy when truncated AND no results AND harnessOnly', async () => {
+    // Simulates the joint state Claude Auditor + Greptile flagged: cluster
+    // has > 100 services but none of the first 100 carry Component=agent-harness.
+    // Generic empty-state would say "no harnesses found" without acknowledging
+    // the truncation; harness-aware copy explains the page cap explicitly.
+    //
+    // mockImplementation (not mockResolvedValue) constructs a fresh Response
+    // for each call — Response body streams are single-use, so a shared
+    // mocked Response throws on the second `.json()` and the panel
+    // silently drops to its NetworkError branch.
+    const mkResp = () =>
+      new Response(
+        JSON.stringify({
+          cluster: 'ender-stack-dev',
+          region: 'us-east-1',
+          services: [],
+          truncated: true,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() => Promise.resolve(mkResp()))
+
+    render(<FleetPanel />)
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    const checkbox = screen.getByLabelText(/Agent harnesses only/) as HTMLInputElement
+    await act(async () => {
+      checkbox.click()
+    })
+
+    // Match via data-testid since JSX-rendered multi-line strings can be
+    // split across text nodes that defeat regex/string matchers.
+    const banner = await screen.findByTestId('truncation-banner')
+    expect(banner.textContent).toMatch(
+      /the harness filter only sees the first 100/,
+    )
+    const empty = await screen.findByTestId('empty-state')
+    expect(empty.textContent).toMatch(/More services may exist beyond the page cap/)
+  })
+
   it('renders error state on 502 from API', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(

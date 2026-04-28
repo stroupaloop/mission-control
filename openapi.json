@@ -12579,10 +12579,10 @@
             "name": "harness",
             "in": "query",
             "required": false,
-            "description": "When true (or 1), filter response to services tagged Component=agent-harness. Default: unfiltered.",
+            "description": "When the literal string \"true\", filter response to services tagged Component=agent-harness. Default: unfiltered.",
             "schema": {
               "type": "string",
-              "enum": ["true", "1"]
+              "enum": ["true"]
             }
           }
         ],
