@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { FleetPanel } from '../panels/fleet-panel'
 
 // Use vitest's globalThis.fetch mocking pattern (matches MC fork's litellm
@@ -219,5 +219,133 @@ describe('<FleetPanel />', () => {
     await waitFor(() =>
       expect(screen.getByText(/Refresh/)).toBeInTheDocument(),
     )
+  })
+})
+
+describe('<FleetPanel /> — Redeploy button', () => {
+  // Helpers — the panel makes 1 fetch (services) on mount, then 1 fetch
+  // (redeploy) on click, then 1 fetch (services again) to refresh post-rollout.
+  // mockImplementation factory because Response body streams are single-use.
+  const mkServicesResp = (services: unknown[] = [], truncated = false) =>
+    new Response(
+      JSON.stringify({
+        cluster: 'ender-stack-dev',
+        region: 'us-east-1',
+        services,
+        truncated,
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )
+
+  const stableSvc = {
+    name: 'ender-stack-dev-companion-openclaw-smoke-test',
+    status: 'ACTIVE',
+    desiredCount: 1,
+    runningCount: 1,
+    pendingCount: 0,
+    taskDefinition: 'family:1',
+    launchType: 'FARGATE',
+    activeDeployments: 0, // steady state — Redeploy enabled
+  }
+
+  it('POSTs to /api/fleet/services/:name/redeploy, refreshes table, and re-enables the button', async () => {
+    // Auditor flagged: prior implementation set kind:'rolling' and never
+    // reset, so the button stayed permanently disabled until hard reload.
+    // This test simulates the operator-real flow: click → 202 → refresh
+    // shows ECS already on a fresh task (activeDeployments=0) → button
+    // back to enabled. The disable predicate now keys solely on
+    // activeDeployments + the in-flight POST flag — ECS is the source of
+    // truth for "rolling".
+    const calls: string[] = []
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+      const u = String(url)
+      calls.push(u)
+      if (u.endsWith('/redeploy')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              deploymentId: 'ecs-svc/new',
+              taskDefinition: 'family:1',
+            }),
+            { status: 202, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+      // /api/fleet/services — return steady-state data both before AND
+      // after the redeploy click. In production, the post-redeploy fetch
+      // would briefly show activeDeployments=1 then drop to 0 once ECS
+      // reports COMPLETED. We collapse to "0 throughout" since the
+      // disable predicate is the same shape either way and asserting
+      // re-enabled is the regression we care about.
+      return Promise.resolve(mkServicesResp([stableSvc]))
+    })
+
+    render(<FleetPanel />)
+
+    const button = await screen.findByTestId(`redeploy-${stableSvc.name}`)
+    expect(button).toBeEnabled()
+
+    await act(async () => {
+      ;(button as HTMLButtonElement).click()
+    })
+
+    // Right URL was POSTed
+    await waitFor(() =>
+      expect(
+        calls.some((c) =>
+          c.endsWith(`/api/fleet/services/${stableSvc.name}/redeploy`),
+        ),
+      ).toBe(true),
+    )
+    // Table refresh fetch followed
+    await waitFor(() =>
+      expect(calls.filter((c) => c === '/api/fleet/services').length).toBeGreaterThanOrEqual(2),
+    )
+    // Button re-enabled after the refresh — regression guard for the
+    // 'rolling' state bug Auditor flagged on the initial commit.
+    await waitFor(() =>
+      expect(screen.getByTestId(`redeploy-${stableSvc.name}`)).toBeEnabled(),
+    )
+  })
+
+  it('renders an inline error if the redeploy POST returns 502', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+      const u = String(url)
+      if (u.endsWith('/redeploy')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ error: 'AccessDeniedException' }),
+            { status: 502, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+      return Promise.resolve(mkServicesResp([stableSvc]))
+    })
+
+    render(<FleetPanel />)
+    const button = await screen.findByTestId(`redeploy-${stableSvc.name}`)
+    await act(async () => {
+      ;(button as HTMLButtonElement).click()
+    })
+
+    const errorEl = await screen.findByTestId(
+      `redeploy-error-${stableSvc.name}`,
+    )
+    expect(errorEl.textContent).toMatch(/AccessDeniedException/)
+  })
+
+  it('disables Redeploy button when activeDeployments > 0 (avoids double-rolling)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        mkServicesResp([{ ...stableSvc, activeDeployments: 1 }]),
+      ),
+    )
+
+    render(<FleetPanel />)
+    const button = await screen.findByTestId(`redeploy-${stableSvc.name}`)
+    expect(button).toBeDisabled()
+    // Button label flips to "Rolling…" when ECS already shows IN_PROGRESS
+    expect(button.textContent).toMatch(/Rolling/)
   })
 })

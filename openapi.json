@@ -12668,6 +12668,98 @@
         }
       }
     },
+    "/api/fleet/services/{name}/redeploy": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Force-new-deployment on an agent's ECS service (Fleet Redeploy)",
+        "description": "Triggers ecs:UpdateService with forceNewDeployment=true on the named service in the configured cluster (MC_FLEET_CLUSTER_NAME). Rolls the existing service onto a fresh task without changing the task def or desired count. Backs the Redeploy button on Fleet rows. Auth: operator role required (lower than Create/Delete because Redeploy is reversible — kicks the existing config back onto a fresh task; nothing is created or destroyed). The cluster + account scope on MC's IAM grant is the actual authorization boundary; the path param is treated as opaque.",
+        "operationId": "redeployFleetService",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Bare ECS service name (not an ARN). Example: ender-stack-dev-companion-openclaw-smoke-test.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "ECS accepted the UpdateService call; rollout is in flight (not yet complete).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [true]
+                    },
+                    "deploymentId": {
+                      "type": "string",
+                      "description": "ECS deployment ID for the new PRIMARY deployment. Useful for cross-referencing CloudTrail."
+                    },
+                    "taskDefinition": {
+                      "type": "string",
+                      "description": "family:revision of the task def the new deployment is rolling onto. Account-id-bearing prefix stripped at the response boundary."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "ECS reported ServiceNotFoundException — operator typo or stale UI.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "AWS SDK error (e.g. AccessDeniedException if IAM grant missing). Response returns only the SDK error name; message suppressed to avoid leaking IAM ARNs / account IDs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/security-audit": {
       "get": {
         "tags": [
