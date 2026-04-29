@@ -11,6 +11,12 @@ import type {
 
 // ---------- Component ----------
 
+// Polling cadence while any row is mid-rollout. ECS rolls finish in 2–4
+// min; 5s gives operators responsive feedback after a Redeploy click
+// without spamming DescribeServices on healthy fleets (the polling stops
+// the moment all rows hit activeDeployments=0).
+const POLL_INTERVAL_MS = 5000
+
 // Per-row redeploy state. Keyed by service name. 'pending' = awaiting
 // the POST /redeploy response; 'error' + message = SDK or network error.
 // After a 202 we hand control back to ECS's `activeDeployments` counter
@@ -33,16 +39,25 @@ export function FleetPanel() {
     Record<string, RedeployState>
   >({})
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
+  const load = useCallback(async ({ silent = false } = {}) => {
+    // `silent` skips the visible "Loading…" state on the Refresh button.
+    // Background polls pass silent=true so a 5s rollout-watch interval
+    // doesn't make the button flicker every tick. Initial mount + manual
+    // clicks pass silent=false (default) so operators see the spinner.
+    if (!silent) setLoading(true)
     try {
       const resp = await fetch('/api/fleet/services', { cache: 'no-store' })
       const body = (await resp.json()) as ServicesResponse | ErrorResponse
       if (!resp.ok) {
+        // Don't clear `data` on transient errors. The auto-poll loop's
+        // `hasRolling` predicate evaluates `data?.services.some(...) ??
+        // false` — clearing data flips it to false, which kills the
+        // poll interval, which strands the operator on "Rolling…"
+        // exactly when a transient AWS hiccup happens mid-rollout
+        // (the original bug this PR sets out to fix).
         setError(body as ErrorResponse)
-        setData(null)
       } else {
+        setError(null)
         setData(body as ServicesResponse)
       }
     } catch {
@@ -50,10 +65,10 @@ export function FleetPanel() {
       // generic. Browser dev-tools still show the underlying error;
       // we don't echo it into the UI to keep this consistent with the
       // server-side policy of not leaking error detail.
+      // Same data-preservation rationale as above.
       setError({ error: 'NetworkError' })
-      setData(null)
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [])
 
@@ -95,6 +110,25 @@ export function FleetPanel() {
     void load()
   }, [load])
 
+  // Auto-poll while ANY row is mid-rollout. ECS rolls take 2–4 min; without
+  // this, the table snapshots the post-Redeploy IN_PROGRESS state and never
+  // refreshes — operator sees "Rolling…" indefinitely until they click
+  // Refresh manually. Same `activeDeployments > 0` predicate the per-row
+  // disabled state uses, so the loops naturally pair: polling stops the
+  // moment ECS reports COMPLETED on every row.
+  const hasRolling =
+    data?.services.some((s) => s.activeDeployments > 0) ?? false
+
+  useEffect(() => {
+    if (!hasRolling) return
+    const id = setInterval(() => {
+      // silent=true: don't toggle the Refresh button's disabled state
+      // every 5s for a rollout the operator didn't initiate.
+      void load({ silent: true })
+    }, POLL_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [hasRolling, load])
+
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-4">
@@ -106,7 +140,11 @@ export function FleetPanel() {
             deploy + configure actions ship in subsequent phases.
           </p>
         </div>
-        <Button variant="outline" onClick={load} disabled={loading}>
+        <Button
+          variant="outline"
+          onClick={() => void load()}
+          disabled={loading}
+        >
           {loading ? 'Loading…' : 'Refresh'}
         </Button>
       </div>
