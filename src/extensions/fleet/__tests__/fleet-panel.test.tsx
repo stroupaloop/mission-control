@@ -556,3 +556,192 @@ describe('<FleetPanel /> — auto-poll while rolling', () => {
     expect(screen.queryByRole('button', { name: /Loading…/i })).not.toBeInTheDocument()
   })
 })
+
+describe('<FleetPanel /> — AbortController + staleness indicator', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const stableSvc = {
+    name: 'ender-stack-dev-companion-openclaw-smoke-test',
+    status: 'ACTIVE',
+    desiredCount: 1,
+    runningCount: 1,
+    pendingCount: 0,
+    taskDefinition: 'family:1',
+    launchType: 'FARGATE',
+    activeDeployments: 0,
+  }
+
+  const mkResp = (services: unknown[]) =>
+    new Response(
+      JSON.stringify({
+        cluster: 'ender-stack-dev',
+        region: 'us-east-1',
+        services,
+        truncated: false,
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )
+
+  it('passes signal to fetch (AbortController is wired up)', async () => {
+    // Lightweight assertion: every fetch call carries an AbortSignal.
+    // Lets future maintainers see the contract without depending on
+    // race-condition test plumbing.
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(mkResp([stableSvc]) as unknown as Response)
+
+    render(<FleetPanel />)
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+
+    const init = fetchSpy.mock.calls[0][1] as RequestInit | undefined
+    expect(init?.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('aborts in-flight fetch on component unmount', async () => {
+    let abortFired = false
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+      const signal = (init as RequestInit | undefined)?.signal
+      signal?.addEventListener('abort', () => {
+        abortFired = true
+      })
+      // Never resolves — simulates a slow/hung fetch
+      return new Promise<Response>(() => {})
+    })
+
+    const { unmount } = render(<FleetPanel />)
+    // Unmount mid-fetch
+    unmount()
+
+    expect(abortFired).toBe(true)
+  })
+
+  it('renders staleness indicator when error AND data are both present', async () => {
+    // Initial load succeeds; second fetch (e.g. auto-poll or manual
+    // Refresh) returns 502. Data is preserved; error banner renders;
+    // staleness indicator should appear next to the cluster summary
+    // showing how long ago the table data was fetched.
+    let respMode: 'ok' | 'error' = 'ok'
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      respMode === 'ok'
+        ? Promise.resolve(mkResp([stableSvc]))
+        : Promise.resolve(
+            new Response(JSON.stringify({ error: 'AccessDeniedException' }), {
+              status: 502,
+              headers: { 'content-type': 'application/json' },
+            }),
+          ),
+    )
+
+    render(<FleetPanel />)
+
+    // Wait for initial load to populate data — no staleness indicator
+    // yet (no error).
+    await screen.findByText('ender-stack-dev-companion-openclaw-smoke-test')
+    expect(screen.queryByTestId('staleness-indicator')).not.toBeInTheDocument()
+
+    // Trigger a 502 via the Refresh button
+    respMode = 'error'
+    const button = screen.getByRole('button', { name: /Refresh/i })
+    await act(async () => {
+      ;(button as HTMLButtonElement).click()
+    })
+
+    // Error banner renders + staleness indicator appears
+    await screen.findByText('Failed to load fleet')
+    const indicator = await screen.findByTestId('staleness-indicator')
+    expect(indicator.textContent).toMatch(/Last refreshed: \d+s ago/)
+  })
+
+  it('a silent poll superseding a non-silent Refresh does NOT leave loading stuck', async () => {
+    // Real regression test for the Auditor PR #35 stuck-state bug.
+    // Sequence:
+    //   1. Mount → first fetch resolves → loading=false, Refresh visible
+    //   2. Click Refresh → second fetch hangs → loading=true
+    //   3. Silent poll fires → aborts second → poll's fetch resolves
+    //      → loading MUST flip back to false
+    //
+    // Earlier guard `!silent && !controller.signal.aborted` prevented
+    // the aborted Refresh from clearing loading AND prevented the
+    // silent poll from clearing it (because !silent was false), so
+    // loading stayed true forever. Fix: canonical-call check via
+    // `abortRef.current === controller`, no silent gate.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+
+    let resolveRefreshFetch: (r: Response) => void = () => {}
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(() =>
+        // Mount fetch — rolling state so the auto-poll engages
+        Promise.resolve(
+          mkResp([{ ...stableSvc, activeDeployments: 1 }]) as unknown as Response,
+        ),
+      )
+      .mockImplementationOnce(
+        () =>
+          // Refresh fetch — hangs until manually resolved (or aborted)
+          new Promise<Response>((resolve) => {
+            resolveRefreshFetch = resolve
+          }),
+      )
+      .mockImplementation(() =>
+        // Subsequent polls — return steady state
+        Promise.resolve(mkResp([stableSvc]) as unknown as Response),
+      )
+
+    render(<FleetPanel />)
+
+    // Wait for mount load to settle + the Refresh button to appear
+    await screen.findByRole('button', { name: /Refresh/i })
+
+    // Click Refresh → fetch #2 starts, hangs, loading=true
+    const refreshBtn = screen.getByRole('button', { name: /Refresh/i })
+    await act(async () => {
+      ;(refreshBtn as HTMLButtonElement).click()
+    })
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /Loading…/i }),
+      ).toBeInTheDocument(),
+    )
+
+    // Advance 5s → auto-poll fires (silent), aborts the hung Refresh,
+    // its own fetch resolves with steady state.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    // Resolve the now-aborted Refresh fetch (in production the
+    // browser's fetch rejects with AbortError; under jsdom we just
+    // close the dangling promise; the panel's catch already saw the
+    // signal abort).
+    resolveRefreshFetch(mkResp([stableSvc]) as unknown as Response)
+
+    // Critical assertion: button is back to "Refresh" — NOT stuck on
+    // "Loading…". The silent poll, as the canonical call, took over
+    // setLoading responsibility.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /Refresh/i }),
+      ).toBeInTheDocument(),
+    )
+    expect(
+      screen.queryByRole('button', { name: /Loading…/i }),
+    ).not.toBeInTheDocument()
+    void fetchSpy
+  })
+
+  it('hides staleness indicator when no error is present', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      mkResp([stableSvc]) as unknown as Response,
+    )
+
+    render(<FleetPanel />)
+    await screen.findByText('ender-stack-dev-companion-openclaw-smoke-test')
+
+    // No error → no staleness indicator, even though we DO have data
+    expect(screen.queryByTestId('staleness-indicator')).not.toBeInTheDocument()
+  })
+})
