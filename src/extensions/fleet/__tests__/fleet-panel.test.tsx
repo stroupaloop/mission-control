@@ -248,7 +248,14 @@ describe('<FleetPanel /> — Redeploy button', () => {
     activeDeployments: 0, // steady state — Redeploy enabled
   }
 
-  it('POSTs to /api/fleet/services/:name/redeploy on click and refreshes the table', async () => {
+  it('POSTs to /api/fleet/services/:name/redeploy, refreshes table, and re-enables the button', async () => {
+    // Auditor flagged: prior implementation set kind:'rolling' and never
+    // reset, so the button stayed permanently disabled until hard reload.
+    // This test simulates the operator-real flow: click → 202 → refresh
+    // shows ECS already on a fresh task (activeDeployments=0) → button
+    // back to enabled. The disable predicate now keys solely on
+    // activeDeployments + the in-flight POST flag — ECS is the source of
+    // truth for "rolling".
     const calls: string[] = []
     vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
       const u = String(url)
@@ -265,13 +272,17 @@ describe('<FleetPanel /> — Redeploy button', () => {
           ),
         )
       }
-      // /api/fleet/services
+      // /api/fleet/services — return steady-state data both before AND
+      // after the redeploy click. In production, the post-redeploy fetch
+      // would briefly show activeDeployments=1 then drop to 0 once ECS
+      // reports COMPLETED. We collapse to "0 throughout" since the
+      // disable predicate is the same shape either way and asserting
+      // re-enabled is the regression we care about.
       return Promise.resolve(mkServicesResp([stableSvc]))
     })
 
     render(<FleetPanel />)
 
-    // Wait for table to render
     const button = await screen.findByTestId(`redeploy-${stableSvc.name}`)
     expect(button).toBeEnabled()
 
@@ -290,6 +301,11 @@ describe('<FleetPanel /> — Redeploy button', () => {
     // Table refresh fetch followed
     await waitFor(() =>
       expect(calls.filter((c) => c === '/api/fleet/services').length).toBeGreaterThanOrEqual(2),
+    )
+    // Button re-enabled after the refresh — regression guard for the
+    // 'rolling' state bug Auditor flagged on the initial commit.
+    await waitFor(() =>
+      expect(screen.getByTestId(`redeploy-${stableSvc.name}`)).toBeEnabled(),
     )
   })
 

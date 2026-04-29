@@ -1,14 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 import {
   ECSClient,
+  DescribeServicesCommand,
   UpdateServiceCommand,
+  type Service,
 } from '@aws-sdk/client-ecs'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 
 /**
  * POST /api/fleet/services/:name/redeploy — force-new-deployment on an
- * existing ECS service.
+ * existing agent-harness-tagged ECS service.
  *
  * Phase-2.1's "thinnest MC-mutates-ECS loop": rolls the existing service
  * onto a fresh task without changing the task def or the desired count.
@@ -20,11 +22,21 @@ import { logger } from '@/lib/logger'
  * because Redeploy is reversible — it kicks the existing config back
  * onto a fresh task; nothing is created or destroyed.
  *
- * The path param `:name` is the bare ECS service name (e.g.
- * `ender-stack-dev-companion-openclaw-smoke-test`), not an ARN. The
- * handler treats it as opaque and passes it straight to
- * UpdateServiceCommand — IAM resource-level scoping (cluster + account)
- * is the actual authorization boundary, not request-side validation.
+ * Service-scope guard (defense-in-depth on top of IAM):
+ *   The IAM grant from ender-stack PR #187 is cluster-scoped — it permits
+ *   UpdateService on any service in the cluster, including platform
+ *   services (mission-control, litellm, etc.). To prevent an authenticated
+ *   operator from accidentally (or maliciously) restarting a platform
+ *   service via this endpoint, the handler does a pre-flight DescribeServices
+ *   call and rejects unless the target carries `Component=agent-harness`.
+ *   Same tag boundary the Fleet panel renders.
+ *
+ *   Auditor (#187) flagged: IAM can't restrict `UpdateService` parameters
+ *   (no scale-to-zero, no task-def-swap protection at IAM layer). The
+ *   handler is the only place that can constrain the call shape, and
+ *   sends ONLY `{ forceNewDeployment: true }` — never any client-supplied
+ *   fields. Combined with the harness-only guard, blast radius collapses
+ *   to "force-restart agent harnesses" — exactly what Phase 2.1 needs.
  *
  * Response 202 (deployment kicked off, not finished):
  *   { ok: true, deploymentId, taskDefinition }
@@ -40,6 +52,20 @@ const AWS_REGION = process.env.AWS_REGION || 'us-east-1'
 // Module-level singleton — same pattern as services.ts. Reuses connection
 // pool + credential cache.
 const ecsClient = new ECSClient({ region: AWS_REGION })
+
+// Same tag convention the Fleet panel filters by. Keep these constants
+// in sync with services.ts — Phase 2.x may dedupe into a shared module
+// once a third consumer materializes.
+const HARNESS_TAG_KEY = 'Component'
+const HARNESS_TAG_VALUE = 'agent-harness'
+
+function isAgentHarness(service: Service): boolean {
+  return (
+    service.tags?.some(
+      (t) => t.key === HARNESS_TAG_KEY && t.value === HARNESS_TAG_VALUE,
+    ) ?? false
+  )
+}
 
 export interface FleetRedeployResponse {
   ok: true
@@ -65,6 +91,50 @@ export async function POST(
   const { name } = await params
 
   try {
+    // Pre-flight: confirm the target is an agent harness, not a platform
+    // service. The IAM grant (ender-stack #187) is cluster-scoped, so
+    // without this guard an operator could redeploy MC / LiteLLM / etc.
+    // by their service names.
+    const describe = await ecsClient.send(
+      new DescribeServicesCommand({
+        cluster: CLUSTER_NAME,
+        services: [name],
+        include: ['TAGS'],
+      }),
+    )
+    const target = describe.services?.[0]
+    if (!target || target.status !== 'ACTIVE') {
+      // ServiceNotFound or stale (DRAINING/INACTIVE). Same 404 the
+      // UpdateService path would surface for ServiceNotFoundException —
+      // collapsing both into a single response shape avoids leaking
+      // the existence of a non-harness service via timing/response
+      // differences.
+      return NextResponse.json(
+        { error: 'ServiceNotFoundException' } satisfies FleetRedeployErrorResponse,
+        { status: 404 },
+      )
+    }
+    if (!isAgentHarness(target)) {
+      // 404 (not 403) intentionally — refusing to confirm the existence
+      // of a non-harness service to a caller asking about it. Logged
+      // server-side so legitimate operator typos vs. deliberate probing
+      // are distinguishable in CloudWatch.
+      logger.warn(
+        {
+          cluster: CLUSTER_NAME,
+          service: name,
+          actor: 'user' in auth ? auth.user.id : undefined,
+        },
+        '[fleet] redeploy refused: target is not Component=agent-harness',
+      )
+      return NextResponse.json(
+        { error: 'ServiceNotFoundException' } satisfies FleetRedeployErrorResponse,
+        { status: 404 },
+      )
+    }
+
+    // Pass ONLY forceNewDeployment — never forward any client-supplied
+    // fields. IAM can't restrict UpdateService params; the handler must.
     const resp = await ecsClient.send(
       new UpdateServiceCommand({
         cluster: CLUSTER_NAME,

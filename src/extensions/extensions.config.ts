@@ -200,6 +200,7 @@ const fleetExtension: ExtensionManifest = {
   displayName: 'Fleet',
   apiRoutes: [
     { path: '/fleet/services', methods: ['GET'] },
+    { path: '/fleet/services/:name/redeploy', methods: ['POST'] },
   ],
   panels: [
     {

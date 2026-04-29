@@ -11,14 +11,16 @@ import type {
 
 // ---------- Component ----------
 
-// Per-row redeploy state. Keyed by service name. 'pending' = awaiting API
-// response; 'rolling' = ECS deployment in flight; 'ok' = freshly succeeded
-// (cleared on next refresh); 'error' + message = SDK error.
+// Per-row redeploy state. Keyed by service name. 'pending' = awaiting
+// the POST /redeploy response; 'error' + message = SDK or network error.
+// After a 202 we hand control back to ECS's `activeDeployments` counter
+// — the table refresh re-reads it and the disable predicate uses
+// `svc.activeDeployments > 0` to keep the button disabled while the
+// rollout finishes. So there's no per-row 'rolling' / 'ok' state to
+// track in MC; ECS is the source of truth for "is this rolling?"
 type RedeployState =
   | { kind: 'idle' }
   | { kind: 'pending' }
-  | { kind: 'rolling' }
-  | { kind: 'ok' }
   | { kind: 'error'; error: string }
 
 export function FleetPanel() {
@@ -71,11 +73,14 @@ export function FleetPanel() {
           }))
           return
         }
-        // 202 — ECS accepted the UpdateService call; rollout is in flight.
-        // Re-fetch the table so the operator sees the new IN_PROGRESS
-        // deployment count from DescribeServices.
-        setRedeployStates((s) => ({ ...s, [svcName]: { kind: 'rolling' } }))
+        // 202 — ECS accepted the UpdateService call. Re-fetch the table
+        // so DescribeServices reports the new IN_PROGRESS deployment;
+        // from that point on the table's `activeDeployments` column is
+        // the source of truth for "rollout in flight" (the button's
+        // disable predicate keys on it). Reset the per-row state so the
+        // button label tracks ECS, not stale MC state.
         await load()
+        setRedeployStates((s) => ({ ...s, [svcName]: { kind: 'idle' } }))
       } catch {
         setRedeployStates((s) => ({
           ...s,
@@ -171,13 +176,14 @@ export function FleetPanel() {
                 <tbody>
                   {data.services.map((svc) => {
                     const rs = redeployStates[svc.name] ?? { kind: 'idle' }
-                    // Disable Redeploy if a redeploy is in flight on THIS row
-                    // OR if ECS already shows an active rollout in progress
-                    // (activeDeployments > 0). Avoids double-rolling.
+                    // Disable Redeploy if (a) the POST is in flight,
+                    // OR (b) ECS already shows an active rollout in
+                    // progress (activeDeployments > 0). Avoids double-
+                    // rolling and re-enables automatically when ECS
+                    // reports COMPLETED — no per-row "rolling" state in
+                    // MC.
                     const redeployDisabled =
-                      rs.kind === 'pending' ||
-                      rs.kind === 'rolling' ||
-                      svc.activeDeployments > 0
+                      rs.kind === 'pending' || svc.activeDeployments > 0
                     return (
                       <tr key={svc.name} className="border-t">
                         <td className="p-2 font-mono">{svc.name}</td>
@@ -207,11 +213,9 @@ export function FleetPanel() {
                           >
                             {rs.kind === 'pending'
                               ? 'Triggering…'
-                              : rs.kind === 'rolling'
+                              : svc.activeDeployments > 0
                                 ? 'Rolling…'
-                                : svc.activeDeployments > 0
-                                  ? 'Rolling…'
-                                  : 'Redeploy'}
+                                : 'Redeploy'}
                           </Button>
                           {rs.kind === 'error' ? (
                             <div
