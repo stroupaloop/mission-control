@@ -231,7 +231,9 @@ export function FleetPanel() {
                 operator needs to know the table is from BEFORE the error,
                 not after. Otherwise they could read the error banner as
                 being about the rendered fleet state. */}
-            {error && fetchedAt ? <StalenessTimer fetchedAt={fetchedAt} /> : null}
+            {error && fetchedAt !== null ? (
+              <StalenessTimer fetchedAt={fetchedAt} />
+            ) : null}
           </div>
 
           {/* Banner only when there ARE agents to show + truncation is real
