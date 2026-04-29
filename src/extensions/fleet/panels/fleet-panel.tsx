@@ -53,53 +53,72 @@ export function FleetPanel() {
   //      promise).
   const abortRef = useRef<AbortController | null>(null)
 
-  const load = useCallback(async ({ silent = false } = {}) => {
-    // `silent` skips the visible "Loading…" state on the Refresh button.
-    // Background polls pass silent=true so a 5s rollout-watch interval
-    // doesn't make the button flicker every tick. Initial mount + manual
-    // clicks pass silent=false (default) so operators see the spinner.
+  // Returns true if the load completed (success or non-abort error),
+  // false if a newer call superseded this one. Callers that need to
+  // know whether THIS load's data is current (e.g. redeploy()) should
+  // gate state transitions on the return value — an aborted load
+  // means the newer call has taken over and will surface the canonical
+  // result.
+  const load = useCallback(
+    async ({ silent = false } = {}): Promise<boolean> => {
+      // `silent` skips the visible "Loading…" state on the Refresh button.
+      // Background polls pass silent=true so a 5s rollout-watch interval
+      // doesn't make the button flicker every tick. Initial mount + manual
+      // clicks pass silent=false (default) so operators see the spinner.
 
-    // Cancel any in-flight fetch from a prior call. Prevents two polls
-    // racing to setData with stale order.
-    abortRef.current?.abort()
-    const controller = new AbortController()
-    abortRef.current = controller
+      // Cancel any in-flight fetch from a prior call. Prevents two polls
+      // racing to setData with stale order.
+      abortRef.current?.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
 
-    if (!silent) setLoading(true)
-    try {
-      const resp = await fetch('/api/fleet/services', {
-        cache: 'no-store',
-        signal: controller.signal,
-      })
-      const body = (await resp.json()) as ServicesResponse | ErrorResponse
-      if (!resp.ok) {
-        // Don't clear `data` on transient errors. The auto-poll loop's
-        // `hasRolling` predicate evaluates `data?.services.some(...) ??
-        // false` — clearing data flips it to false, which kills the
-        // poll interval, which strands the operator on "Rolling…"
-        // exactly when a transient AWS hiccup happens mid-rollout
-        // (the original bug PR #34 set out to fix).
-        setError(body as ErrorResponse)
-      } else {
-        setError(null)
-        setData(body as ServicesResponse)
-        setFetchedAt(Date.now())
+      if (!silent) setLoading(true)
+      try {
+        const resp = await fetch('/api/fleet/services', {
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+        const body = (await resp.json()) as ServicesResponse | ErrorResponse
+        if (!resp.ok) {
+          // Don't clear `data` on transient errors. The auto-poll loop's
+          // `hasRolling` predicate evaluates `data?.services.some(...) ??
+          // false` — clearing data flips it to false, which kills the
+          // poll interval, which strands the operator on "Rolling…"
+          // exactly when a transient AWS hiccup happens mid-rollout
+          // (the original bug PR #34 set out to fix).
+          setError(body as ErrorResponse)
+        } else {
+          setError(null)
+          setData(body as ServicesResponse)
+          setFetchedAt(Date.now())
+        }
+        return true
+      } catch (err) {
+        // AbortError is expected when a newer poll cancels this one —
+        // the newer call already kicked off and will (or did) update
+        // state. Don't overwrite with a NetworkError, and signal the
+        // abort to callers via the return value so they can skip
+        // state transitions that depend on this call's data.
+        if ((err as Error).name === 'AbortError') return false
+        // Bare network failure (DNS, offline, etc.) — surface a stable
+        // generic. Browser dev-tools still show the underlying error;
+        // we don't echo it into the UI to keep this consistent with the
+        // server-side policy of not leaking error detail.
+        // Same data-preservation rationale as above.
+        setError({ error: 'NetworkError' })
+        return true
+      } finally {
+        // Only flip the visible loading state if THIS call is still the
+        // canonical one. When superseded, the newer call already set
+        // loading=true (if non-silent) or kept it false (if silent);
+        // letting an aborted older call setLoading(false) drops the
+        // spinner while the newer call is still in flight (Auditor
+        // PR #35 finding).
+        if (!silent && !controller.signal.aborted) setLoading(false)
       }
-    } catch (err) {
-      // AbortError is expected when a newer poll cancels this one —
-      // the newer call already kicked off and will (or did) update
-      // state. Don't overwrite with a NetworkError.
-      if ((err as Error).name === 'AbortError') return
-      // Bare network failure (DNS, offline, etc.) — surface a stable
-      // generic. Browser dev-tools still show the underlying error;
-      // we don't echo it into the UI to keep this consistent with the
-      // server-side policy of not leaking error detail.
-      // Same data-preservation rationale as above.
-      setError({ error: 'NetworkError' })
-    } finally {
-      if (!silent) setLoading(false)
-    }
-  }, [])
+    },
+    [],
+  )
 
   const redeploy = useCallback(
     async (svcName: string) => {
@@ -123,8 +142,17 @@ export function FleetPanel() {
         // the source of truth for "rollout in flight" (the button's
         // disable predicate keys on it). Reset the per-row state so the
         // button label tracks ECS, not stale MC state.
-        await load()
-        setRedeployStates((s) => ({ ...s, [svcName]: { kind: 'idle' } }))
+        //
+        // Only flip to `idle` if the load actually completed — if a
+        // background poll superseded our load, the newer call has
+        // taken over and will surface the canonical state. Letting
+        // both callers race the `idle` write would leave a flicker
+        // window where the button re-enables before ECS has confirmed
+        // the rollout. See Auditor finding on PR #35.
+        const loadCompleted = await load()
+        if (loadCompleted) {
+          setRedeployStates((s) => ({ ...s, [svcName]: { kind: 'idle' } }))
+        }
       } catch {
         setRedeployStates((s) => ({
           ...s,
