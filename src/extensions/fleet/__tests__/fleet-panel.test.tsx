@@ -355,6 +355,7 @@ describe('<FleetPanel /> — auto-poll while rolling', () => {
   // test if an assertion throws before the in-test useRealTimers() runs.
   // beforeEach's restoreAllMocks doesn't touch timer state.
   afterEach(() => {
+    vi.useRealTimers()
   })
 
   // ECS rollouts take 2–4 min; without polling, the Fleet panel snapshots
