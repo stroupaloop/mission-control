@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 // `import type` elides at compile time — no runtime import of the
 // AWS SDK / NextRequest from the server module reaches the client bundle.
@@ -38,15 +38,39 @@ export function FleetPanel() {
   const [redeployStates, setRedeployStates] = useState<
     Record<string, RedeployState>
   >({})
+  // Tracks when `data` was last successfully fetched (Date.now()).
+  // Drives the staleness indicator that appears when error+data are
+  // both present — operators need to know the table is from before
+  // the error, not from after it.
+  const [fetchedAt, setFetchedAt] = useState<number | null>(null)
+  // AbortController for the in-flight load() fetch. Used to:
+  //   1. Cancel a superseded poll so out-of-order resolution can't
+  //      stomp newer data with older (closes the concurrent-fetch
+  //      race ender-stack#182 flagged).
+  //   2. Cancel on unmount so a dangling fetch doesn't try to
+  //      setData on an unmounted component (React 18 silently
+  //      no-ops it but it's still a wasted RTT and a leaked
+  //      promise).
+  const abortRef = useRef<AbortController | null>(null)
 
   const load = useCallback(async ({ silent = false } = {}) => {
     // `silent` skips the visible "Loading…" state on the Refresh button.
     // Background polls pass silent=true so a 5s rollout-watch interval
     // doesn't make the button flicker every tick. Initial mount + manual
     // clicks pass silent=false (default) so operators see the spinner.
+
+    // Cancel any in-flight fetch from a prior call. Prevents two polls
+    // racing to setData with stale order.
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     if (!silent) setLoading(true)
     try {
-      const resp = await fetch('/api/fleet/services', { cache: 'no-store' })
+      const resp = await fetch('/api/fleet/services', {
+        cache: 'no-store',
+        signal: controller.signal,
+      })
       const body = (await resp.json()) as ServicesResponse | ErrorResponse
       if (!resp.ok) {
         // Don't clear `data` on transient errors. The auto-poll loop's
@@ -54,13 +78,18 @@ export function FleetPanel() {
         // false` — clearing data flips it to false, which kills the
         // poll interval, which strands the operator on "Rolling…"
         // exactly when a transient AWS hiccup happens mid-rollout
-        // (the original bug this PR sets out to fix).
+        // (the original bug PR #34 set out to fix).
         setError(body as ErrorResponse)
       } else {
         setError(null)
         setData(body as ServicesResponse)
+        setFetchedAt(Date.now())
       }
-    } catch {
+    } catch (err) {
+      // AbortError is expected when a newer poll cancels this one —
+      // the newer call already kicked off and will (or did) update
+      // state. Don't overwrite with a NetworkError.
+      if ((err as Error).name === 'AbortError') return
       // Bare network failure (DNS, offline, etc.) — surface a stable
       // generic. Browser dev-tools still show the underlying error;
       // we don't echo it into the UI to keep this consistent with the
@@ -129,6 +158,12 @@ export function FleetPanel() {
     return () => clearInterval(id)
   }, [hasRolling, load])
 
+  // Cancel any in-flight fetch on unmount. Without this, a panel that's
+  // mid-fetch when the operator navigates away would still resolve the
+  // promise and call setData on an unmounted component (React 18 silently
+  // no-ops, but it's a wasted RTT + leaked promise).
+  useEffect(() => () => abortRef.current?.abort(), [])
+
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-4">
@@ -170,6 +205,11 @@ export function FleetPanel() {
             Cluster: <code>{data.cluster}</code> · Region: <code>{data.region}</code>
             {' · '}
             {data.services.length} agent{data.services.length === 1 ? '' : 's'}
+            {/* Staleness indicator when both error AND data are present —
+                operator needs to know the table is from BEFORE the error,
+                not after. Otherwise they could read the error banner as
+                being about the rendered fleet state. */}
+            {error && fetchedAt ? <StalenessTimer fetchedAt={fetchedAt} /> : null}
           </div>
 
           {/* Banner only when there ARE agents to show + truncation is real
@@ -274,5 +314,26 @@ export function FleetPanel() {
         </div>
       ) : null}
     </div>
+  )
+}
+
+// Self-ticking timer rendered next to the cluster summary when both error
+// and stale data are present. Re-renders once per second so the operator
+// sees the count climb in real time — makes the "this is stale" signal
+// unambiguous without needing to refresh the whole table.
+function StalenessTimer({ fetchedAt }: { fetchedAt: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const seconds = Math.max(0, Math.round((now - fetchedAt) / 1000))
+  return (
+    <span
+      className="ml-2 text-amber-700"
+      data-testid="staleness-indicator"
+    >
+      · Last refreshed: {seconds}s ago
+    </span>
   )
 }
