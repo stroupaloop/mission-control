@@ -11,12 +11,25 @@ import type {
 
 // ---------- Component ----------
 
+// Per-row redeploy state. Keyed by service name. 'pending' = awaiting API
+// response; 'rolling' = ECS deployment in flight; 'ok' = freshly succeeded
+// (cleared on next refresh); 'error' + message = SDK error.
+type RedeployState =
+  | { kind: 'idle' }
+  | { kind: 'pending' }
+  | { kind: 'rolling' }
+  | { kind: 'ok' }
+  | { kind: 'error'; error: string }
+
 export function FleetPanel() {
   const [data, setData] = useState<ServicesResponse | null>(null)
   const [error, setError] = useState<ErrorResponse | null>(null)
   // Initial render is mid-fetch (load() fires from useEffect); keep the
   // Refresh button in its loading state from t=0 to avoid an empty body.
   const [loading, setLoading] = useState(true)
+  const [redeployStates, setRedeployStates] = useState<
+    Record<string, RedeployState>
+  >({})
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -41,6 +54,37 @@ export function FleetPanel() {
       setLoading(false)
     }
   }, [])
+
+  const redeploy = useCallback(
+    async (svcName: string) => {
+      setRedeployStates((s) => ({ ...s, [svcName]: { kind: 'pending' } }))
+      try {
+        const resp = await fetch(
+          `/api/fleet/services/${encodeURIComponent(svcName)}/redeploy`,
+          { method: 'POST', cache: 'no-store' },
+        )
+        if (!resp.ok) {
+          const body = (await resp.json()) as { error?: string }
+          setRedeployStates((s) => ({
+            ...s,
+            [svcName]: { kind: 'error', error: body.error ?? 'AWSError' },
+          }))
+          return
+        }
+        // 202 — ECS accepted the UpdateService call; rollout is in flight.
+        // Re-fetch the table so the operator sees the new IN_PROGRESS
+        // deployment count from DescribeServices.
+        setRedeployStates((s) => ({ ...s, [svcName]: { kind: 'rolling' } }))
+        await load()
+      } catch {
+        setRedeployStates((s) => ({
+          ...s,
+          [svcName]: { kind: 'error', error: 'NetworkError' },
+        }))
+      }
+    },
+    [load],
+  )
 
   useEffect(() => {
     void load()
@@ -121,30 +165,66 @@ export function FleetPanel() {
                     <th className="text-right p-2">Pending</th>
                     <th className="text-left p-2">Launch type</th>
                     <th className="text-right p-2">Deployments</th>
+                    <th className="text-right p-2">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {data.services.map((svc) => (
-                    <tr key={svc.name} className="border-t">
-                      <td className="p-2 font-mono">{svc.name}</td>
-                      <td className="p-2">
-                        <span
-                          className={
-                            svc.status === 'ACTIVE'
-                              ? 'text-green-700'
-                              : 'text-amber-700'
-                          }
-                        >
-                          {svc.status ?? '—'}
-                        </span>
-                      </td>
-                      <td className="p-2 text-right">{svc.desiredCount ?? '—'}</td>
-                      <td className="p-2 text-right">{svc.runningCount ?? '—'}</td>
-                      <td className="p-2 text-right">{svc.pendingCount ?? '—'}</td>
-                      <td className="p-2">{svc.launchType ?? '—'}</td>
-                      <td className="p-2 text-right">{svc.activeDeployments}</td>
-                    </tr>
-                  ))}
+                  {data.services.map((svc) => {
+                    const rs = redeployStates[svc.name] ?? { kind: 'idle' }
+                    // Disable Redeploy if a redeploy is in flight on THIS row
+                    // OR if ECS already shows an active rollout in progress
+                    // (activeDeployments > 0). Avoids double-rolling.
+                    const redeployDisabled =
+                      rs.kind === 'pending' ||
+                      rs.kind === 'rolling' ||
+                      svc.activeDeployments > 0
+                    return (
+                      <tr key={svc.name} className="border-t">
+                        <td className="p-2 font-mono">{svc.name}</td>
+                        <td className="p-2">
+                          <span
+                            className={
+                              svc.status === 'ACTIVE'
+                                ? 'text-green-700'
+                                : 'text-amber-700'
+                            }
+                          >
+                            {svc.status ?? '—'}
+                          </span>
+                        </td>
+                        <td className="p-2 text-right">{svc.desiredCount ?? '—'}</td>
+                        <td className="p-2 text-right">{svc.runningCount ?? '—'}</td>
+                        <td className="p-2 text-right">{svc.pendingCount ?? '—'}</td>
+                        <td className="p-2">{svc.launchType ?? '—'}</td>
+                        <td className="p-2 text-right">{svc.activeDeployments}</td>
+                        <td className="p-2 text-right">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void redeploy(svc.name)}
+                            disabled={redeployDisabled}
+                            data-testid={`redeploy-${svc.name}`}
+                          >
+                            {rs.kind === 'pending'
+                              ? 'Triggering…'
+                              : rs.kind === 'rolling'
+                                ? 'Rolling…'
+                                : svc.activeDeployments > 0
+                                  ? 'Rolling…'
+                                  : 'Redeploy'}
+                          </Button>
+                          {rs.kind === 'error' ? (
+                            <div
+                              className="text-xs text-destructive mt-1"
+                              data-testid={`redeploy-error-${svc.name}`}
+                            >
+                              <code>{rs.error}</code>
+                            </div>
+                          ) : null}
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
