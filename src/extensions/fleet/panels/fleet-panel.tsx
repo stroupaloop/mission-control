@@ -11,6 +11,12 @@ import type {
 
 // ---------- Component ----------
 
+// Polling cadence while any row is mid-rollout. ECS rolls finish in 2–4
+// min; 5s gives operators responsive feedback after a Redeploy click
+// without spamming DescribeServices on healthy fleets (the polling stops
+// the moment all rows hit activeDeployments=0).
+const POLL_INTERVAL_MS = 5000
+
 // Per-row redeploy state. Keyed by service name. 'pending' = awaiting
 // the POST /redeploy response; 'error' + message = SDK or network error.
 // After a 202 we hand control back to ECS's `activeDeployments` counter
@@ -94,6 +100,23 @@ export function FleetPanel() {
   useEffect(() => {
     void load()
   }, [load])
+
+  // Auto-poll while ANY row is mid-rollout. ECS rolls take 2–4 min; without
+  // this, the table snapshots the post-Redeploy IN_PROGRESS state and never
+  // refreshes — operator sees "Rolling…" indefinitely until they click
+  // Refresh manually. Same `activeDeployments > 0` predicate the per-row
+  // disabled state uses, so the loops naturally pair: polling stops the
+  // moment ECS reports COMPLETED on every row.
+  const hasRolling =
+    data?.services.some((s) => s.activeDeployments > 0) ?? false
+
+  useEffect(() => {
+    if (!hasRolling) return
+    const id = setInterval(() => {
+      void load()
+    }, POLL_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [hasRolling, load])
 
   return (
     <div className="p-6">

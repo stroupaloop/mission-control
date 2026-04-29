@@ -349,3 +349,128 @@ describe('<FleetPanel /> — Redeploy button', () => {
     expect(button.textContent).toMatch(/Rolling/)
   })
 })
+
+describe('<FleetPanel /> — auto-poll while rolling', () => {
+  // ECS rollouts take 2–4 min; without polling, the Fleet panel snapshots
+  // the post-Redeploy IN_PROGRESS state and never refreshes — operator
+  // sees "Rolling…" indefinitely until they click Refresh manually. These
+  // tests pin the contract: poll while any row has activeDeployments > 0,
+  // stop the moment all rows are steady.
+
+  const rollingSvc = {
+    name: 'ender-stack-dev-companion-openclaw-smoke-test',
+    status: 'ACTIVE',
+    desiredCount: 1,
+    runningCount: 0,
+    pendingCount: 1,
+    taskDefinition: 'family:1',
+    launchType: 'FARGATE',
+    activeDeployments: 1, // mid-rollout
+  }
+
+  const steadySvc = {
+    ...rollingSvc,
+    runningCount: 1,
+    pendingCount: 0,
+    activeDeployments: 0,
+  }
+
+  const mkResp = (services: unknown[]) =>
+    new Response(
+      JSON.stringify({
+        cluster: 'ender-stack-dev',
+        region: 'us-east-1',
+        services,
+        truncated: false,
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )
+
+  it('polls /api/fleet/services every 5s while a row has activeDeployments > 0', async () => {
+    // Scope fake timers to setInterval/clearInterval only — leaving
+    // setTimeout real lets waitFor's internal poll loop continue working.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() => Promise.resolve(mkResp([rollingSvc])))
+
+    render(<FleetPanel />)
+
+    // Flush the initial mount fetch
+    await vi.runOnlyPendingTimersAsync()
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    const initialCalls = fetchSpy.mock.calls.length
+
+    // Advance 5s — first poll should fire
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+    expect(fetchSpy.mock.calls.length).toBe(initialCalls + 1)
+
+    // Advance another 5s — second poll
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+    expect(fetchSpy.mock.calls.length).toBe(initialCalls + 2)
+
+    vi.useRealTimers()
+  })
+
+  it('stops polling once all rows reach activeDeployments=0', async () => {
+    // Scope fake timers to setInterval/clearInterval only — leaving
+    // setTimeout real lets waitFor's internal poll loop continue working.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+
+    let respServices: unknown[] = [rollingSvc]
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() => Promise.resolve(mkResp(respServices)))
+
+    render(<FleetPanel />)
+    await vi.runOnlyPendingTimersAsync()
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+
+    // Flip backend to steady-state
+    respServices = [steadySvc]
+
+    // Tick once — poll fetches steady-state, panel sees no rolling rows,
+    // useEffect cleanup clears the interval
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+    const callsAfterSteady = fetchSpy.mock.calls.length
+
+    // Advance another 30s — no further polls should fire
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30000)
+    })
+    expect(fetchSpy.mock.calls.length).toBe(callsAfterSteady)
+
+    vi.useRealTimers()
+  })
+
+  it('does not start polling on initial steady-state mount', async () => {
+    // Scope fake timers to setInterval/clearInterval only — leaving
+    // setTimeout real lets waitFor's internal poll loop continue working.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() => Promise.resolve(mkResp([steadySvc])))
+
+    render(<FleetPanel />)
+    await vi.runOnlyPendingTimersAsync()
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    const initialCalls = fetchSpy.mock.calls.length
+
+    // Advance well past one poll interval
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20000)
+    })
+    // No polls fired — initial fetch only
+    expect(fetchSpy.mock.calls.length).toBe(initialCalls)
+
+    vi.useRealTimers()
+  })
+})
