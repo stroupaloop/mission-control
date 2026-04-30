@@ -22,11 +22,21 @@ import { logger } from '@/lib/logger'
 import { logSecurityEvent } from '@/lib/security-events'
 import {
   HARNESS_TEMPLATES,
-  HARNESS_TYPES,
-  type HarnessType,
   type OpenClawAgentInput,
   type OpenClawAgentEnv,
 } from '@/extensions/fleet/templates'
+// Constants live in `templates/constraints.ts` (no AWS SDK imports) so
+// the client-side form, the per-harness validateInput, AND the
+// harness-agnostic type guard below all share the same regex /
+// model-tier list. Drift between layers would re-open the gap that
+// constraints.ts was created to close.
+import {
+  AGENT_NAME_RE,
+  HARNESS_TYPES,
+  MODEL_TIERS,
+  type HarnessType,
+  type ModelTier,
+} from '@/extensions/fleet/templates/constraints'
 
 /**
  * POST /api/fleet/agents — create a new MC-managed agent end-to-end.
@@ -157,7 +167,7 @@ export interface CreateAgentRequest {
   agentName: string
   roleDescription: string
   image: string
-  modelTier: 'opus-4-7' | 'sonnet-4-6' | 'haiku-4-5'
+  modelTier: ModelTier
 }
 
 export interface CreateAgentResponse {
@@ -316,9 +326,10 @@ function getMissingEnv(env: ResolvedEnv): string[] {
 // CreateTargetGroup with a confusing InvalidParameterException; the
 // tighter regex catches it at the validation step instead.
 //
-// Length window 3-32 preserved (min via the {1,30} middle interval +
-// the 1-char start + 1-char end anchors).
-const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/
+// AGENT_NAME_RE + MODEL_TIERS imported from
+// `@/extensions/fleet/templates/constraints` so the type guard,
+// per-harness validateInput, AND the client-side form share the same
+// definitions. constraints.ts is the single source of truth.
 
 function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
   if (!body || typeof body !== 'object') return false
@@ -331,7 +342,7 @@ function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
     typeof b.roleDescription === 'string' &&
     typeof b.image === 'string' &&
     typeof b.modelTier === 'string' &&
-    ['opus-4-7', 'sonnet-4-6', 'haiku-4-5'].includes(b.modelTier as string)
+    MODEL_TIERS.includes(b.modelTier as ModelTier)
   )
 }
 

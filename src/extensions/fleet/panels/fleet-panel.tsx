@@ -205,10 +205,15 @@ export function FleetPanel() {
           </p>
         </div>
         <div className="flex gap-2">
+          {/* Toggle is intentionally NOT disabled by `loading`. The
+              auto-poll loop + post-create refresh both flip `loading`
+              to true; gating the toggle on it would lock the operator
+              out of opening / closing the form whenever the table is
+              fetching. The form itself has its own submitting state
+              that disables its inputs during the in-flight POST. */}
           <Button
             variant="outline"
             onClick={() => setCreateOpen((v) => !v)}
-            disabled={loading}
             data-testid="toggle-create-agent"
           >
             {createOpen ? 'Close create form' : 'Create agent'}

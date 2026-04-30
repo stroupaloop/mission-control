@@ -187,4 +187,46 @@ describe('<CreateAgentForm />', () => {
     fireEvent.click(screen.getByRole('button', { name: /Cancel/i }))
     expect(onClose).toHaveBeenCalledTimes(1)
   })
+
+  it('"Create another" resets the form to the idle state with empty fields', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          agentName: 'smoke-2',
+          resources: {
+            serviceArn: 'arn:s',
+            taskDefinitionArn: 'arn:t',
+            targetGroupArn: 'arn:tg',
+            listenerRuleArn: 'arn:lr',
+            logGroup: '/ecs/lg',
+            listenerPath: '/agent/smoke-2',
+          },
+          warnings: [],
+        }),
+        { status: 201, headers: { 'content-type': 'application/json' } },
+      ) as unknown as Response,
+    )
+
+    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    fill()
+    fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('create-agent-success')).toBeInTheDocument(),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /Create another/i }))
+
+    // After reset: success view is gone, form fields are empty,
+    // submit is disabled (no fields filled). Defends against reset()
+    // accidentally dropping any default state.
+    expect(screen.queryByTestId('create-agent-success')).not.toBeInTheDocument()
+    expect(screen.getByLabelText(/Agent name/i)).toHaveValue('')
+    expect(screen.getByLabelText(/Container image/i)).toHaveValue('')
+    expect(screen.getByLabelText(/Role description/i)).toHaveValue('')
+    expect(
+      screen.getByRole('button', { name: /Create agent/i }),
+    ).toBeDisabled()
+  })
 })
