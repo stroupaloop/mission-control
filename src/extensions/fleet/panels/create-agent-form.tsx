@@ -230,6 +230,36 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
                   {state.body.partialResources.logGroup && (
                     <li>{state.body.partialResources.logGroup}</li>
                   )}
+                  {/* `serviceArn` may be null (not undefined) when the
+                      backend caught a CreateService SDK contract
+                      violation — see api/agents.ts ImageAllowlistConfigError
+                      sibling block. The truthy check on the other
+                      ARNs above would skip null; use `'serviceArn' in
+                      partialResources` so the operator gets a clear
+                      "possibly-orphaned service" signal even when the
+                      ARN itself is unknown. Most expensive orphan to
+                      leave behind (running ECS task = ongoing cost +
+                      ALB misroute risk). */}
+                  {'serviceArn' in state.body.partialResources && (
+                    <li
+                      className="text-amber-700 not-italic"
+                      data-testid="partial-service-arn-warning"
+                    >
+                      {typeof state.body.partialResources.serviceArn ===
+                      'string' ? (
+                        state.body.partialResources.serviceArn
+                      ) : (
+                        <>
+                          Service ARN unknown — run{' '}
+                          <code className="font-mono">
+                            aws ecs describe-services --cluster &lt;cluster&gt;
+                            --services &lt;prefix&gt;-companion-openclaw-&lt;name&gt;
+                          </code>{' '}
+                          to check for an orphaned service before retrying.
+                        </>
+                      )}
+                    </li>
+                  )}
                 </ul>
               </div>
             )}

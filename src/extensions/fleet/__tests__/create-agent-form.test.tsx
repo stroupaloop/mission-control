@@ -163,6 +163,48 @@ describe('<CreateAgentForm />', () => {
     expect(errBox).toHaveTextContent('/ecs/c/companion-openclaw-smoke-2')
   })
 
+  it('surfaces a "serviceArn unknown" warning in the cleanup list when partialResources.serviceArn is null (round-5 audit)', async () => {
+    // Backend sets partial.serviceArn = null when CreateService
+    // returns no ARN — see agents-create.test.ts. The form must
+    // render guidance to the operator since a running ECS service
+    // with no known ARN is the most expensive orphan to leave behind.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: 'Error',
+          partialResources: {
+            taskDefinitionArn:
+              'arn:aws:ecs:us-east-1:1:task-definition/t:1',
+            targetGroupArn:
+              'arn:aws:elasticloadbalancing:us-east-1:1:targetgroup/tg/abc',
+            listenerRuleArn:
+              'arn:aws:elasticloadbalancing:us-east-1:1:listener-rule/app/lb/abc/lst/rule',
+            logGroup: '/ecs/c/companion-openclaw-smoke-2',
+            serviceArn: null,
+          },
+        }),
+        { status: 502, headers: { 'content-type': 'application/json' } },
+      ) as unknown as Response,
+    )
+
+    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    fill()
+    fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('create-agent-error')).toBeInTheDocument(),
+    )
+
+    const warning = screen.getByTestId('partial-service-arn-warning')
+    expect(warning).toBeInTheDocument()
+    expect(warning).toHaveTextContent(/Service ARN unknown/)
+    expect(warning).toHaveTextContent(/aws ecs describe-services/)
+    // Operator-actionable: still shows the four resolvable ARNs above
+    // the unknown-ARN warning so cleanup proceeds in order.
+    const errBox = screen.getByTestId('create-agent-error')
+    expect(errBox).toHaveTextContent('task-definition/t:1')
+  })
+
   it('renders an error block with a "0 — NetworkError" code on fetch reject', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(
       Object.assign(new Error('boom'), { name: 'TypeError' }),
