@@ -321,7 +321,10 @@ export async function POST(request: NextRequest) {
   }
 
   const logGroupName = `${resolved.logGroupPrefix}/companion-openclaw-${input.agentName}`
-  const listenerPath = `/agent/${input.agentName}*`
+  // Surface in the response so operators / clients know what URL paths
+  // the agent now answers on. Mirrors the patterns in renderListenerRule
+  // — two explicit anchors instead of a wildcard glob.
+  const listenerPath = `/agent/${input.agentName} (+ /agent/${input.agentName}/*)`
 
   // Track resources successfully created so partial-failure 5xx
   // responses can surface them for operator-driven cleanup. Beat 3c
@@ -407,15 +410,22 @@ export async function POST(request: NextRequest) {
     }
     partial.targetGroupArn = targetGroupArn
 
-    // 5. Attach a listener rule for `/agent/{agentName}*` → this TG.
+    // 5. Attach a listener rule routing `/agent/{name}` and
+    // `/agent/{name}/*` → this TG. Two explicit path patterns rather
+    // than the simpler `/agent/{name}*` glob — see the renderListenerRule
+    // docstring for why prefix-pair agent names (e.g. `bot` + `bot-test`)
+    // require the anchoring.
     //
     // Priority is hashed from agentName. djb2 over the 100-49999
-    // range gives ~315-agent first-collision (birthday paradox), 1%
-    // collision probability at ~100 agents. On collision, AWS returns
-    // PriorityInUseException → handled below as 409. The fix is
-    // renaming the agent (not retrying); a real collision-free
-    // priority allocator is queued for Beat 3c alongside the
-    // reconciler that has a live priority map.
+    // range (49,900 slots) gives:
+    //   - expected first collision: ~280 agents (birthday paradox)
+    //   - 1% collision probability at ~31 agents
+    //   - 9.5% at ~100 agents
+    // On collision, AWS returns PriorityInUseException → handled below
+    // as 409. The interim fix is renaming the agent (which re-hashes);
+    // a real collision-free allocator is queued in ender-stack#214 to
+    // ship alongside Beat 3b's UI form, where collision rate scales
+    // with operator-driven creation volume.
     const ruleSpec = template.renderListenerRule(input, env, {
       targetGroupArn,
       priority: priorityFor(input.agentName),
@@ -427,7 +437,7 @@ export async function POST(request: NextRequest) {
         Conditions: [
           {
             Field: 'path-pattern',
-            Values: [ruleSpec.pathPattern],
+            Values: ruleSpec.pathPatterns,
           },
         ],
         Actions: [

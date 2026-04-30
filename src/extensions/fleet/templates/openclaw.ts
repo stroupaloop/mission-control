@@ -291,14 +291,27 @@ export function renderService(
 
 /**
  * Build the listener-rule input for the shared agents ALB. Path-based
- * routing — `/agent/{agentName}*` forwards to the per-agent target group.
+ * routing — two explicit patterns forward to the per-agent target group:
+ *   - `/agent/{agentName}`        — exact-name root
+ *   - `/agent/{agentName}/*`      — any subpath under the agent
  *
- * Priority is computed by the handler from a hash of the agent name (or
- * an in-handler counter); the AWS API requires unique priorities per
- * listener but doesn't care about ordering for distinct path patterns.
+ * The two-pattern shape is load-bearing for prefix-pair agent names.
+ * A single `/agent/{name}*` glob would also match a different agent
+ * whose name starts with `{name}` (e.g., `bot` + `bot-test` → a
+ * request to `/agent/bot-test/api` matches BOTH `/agent/bot*` and
+ * `/agent/bot-test*`, and AWS resolves by priority, not specificity —
+ * so `bot-test` traffic could silently land on `bot`'s target group).
+ * Anchoring with `/{name}` (exact) and `/{name}/*` (subtree) makes the
+ * patterns mutually exclusive across distinct agent names. The
+ * agentName regex `^[a-z0-9-]{3,32}$` permits hyphenated names that
+ * would trigger this overlap, so the anchoring is required.
+ *
+ * Priority is computed by the handler from a hash of the agent name;
+ * AWS requires unique priorities per listener (collisions are
+ * tracked as ender-stack#214).
  */
 export interface AgentListenerRuleSpec {
-  pathPattern: string
+  pathPatterns: string[]
   targetGroupArn: string
   priority: number
   tags: { Key: string; Value: string }[]
@@ -310,7 +323,10 @@ export function renderListenerRule(
   resolved: { targetGroupArn: string; priority: number },
 ): AgentListenerRuleSpec {
   return {
-    pathPattern: `/agent/${input.agentName}*`,
+    pathPatterns: [
+      `/agent/${input.agentName}`,
+      `/agent/${input.agentName}/*`,
+    ],
     targetGroupArn: resolved.targetGroupArn,
     priority: resolved.priority,
     tags: tagsToElbv2({

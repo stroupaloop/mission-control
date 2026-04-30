@@ -272,7 +272,9 @@ describe('POST /api/fleet/agents — happy path', () => {
     }
     expect(json.ok).toBe(true)
     expect(json.agentName).toBe('hello-world')
-    expect(json.resources.listenerPath).toBe('/agent/hello-world*')
+    expect(json.resources.listenerPath).toBe(
+      '/agent/hello-world (+ /agent/hello-world/*)',
+    )
     expect(json.resources.logGroup).toBe(
       '/ecs/ender-stack-dev/companion-openclaw-hello-world',
     )
@@ -326,7 +328,7 @@ describe('POST /api/fleet/agents — happy path', () => {
     expect(resp.status).toBe(201)
   })
 
-  it('CreateRule routes /agent/{agentName}* and forwards to the new TG', async () => {
+  it('CreateRule routes /agent/{name} and /agent/{name}/* to the new TG', async () => {
     happyPathMocks()
     const POST = await importHandler()
     await POST(mkRequest(validBody()))
@@ -335,8 +337,10 @@ describe('POST /api/fleet/agents — happy path', () => {
     )
     expect(ruleCall).toBeDefined()
     const input = (ruleCall![0] as { input: Record<string, unknown> }).input
+    // Two explicit patterns prevent prefix-pair collisions (e.g.,
+    // `bot` + `bot-test`).
     expect((input.Conditions as Array<Record<string, unknown>>)[0].Values).toEqual(
-      ['/agent/hello-world*'],
+      ['/agent/hello-world', '/agent/hello-world/*'],
     )
     const actions = input.Actions as Array<Record<string, unknown>>
     expect(actions[0].TargetGroupArn).toContain(

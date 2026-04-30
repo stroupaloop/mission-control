@@ -158,12 +158,17 @@ describe('renderService', () => {
 })
 
 describe('renderListenerRule', () => {
-  it('routes /agent/{name}* to the agent target group', () => {
+  it('emits two explicit path patterns to avoid prefix-pair collisions', () => {
     const rule = renderListenerRule(fixtureInput, fixtureEnv, {
       targetGroupArn: 'arn:tg',
       priority: 1234,
     })
-    expect(rule.pathPattern).toBe('/agent/hello-world*')
+    // Two patterns: exact-name root + subtree. Prevents `/agent/bot-test/api`
+    // from matching a `/agent/bot*` glob and silently routing to `bot`.
+    expect(rule.pathPatterns).toEqual([
+      '/agent/hello-world',
+      '/agent/hello-world/*',
+    ])
     expect(rule.targetGroupArn).toBe('arn:tg')
     expect(rule.priority).toBe(1234)
   })

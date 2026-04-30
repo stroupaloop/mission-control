@@ -12845,7 +12845,7 @@
                         "targetGroupArn": { "type": "string" },
                         "listenerRuleArn": { "type": "string" },
                         "logGroup": { "type": "string" },
-                        "listenerPath": { "type": "string", "description": "ALB path pattern this agent now serves (e.g. /agent/hello-world*)." }
+                        "listenerPath": { "type": "string", "description": "Human-readable summary of the two anchored ALB path patterns this agent now serves (e.g. '/agent/hello-world (+ /agent/hello-world/*)'). Two explicit patterns rather than a single glob to prevent prefix-pair name collisions (e.g. agent 'bot' would otherwise also catch traffic destined for 'bot-test')." }
                       }
                     }
                   }
