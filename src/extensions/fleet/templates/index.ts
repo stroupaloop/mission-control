@@ -22,9 +22,19 @@
  */
 
 import * as openclaw from './openclaw'
+import {
+  AGENT_NAME_RE,
+  HARNESS_TYPES,
+  IMAGE_MAX_BYTES,
+  ROLE_DESCRIPTION_MAX_BYTES,
+  type HarnessType,
+} from './constraints'
 
-export const HARNESS_TYPES = ['companion/openclaw'] as const
-export type HarnessType = (typeof HARNESS_TYPES)[number]
+// Re-export for callers that already imported from this module.
+// Constants live in `./constraints` (no AWS SDK imports) so client
+// components can pull them without dragging the AWS SDK into the browser
+// bundle. See constraints.ts for the security-control commentary.
+export { HARNESS_TYPES, type HarnessType }
 
 /**
  * Concrete shape today (OpenClaw only). Generics removed until a second
@@ -42,21 +52,6 @@ export interface HarnessTemplate {
   /** Validates the harness-specific shape of the form input. Throws on invalid. */
   validateInput: (input: openclaw.OpenClawAgentInput) => void
 }
-
-// Caps mirror the rationale that drove dropping slackWebhookUrl —
-// task-def revisions are immutable and retained indefinitely, so an
-// unbounded admin input becomes permanent storage.
-const ROLE_DESCRIPTION_MAX_BYTES = 1024
-const IMAGE_MAX_BYTES = 512
-
-// Mirrors the type guard's regex (api/agents.ts AGENT_NAME_RE).
-// Defense in depth — the type guard is the harness-agnostic boundary,
-// this is the per-harness backstop. Keep both anchored to lowercase-
-// start / alphanumeric-end so a regression in one layer doesn't silently
-// permit names that 409 at AWS-layer validation. The auditor explicitly
-// flagged that an unanchored regex would let names like `-foo` or `foo-`
-// reach CreateTargetGroup with a confusing InvalidParameterException.
-const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/
 
 // Image registry allowlist. Defaults to ECR-in-this-account, GHCR
 // under stroupaloop, and AWS public ECR — everything we expect a
