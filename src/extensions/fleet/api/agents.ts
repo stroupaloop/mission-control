@@ -22,6 +22,7 @@ import { logger } from '@/lib/logger'
 import { logSecurityEvent } from '@/lib/security-events'
 import {
   HARNESS_TEMPLATES,
+  ImageAllowlistConfigError,
   type OpenClawAgentInput,
   type OpenClawAgentEnv,
 } from '@/extensions/fleet/templates'
@@ -195,6 +196,15 @@ export interface CreateAgentResponse {
 
 // Stable warning codes. Keep the list small and code-named so the UI
 // can render specific guidance per code without parsing message text.
+//
+// TODO(ender-stack#215): when #215 closes (gateway runtime config
+// wiring lands), drop WARNING_RUNTIME_CONFIG_GAP from the success
+// response below — leaving it in would surface stale noise on every
+// successful create. Audit cycle on PR #37 flagged this as "should
+// track" because the warning is unconditionally emitted today with no
+// version/feature gate. When dropping: remove this constant, the
+// `warnings: [WARNING_RUNTIME_CONFIG_GAP]` reference in the 201
+// response, and the test that asserts the code is present.
 const WARNING_RUNTIME_CONFIG_GAP = {
   code: 'runtime-config-gap',
   message:
@@ -395,9 +405,29 @@ export async function POST(request: NextRequest) {
   }
 
   // Per-harness validation. Throws on bad input — caught below as 400.
+  // ImageAllowlistConfigError is a special case: thrown when the env
+  // var MC_FLEET_IMAGE_REGISTRY_ALLOWLIST contains a malformed regex
+  // pattern. That's an operator misconfiguration, not a request
+  // problem; mapping it to 400 ValidationError would mislead the
+  // submitter ("my image is fine, why am I getting a 400?"). Surface
+  // it as a 500 ConfigurationError that names the bad pattern so the
+  // operator can fix the env var rather than the request body.
   try {
     template.validateInput(input)
   } catch (err) {
+    if (err instanceof ImageAllowlistConfigError) {
+      logger.error(
+        { badPattern: err.badPattern, message: err.message },
+        '[fleet] create-agent unavailable: image allowlist regex misconfigured',
+      )
+      return NextResponse.json(
+        {
+          error: 'ConfigurationError',
+          detail: err.message,
+        } satisfies CreateAgentErrorResponse,
+        { status: 500 },
+      )
+    }
     const message = (err as Error).message
     return NextResponse.json(
       {

@@ -198,6 +198,32 @@ describe('POST /api/fleet/agents — env validation', () => {
     expect(json.detail).toContain('MC_AGENT_SECURITY_GROUP_ID')
   })
 
+  it('returns 500 ConfigurationError when MC_FLEET_IMAGE_REGISTRY_ALLOWLIST contains an invalid regex (not a 502 SyntaxError)', async () => {
+    // Audit on PR #37 round 3 caught this: a malformed allowlist entry
+    // would throw SyntaxError from `new RegExp()`, the outer try/catch
+    // would surface it as a generic 502, and the operator would
+    // diagnose a downstream AWS issue instead of fixing their env var.
+    // The handler now maps ImageAllowlistConfigError to 500
+    // ConfigurationError with the bad pattern named.
+    const original = process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST
+    process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST = '[unterminated-class'
+    try {
+      const POST = await importHandler()
+      const resp = await POST(mkRequest(validBody()))
+      expect(resp.status).toBe(500)
+      const json = (await resp.json()) as { error: string; detail?: string }
+      expect(json.error).toBe('ConfigurationError')
+      expect(json.detail).toContain('MC_FLEET_IMAGE_REGISTRY_ALLOWLIST')
+      expect(json.detail).toContain('[unterminated-class')
+    } finally {
+      if (original === undefined) {
+        delete process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST
+      } else {
+        process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST = original
+      }
+    }
+  })
+
   it('rejects agentName with invalid characters at the type-guard layer (defense-in-depth)', async () => {
     // Length window passes (11 chars, in [3,32]) but the regex fails
     // on the space. Confirms that even if a future harness's

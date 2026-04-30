@@ -73,12 +73,38 @@ const DEFAULT_IMAGE_REGISTRY_PREFIXES = [
   String.raw`public\.ecr\.aws/`,
 ]
 
+/**
+ * Thrown when MC_FLEET_IMAGE_REGISTRY_ALLOWLIST contains a malformed
+ * regex pattern. Surfaced separately from generic validation errors so
+ * the handler can map it to a clear configuration error rather than a
+ * confusing 502 SyntaxError. Caught upstream in api/agents.ts and
+ * mapped to the same ConfigurationError shape used for missing env
+ * vars (admin-only endpoint; the message safely identifies which
+ * pattern failed to compile).
+ */
+export class ImageAllowlistConfigError extends Error {
+  readonly badPattern: string
+  constructor(badPattern: string, cause: Error) {
+    super(
+      `MC_FLEET_IMAGE_REGISTRY_ALLOWLIST entry is not a valid regex: ${JSON.stringify(badPattern)} (${cause.message})`,
+    )
+    this.name = 'ImageAllowlistConfigError'
+    this.badPattern = badPattern
+  }
+}
+
 function imageRegistryAllowlist(): RegExp[] {
   const env = process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST
   const prefixes = env
     ? env.split(',').map((s) => s.trim()).filter(Boolean)
     : DEFAULT_IMAGE_REGISTRY_PREFIXES
-  return prefixes.map((p) => new RegExp(`^${p}`))
+  return prefixes.map((p) => {
+    try {
+      return new RegExp(`^${p}`)
+    } catch (err) {
+      throw new ImageAllowlistConfigError(p, err as Error)
+    }
+  })
 }
 
 function validateOpenClawInput(input: openclaw.OpenClawAgentInput): void {
