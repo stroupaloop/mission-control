@@ -22,11 +22,22 @@ import { logger } from '@/lib/logger'
 import { logSecurityEvent } from '@/lib/security-events'
 import {
   HARNESS_TEMPLATES,
-  HARNESS_TYPES,
-  type HarnessType,
+  ImageAllowlistConfigError,
   type OpenClawAgentInput,
   type OpenClawAgentEnv,
 } from '@/extensions/fleet/templates'
+// Constants live in `templates/constraints.ts` (no AWS SDK imports) so
+// the client-side form, the per-harness validateInput, AND the
+// harness-agnostic type guard below all share the same regex /
+// model-tier list. Drift between layers would re-open the gap that
+// constraints.ts was created to close.
+import {
+  AGENT_NAME_RE,
+  HARNESS_TYPES,
+  MODEL_TIERS,
+  type HarnessType,
+  type ModelTier,
+} from '@/extensions/fleet/templates/constraints'
 
 /**
  * POST /api/fleet/agents — create a new MC-managed agent end-to-end.
@@ -64,9 +75,20 @@ import {
  *   with an arbitrary family name (e.g., overwriting `litellm`). Treat
  *   it accordingly: it's a security control, not a UX nicety.
  *
- * Error responses return only the SDK error name (no message detail) to
- * avoid leaking IAM ARNs / account IDs into the browser. Full stack
- * remains in CloudWatch via the logger.error call.
+ * Error response shape:
+ *   - **AWS-SDK errors (5xx + 4xx-on-AWS)**: only the SDK `error.name`
+ *     surfaces — no `detail` — so IAM ARNs / account IDs stay out of
+ *     the browser. Full stack stays in CloudWatch via logger.error.
+ *   - **`ValidationError` (400) and `ConfigurationError` (500)**:
+ *     intentionally include a `detail` field. The values that surface
+ *     are either the operator's own input (echoed back so they can
+ *     fix it) or the misconfigured env-var name + its bad value (so
+ *     the operator knows what to fix in their deployment). Both
+ *     paths are admin-only; the reflected content is the admin's own
+ *     input or their own env. The form renders only `error`, not
+ *     `detail`, so this never reaches an unprivileged screen, but
+ *     the `detail` is preserved in the JSON response for tooling
+ *     and CloudWatch access logs.
  */
 
 // Listener-rule priority bounds. AWS requires unique priorities per
@@ -157,7 +179,7 @@ export interface CreateAgentRequest {
   agentName: string
   roleDescription: string
   image: string
-  modelTier: 'opus-4-7' | 'sonnet-4-6' | 'haiku-4-5'
+  modelTier: ModelTier
 }
 
 export interface CreateAgentResponse {
@@ -185,6 +207,15 @@ export interface CreateAgentResponse {
 
 // Stable warning codes. Keep the list small and code-named so the UI
 // can render specific guidance per code without parsing message text.
+//
+// TODO(ender-stack#215): when #215 closes (gateway runtime config
+// wiring lands), drop WARNING_RUNTIME_CONFIG_GAP from the success
+// response below — leaving it in would surface stale noise on every
+// successful create. Audit cycle on PR #37 flagged this as "should
+// track" because the warning is unconditionally emitted today with no
+// version/feature gate. When dropping: remove this constant, the
+// `warnings: [WARNING_RUNTIME_CONFIG_GAP]` reference in the 201
+// response, and the test that asserts the code is present.
 const WARNING_RUNTIME_CONFIG_GAP = {
   code: 'runtime-config-gap',
   message:
@@ -209,6 +240,23 @@ export interface CreateAgentErrorResponse {
     targetGroupArn?: string
     listenerRuleArn?: string
     logGroup?: string
+    /**
+     * Defensive: present only when CreateService completed without
+     * the serviceArn field (an SDK contract violation — extremely
+     * unlikely, but the cost of getting it wrong is an orphaned ECS
+     * service the operator can't locate from this response).
+     *
+     * - `string` value: rare scenario where the SDK returned a
+     *   service object with serviceArn populated but a later
+     *   verification step (none today) would still throw.
+     * - `null` value: we got a response but the serviceArn field was
+     *   missing or empty. Operator should `aws ecs describe-services`
+     *   on the templated name (`{prefix}-companion-{harness}-{name}`)
+     *   to check for an orphan.
+     *
+     * Round-4 audit on PR #37 (Beat 3b).
+     */
+    serviceArn?: string | null
   }
 }
 
@@ -316,9 +364,10 @@ function getMissingEnv(env: ResolvedEnv): string[] {
 // CreateTargetGroup with a confusing InvalidParameterException; the
 // tighter regex catches it at the validation step instead.
 //
-// Length window 3-32 preserved (min via the {1,30} middle interval +
-// the 1-char start + 1-char end anchors).
-const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/
+// AGENT_NAME_RE + MODEL_TIERS imported from
+// `@/extensions/fleet/templates/constraints` so the type guard,
+// per-harness validateInput, AND the client-side form share the same
+// definitions. constraints.ts is the single source of truth.
 
 function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
   if (!body || typeof body !== 'object') return false
@@ -331,7 +380,7 @@ function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
     typeof b.roleDescription === 'string' &&
     typeof b.image === 'string' &&
     typeof b.modelTier === 'string' &&
-    ['opus-4-7', 'sonnet-4-6', 'haiku-4-5'].includes(b.modelTier as string)
+    MODEL_TIERS.includes(b.modelTier as ModelTier)
   )
 }
 
@@ -384,9 +433,29 @@ export async function POST(request: NextRequest) {
   }
 
   // Per-harness validation. Throws on bad input — caught below as 400.
+  // ImageAllowlistConfigError is a special case: thrown when the env
+  // var MC_FLEET_IMAGE_REGISTRY_ALLOWLIST contains a malformed regex
+  // pattern. That's an operator misconfiguration, not a request
+  // problem; mapping it to 400 ValidationError would mislead the
+  // submitter ("my image is fine, why am I getting a 400?"). Surface
+  // it as a 500 ConfigurationError that names the bad pattern so the
+  // operator can fix the env var rather than the request body.
   try {
     template.validateInput(input)
   } catch (err) {
+    if (err instanceof ImageAllowlistConfigError) {
+      logger.error(
+        { badPattern: err.badPattern, message: err.message },
+        '[fleet] create-agent unavailable: image allowlist regex misconfigured',
+      )
+      return NextResponse.json(
+        {
+          error: 'ConfigurationError',
+          detail: err.message,
+        } satisfies CreateAgentErrorResponse,
+        { status: 500 },
+      )
+    }
     const message = (err as Error).message
     return NextResponse.json(
       {
@@ -560,6 +629,14 @@ export async function POST(request: NextRequest) {
     )
     const serviceArn = serviceResp.service?.serviceArn
     if (!serviceArn) {
+      // SDK contract violation: CreateService returned without the
+      // serviceArn field. The service WAS likely created on AWS —
+      // set partial.serviceArn to `null` (not undefined) so it
+      // survives JSON serialization in the response body and
+      // signals "we got a CreateService response but no ARN; check
+      // ECS console for an orphan." Operator locates via
+      // `aws ecs describe-services` on the templated service name.
+      partial.serviceArn = null
       throw new Error('CreateService returned no ARN')
     }
 
@@ -598,9 +675,18 @@ export async function POST(request: NextRequest) {
           actor,
         }),
       })
-    } catch {
+    } catch (auditErr) {
       // Audit logging is best-effort — don't fail the create over a
-      // SQLite hiccup. The CloudWatch entry remains.
+      // SQLite hiccup. The CloudWatch entry from logger.info above
+      // remains the durable record. Surface the failure as a warn-
+      // level log so persistent audit-DB breakage is visible (without
+      // it, the security_events dashboard would silently lose every
+      // fleet.agent_created row for days before someone noticed). Same
+      // pattern auth.ts uses for its own best-effort audit writes.
+      logger.warn(
+        { err: auditErr, agentName: input.agentName },
+        '[fleet] audit log write failed (best-effort; CloudWatch entry above is the authoritative record)',
+      )
     }
 
     return NextResponse.json(

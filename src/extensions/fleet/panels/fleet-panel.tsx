@@ -8,6 +8,7 @@ import type {
   FleetServicesResponse as ServicesResponse,
   FleetServicesErrorResponse as ErrorResponse,
 } from '../api/services'
+import { CreateAgentForm } from './create-agent-form'
 
 // ---------- Component ----------
 
@@ -38,6 +39,12 @@ export function FleetPanel() {
   const [redeployStates, setRedeployStates] = useState<
     Record<string, RedeployState>
   >({})
+  // Create-agent form (Phase 2.2 Beat 3b) is a collapsible section under
+  // the panel header. Closed by default — opens only when the operator
+  // clicks "Create agent". On submit-success the form refreshes the
+  // table via load() and stays open showing the success summary; the
+  // operator dismisses with "Done" or "Create another."
+  const [createOpen, setCreateOpen] = useState(false)
   // Tracks when `data` was last successfully fetched (Date.now()).
   // Drives the staleness indicator that appears when error+data are
   // both present — operators need to know the table is from before
@@ -197,14 +204,38 @@ export function FleetPanel() {
             deploy + configure actions ship in subsequent phases.
           </p>
         </div>
-        <Button
-          variant="outline"
-          onClick={() => void load()}
-          disabled={loading}
-        >
-          {loading ? 'Loading…' : 'Refresh'}
-        </Button>
+        <div className="flex gap-2">
+          {/* Toggle is intentionally NOT disabled by `loading`. The
+              auto-poll loop + post-create refresh both flip `loading`
+              to true; gating the toggle on it would lock the operator
+              out of opening / closing the form whenever the table is
+              fetching. The form itself has its own submitting state
+              that disables its inputs during the in-flight POST. */}
+          <Button
+            variant="outline"
+            onClick={() => setCreateOpen((v) => !v)}
+            data-testid="toggle-create-agent"
+          >
+            {createOpen ? 'Close create form' : 'Create agent'}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => void load()}
+            disabled={loading}
+          >
+            {loading ? 'Loading…' : 'Refresh'}
+          </Button>
+        </div>
       </div>
+
+      {createOpen && (
+        <CreateAgentForm
+          onCreated={() => {
+            void load()
+          }}
+          onClose={() => setCreateOpen(false)}
+        />
+      )}
 
       {error ? (
         <div className="rounded border border-destructive/50 bg-destructive/10 p-4">

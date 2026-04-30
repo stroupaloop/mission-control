@@ -22,9 +22,19 @@
  */
 
 import * as openclaw from './openclaw'
+import {
+  AGENT_NAME_RE,
+  HARNESS_TYPES,
+  IMAGE_MAX_BYTES,
+  ROLE_DESCRIPTION_MAX_BYTES,
+  type HarnessType,
+} from './constraints'
 
-export const HARNESS_TYPES = ['companion/openclaw'] as const
-export type HarnessType = (typeof HARNESS_TYPES)[number]
+// Re-export for callers that already imported from this module.
+// Constants live in `./constraints` (no AWS SDK imports) so client
+// components can pull them without dragging the AWS SDK into the browser
+// bundle. See constraints.ts for the security-control commentary.
+export { HARNESS_TYPES, type HarnessType }
 
 /**
  * Concrete shape today (OpenClaw only). Generics removed until a second
@@ -42,21 +52,6 @@ export interface HarnessTemplate {
   /** Validates the harness-specific shape of the form input. Throws on invalid. */
   validateInput: (input: openclaw.OpenClawAgentInput) => void
 }
-
-// Caps mirror the rationale that drove dropping slackWebhookUrl —
-// task-def revisions are immutable and retained indefinitely, so an
-// unbounded admin input becomes permanent storage.
-const ROLE_DESCRIPTION_MAX_BYTES = 1024
-const IMAGE_MAX_BYTES = 512
-
-// Mirrors the type guard's regex (api/agents.ts AGENT_NAME_RE).
-// Defense in depth — the type guard is the harness-agnostic boundary,
-// this is the per-harness backstop. Keep both anchored to lowercase-
-// start / alphanumeric-end so a regression in one layer doesn't silently
-// permit names that 409 at AWS-layer validation. The auditor explicitly
-// flagged that an unanchored regex would let names like `-foo` or `foo-`
-// reach CreateTargetGroup with a confusing InvalidParameterException.
-const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/
 
 // Image registry allowlist. Defaults to ECR-in-this-account, GHCR
 // under stroupaloop, and AWS public ECR — everything we expect a
@@ -78,12 +73,38 @@ const DEFAULT_IMAGE_REGISTRY_PREFIXES = [
   String.raw`public\.ecr\.aws/`,
 ]
 
+/**
+ * Thrown when MC_FLEET_IMAGE_REGISTRY_ALLOWLIST contains a malformed
+ * regex pattern. Surfaced separately from generic validation errors so
+ * the handler can map it to a clear configuration error rather than a
+ * confusing 502 SyntaxError. Caught upstream in api/agents.ts and
+ * mapped to the same ConfigurationError shape used for missing env
+ * vars (admin-only endpoint; the message safely identifies which
+ * pattern failed to compile).
+ */
+export class ImageAllowlistConfigError extends Error {
+  readonly badPattern: string
+  constructor(badPattern: string, cause: Error) {
+    super(
+      `MC_FLEET_IMAGE_REGISTRY_ALLOWLIST entry is not a valid regex: ${JSON.stringify(badPattern)} (${cause.message})`,
+    )
+    this.name = 'ImageAllowlistConfigError'
+    this.badPattern = badPattern
+  }
+}
+
 function imageRegistryAllowlist(): RegExp[] {
   const env = process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST
   const prefixes = env
     ? env.split(',').map((s) => s.trim()).filter(Boolean)
     : DEFAULT_IMAGE_REGISTRY_PREFIXES
-  return prefixes.map((p) => new RegExp(`^${p}`))
+  return prefixes.map((p) => {
+    try {
+      return new RegExp(`^${p}`)
+    } catch (err) {
+      throw new ImageAllowlistConfigError(p, err as Error)
+    }
+  })
 }
 
 function validateOpenClawInput(input: openclaw.OpenClawAgentInput): void {
@@ -92,9 +113,21 @@ function validateOpenClawInput(input: openclaw.OpenClawAgentInput): void {
       `agentName must match ${AGENT_NAME_RE}; got ${JSON.stringify(input.agentName)}`,
     )
   }
-  if (!input.image || !input.image.includes(':')) {
+  // Image must contain a tag/digest separator AND have something after
+  // it. `img:` (empty tag) passes a naive includes(':') check but ECS
+  // rejects it as InvalidParameterException at RegisterTaskDefinition,
+  // surfacing as a confusing 502 to the operator. Mirror the client-
+  // side `lastTagSegment.length > 0` check (panels/create-agent-form.tsx)
+  // here so a direct POST that bypasses the form gets the same clean
+  // 400 ValidationError instead of an opaque AWS-layer 502. Round-9
+  // audit on PR #37.
+  if (
+    !input.image ||
+    !input.image.includes(':') ||
+    !(input.image.split(':').at(-1) ?? '')
+  ) {
     throw new Error(
-      'image must be a fully-qualified container ref including a tag or digest',
+      'image must be a fully-qualified container ref with a non-empty tag or digest',
     )
   }
   if (input.image.length > IMAGE_MAX_BYTES) {

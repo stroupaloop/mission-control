@@ -198,6 +198,32 @@ describe('POST /api/fleet/agents — env validation', () => {
     expect(json.detail).toContain('MC_AGENT_SECURITY_GROUP_ID')
   })
 
+  it('returns 500 ConfigurationError when MC_FLEET_IMAGE_REGISTRY_ALLOWLIST contains an invalid regex (not a 502 SyntaxError)', async () => {
+    // Audit on PR #37 round 3 caught this: a malformed allowlist entry
+    // would throw SyntaxError from `new RegExp()`, the outer try/catch
+    // would surface it as a generic 502, and the operator would
+    // diagnose a downstream AWS issue instead of fixing their env var.
+    // The handler now maps ImageAllowlistConfigError to 500
+    // ConfigurationError with the bad pattern named.
+    const original = process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST
+    process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST = '[unterminated-class'
+    try {
+      const POST = await importHandler()
+      const resp = await POST(mkRequest(validBody()))
+      expect(resp.status).toBe(500)
+      const json = (await resp.json()) as { error: string; detail?: string }
+      expect(json.error).toBe('ConfigurationError')
+      expect(json.detail).toContain('MC_FLEET_IMAGE_REGISTRY_ALLOWLIST')
+      expect(json.detail).toContain('[unterminated-class')
+    } finally {
+      if (original === undefined) {
+        delete process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST
+      } else {
+        process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST = original
+      }
+    }
+  })
+
   it('rejects agentName with invalid characters at the type-guard layer (defense-in-depth)', async () => {
     // Length window passes (11 chars, in [3,32]) but the regex fails
     // on the space. Confirms that even if a future harness's
@@ -448,6 +474,45 @@ describe('POST /api/fleet/agents — error handling', () => {
     expect(((await resp.json()) as { error: string }).error).toBe(
       'InvalidParameterException',
     )
+  })
+
+  it('surfaces partialResources.serviceArn when CreateService SDK response is missing serviceArn (round-4 audit defensive case)', async () => {
+    happyPathMocks()
+    // Override the LAST ecs call (CreateService): respond as if AWS
+    // succeeded (HTTP 200) but the SDK contract was violated — the
+    // service field is present but serviceArn is undefined. The
+    // service WAS created on AWS; without serviceArn surfacing in
+    // partialResources, the operator has no pointer to clean up the
+    // orphaned ECS service.
+    ecsSendMock.mockReset()
+    ecsSendMock
+      .mockResolvedValueOnce({
+        taskDefinition: { taskDefinitionArn: 'arn:tdf' },
+      })
+      .mockResolvedValueOnce({
+        // SDK contract violation: serviceArn missing from response
+        service: {},
+      })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as {
+      error: string
+      partialResources?: {
+        taskDefinitionArn?: string
+        serviceArn?: string
+      }
+    }
+    // The handler throws a generic Error after detecting the missing
+    // ARN; outer catch surfaces the Error.name. Important: the
+    // partial.serviceArn key is set even when its value is undefined,
+    // so the operator gets a structured "this MAY be orphaned" signal.
+    expect(json.partialResources).toBeDefined()
+    expect(json.partialResources?.taskDefinitionArn).toBe('arn:tdf')
+    // null (not undefined) so the field survives JSON.stringify and
+    // the operator gets a clear "we don't have it but we tried"
+    // signal in the response body.
+    expect(json.partialResources?.serviceArn).toBeNull()
   })
 
   it('returns 409 on DuplicateTargetGroupNameException', async () => {
