@@ -1,0 +1,397 @@
+import { describe, expect, it, vi, beforeEach } from 'vitest'
+
+const ecsSendMock = vi.fn()
+const elbv2SendMock = vi.fn()
+const logsSendMock = vi.fn()
+
+vi.mock('@aws-sdk/client-ecs', () => ({
+  ECSClient: vi.fn().mockImplementation(() => ({ send: ecsSendMock })),
+  RegisterTaskDefinitionCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'RegisterTaskDefinitionCommand',
+    input,
+  })),
+  CreateServiceCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'CreateServiceCommand',
+    input,
+  })),
+}))
+
+vi.mock('@aws-sdk/client-elastic-load-balancing-v2', () => ({
+  ElasticLoadBalancingV2Client: vi
+    .fn()
+    .mockImplementation(() => ({ send: elbv2SendMock })),
+  CreateTargetGroupCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'CreateTargetGroupCommand',
+    input,
+  })),
+  CreateRuleCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'CreateRuleCommand',
+    input,
+  })),
+  DescribeLoadBalancersCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DescribeLoadBalancersCommand',
+    input,
+  })),
+  DescribeListenersCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DescribeListenersCommand',
+    input,
+  })),
+}))
+
+vi.mock('@aws-sdk/client-cloudwatch-logs', () => ({
+  CloudWatchLogsClient: vi
+    .fn()
+    .mockImplementation(() => ({ send: logsSendMock })),
+  CreateLogGroupCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'CreateLogGroupCommand',
+    input,
+  })),
+  PutRetentionPolicyCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'PutRetentionPolicyCommand',
+    input,
+  })),
+}))
+
+vi.mock('@/lib/logger', () => ({
+  logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+}))
+
+vi.mock('@/lib/auth', () => ({
+  requireRole: vi.fn(() => ({ user: { id: 'test', role: 'admin' } })),
+}))
+
+const importHandler = async () => {
+  const mod = await import('../api/agents')
+  return mod.POST
+}
+
+const setRequiredEnv = () => {
+  process.env.AWS_REGION = 'us-east-1'
+  process.env.MC_FLEET_CLUSTER_NAME = 'ender-stack-dev'
+  process.env.MC_AWS_ACCOUNT_ID = '398152419239'
+  process.env.MC_FLEET_PROJECT_NAME = 'ender-stack'
+  process.env.MC_FLEET_ENVIRONMENT = 'dev'
+  process.env.MC_AGENT_TASK_ROLE_ARN =
+    'arn:aws:iam::398152419239:role/ender-stack-dev-companion-openclaw-mc-task'
+  process.env.MC_AGENT_EXECUTION_ROLE_ARN =
+    'arn:aws:iam::398152419239:role/ender-stack-dev-companion-openclaw-mc-exec'
+  process.env.MC_AGENT_LOG_GROUP_PREFIX = '/ecs/ender-stack-dev'
+  process.env.MC_AGENT_VPC_ID = 'vpc-abc'
+  process.env.MC_AGENT_SUBNET_IDS = 'subnet-1,subnet-2'
+  process.env.MC_AGENT_SECURITY_GROUP_ID = 'sg-ecs'
+  process.env.MC_LITELLM_ALB_DNS_NAME = 'internal-litellm.us-east-1.elb.amazonaws.com'
+}
+
+const validBody = () => ({
+  harnessType: 'companion/openclaw',
+  agentName: 'hello-world',
+  roleDescription: 'Says hello',
+  image: 'ghcr.io/stroupaloop/openclaw:sha-abc123',
+  modelTier: 'sonnet-4-6',
+})
+
+const mkRequest = (body: unknown) =>
+  ({
+    json: async () => body,
+    url: 'http://localhost/api/fleet/agents',
+  }) as unknown as Parameters<Awaited<ReturnType<typeof importHandler>>>[0]
+
+const happyPathMocks = () => {
+  // Order: DescribeLBs → DescribeListeners → CreateLogGroup →
+  // PutRetentionPolicy → RegisterTaskDef → CreateTargetGroup → CreateRule → CreateService.
+  elbv2SendMock.mockReset()
+  ecsSendMock.mockReset()
+  logsSendMock.mockReset()
+
+  elbv2SendMock
+    .mockResolvedValueOnce({
+      LoadBalancers: [
+        {
+          LoadBalancerArn:
+            'arn:aws:elasticloadbalancing:us-east-1:398152419239:loadbalancer/app/ender-stack-dev-agents-shared/abc',
+        },
+      ],
+    })
+    .mockResolvedValueOnce({
+      Listeners: [
+        {
+          ListenerArn:
+            'arn:aws:elasticloadbalancing:us-east-1:398152419239:listener/app/ender-stack-dev-agents-shared/abc/lst1',
+        },
+      ],
+    })
+    .mockResolvedValueOnce({
+      TargetGroups: [
+        {
+          TargetGroupArn:
+            'arn:aws:elasticloadbalancing:us-east-1:398152419239:targetgroup/ender-stack-dev-agent-hello-world/tg1',
+        },
+      ],
+    })
+    .mockResolvedValueOnce({
+      Rules: [
+        {
+          RuleArn:
+            'arn:aws:elasticloadbalancing:us-east-1:398152419239:listener-rule/app/ender-stack-dev-agents-shared/abc/lst1/r1',
+        },
+      ],
+    })
+
+  logsSendMock
+    .mockResolvedValueOnce({}) // CreateLogGroup
+    .mockResolvedValueOnce({}) // PutRetentionPolicy
+
+  ecsSendMock
+    .mockResolvedValueOnce({
+      taskDefinition: {
+        taskDefinitionArn:
+          'arn:aws:ecs:us-east-1:398152419239:task-definition/ender-stack-dev-companion-openclaw-hello-world:1',
+      },
+    })
+    .mockResolvedValueOnce({
+      service: {
+        serviceArn:
+          'arn:aws:ecs:us-east-1:398152419239:service/ender-stack-dev/ender-stack-dev-companion-openclaw-hello-world',
+      },
+    })
+}
+
+beforeEach(() => {
+  setRequiredEnv()
+  ecsSendMock.mockReset()
+  elbv2SendMock.mockReset()
+  logsSendMock.mockReset()
+})
+
+describe('POST /api/fleet/agents — env validation', () => {
+  it('returns 500 ConfigurationError when MC_AGENT_TASK_ROLE_ARN is unset', async () => {
+    delete process.env.MC_AGENT_TASK_ROLE_ARN
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('ConfigurationError')
+    expect(json.detail).toContain('MC_AGENT_TASK_ROLE_ARN')
+  })
+
+  it('returns 500 with all missing env vars listed', async () => {
+    delete process.env.MC_AGENT_VPC_ID
+    delete process.env.MC_AGENT_SECURITY_GROUP_ID
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    const json = (await resp.json()) as { detail?: string }
+    expect(json.detail).toContain('MC_AGENT_VPC_ID')
+    expect(json.detail).toContain('MC_AGENT_SECURITY_GROUP_ID')
+  })
+})
+
+describe('POST /api/fleet/agents — request validation', () => {
+  it('returns 400 InvalidRequestBody on non-JSON', async () => {
+    const POST = await importHandler()
+    const req = {
+      json: async () => {
+        throw new SyntaxError('bad json')
+      },
+    } as unknown as Parameters<typeof POST>[0]
+    const resp = await POST(req)
+    expect(resp.status).toBe(400)
+    expect(((await resp.json()) as { error: string }).error).toBe(
+      'InvalidRequestBody',
+    )
+  })
+
+  it('returns 400 InvalidRequestShape when fields are missing', async () => {
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ harnessType: 'companion/openclaw', agentName: 'hi' }),
+    )
+    expect(resp.status).toBe(400)
+    expect(((await resp.json()) as { error: string }).error).toBe(
+      'InvalidRequestShape',
+    )
+  })
+
+  it('returns 400 ValidationError when agentName fails the regex', async () => {
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ ...validBody(), agentName: 'BAD_NAME' }),
+    )
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('ValidationError')
+    expect(json.detail).toMatch(/agentName/)
+  })
+
+  it('returns 400 InvalidRequestShape on unknown harnessType', async () => {
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ ...validBody(), harnessType: 'task/hermes' }),
+    )
+    expect(resp.status).toBe(400)
+    expect(((await resp.json()) as { error: string }).error).toBe(
+      'InvalidRequestShape',
+    )
+  })
+})
+
+describe('POST /api/fleet/agents — auth', () => {
+  it('rejects non-admin callers via requireRole', async () => {
+    const auth = await import('@/lib/auth')
+    vi.mocked(auth.requireRole).mockReturnValueOnce({
+      error: 'forbidden',
+      status: 403,
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(403)
+  })
+})
+
+describe('POST /api/fleet/agents — happy path', () => {
+  it('returns 201 with all created resource ARNs', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(201)
+    const json = (await resp.json()) as {
+      ok: boolean
+      agentName: string
+      resources: {
+        serviceArn: string
+        taskDefinitionArn: string
+        targetGroupArn: string
+        listenerRuleArn: string
+        logGroup: string
+        listenerPath: string
+      }
+    }
+    expect(json.ok).toBe(true)
+    expect(json.agentName).toBe('hello-world')
+    expect(json.resources.listenerPath).toBe('/agent/hello-world*')
+    expect(json.resources.logGroup).toBe(
+      '/ecs/ender-stack-dev/companion-openclaw-hello-world',
+    )
+    expect(json.resources.serviceArn).toContain(
+      'service/ender-stack-dev/ender-stack-dev-companion-openclaw-hello-world',
+    )
+  })
+
+  it('looks up the shared ALB by name', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    await POST(mkRequest(validBody()))
+    const firstElbCall = elbv2SendMock.mock.calls[0]?.[0] as {
+      __type: string
+      input: { Names?: string[] }
+    }
+    expect(firstElbCall.__type).toBe('DescribeLoadBalancersCommand')
+    expect(firstElbCall.input.Names).toEqual(['ender-stack-dev-agents-shared'])
+  })
+
+  it('pre-creates the per-agent log group with retention before RegisterTaskDef', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    await POST(mkRequest(validBody()))
+    const calls = logsSendMock.mock.calls.map(
+      (c) => (c[0] as { __type: string }).__type,
+    )
+    expect(calls).toEqual(['CreateLogGroupCommand', 'PutRetentionPolicyCommand'])
+    // RegisterTaskDef must be after both log calls.
+    const registerOrder = ecsSendMock.mock.invocationCallOrder[0]
+    const lastLogOrder =
+      logsSendMock.mock.invocationCallOrder[
+        logsSendMock.mock.invocationCallOrder.length - 1
+      ]
+    expect(registerOrder).toBeGreaterThan(lastLogOrder)
+  })
+
+  it('treats ResourceAlreadyExistsException on log-group create as idempotent', async () => {
+    happyPathMocks()
+    // Override CreateLogGroup with a "already exists" error followed by
+    // a successful PutRetentionPolicy — handler should swallow and continue.
+    logsSendMock.mockReset()
+    const alreadyExists = Object.assign(new Error('exists'), {
+      name: 'ResourceAlreadyExistsException',
+    })
+    logsSendMock
+      .mockRejectedValueOnce(alreadyExists)
+      .mockResolvedValueOnce({})
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(201)
+  })
+
+  it('CreateRule routes /agent/{agentName}* and forwards to the new TG', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    await POST(mkRequest(validBody()))
+    const ruleCall = elbv2SendMock.mock.calls.find(
+      (c) => (c[0] as { __type: string }).__type === 'CreateRuleCommand',
+    )
+    expect(ruleCall).toBeDefined()
+    const input = (ruleCall![0] as { input: Record<string, unknown> }).input
+    expect((input.Conditions as Array<Record<string, unknown>>)[0].Values).toEqual(
+      ['/agent/hello-world*'],
+    )
+    const actions = input.Actions as Array<Record<string, unknown>>
+    expect(actions[0].TargetGroupArn).toContain(
+      'targetgroup/ender-stack-dev-agent-hello-world',
+    )
+  })
+})
+
+describe('POST /api/fleet/agents — error handling', () => {
+  it('returns 502 with the SDK error name when the shared ALB is missing', async () => {
+    elbv2SendMock.mockResolvedValueOnce({ LoadBalancers: [] })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('Error') // generic Error.name
+  })
+
+  it('returns 409 when the ECS service already exists', async () => {
+    happyPathMocks()
+    // Override the LAST ecs call (CreateService) with a conflict.
+    ecsSendMock.mockReset()
+    ecsSendMock
+      .mockResolvedValueOnce({
+        taskDefinition: {
+          taskDefinitionArn: 'arn:tdf',
+        },
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Service already exists'), {
+          name: 'InvalidParameterException',
+        }),
+      )
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(409)
+    expect(((await resp.json()) as { error: string }).error).toBe(
+      'InvalidParameterException',
+    )
+  })
+
+  it('returns 409 on DuplicateTargetGroupNameException', async () => {
+    elbv2SendMock
+      .mockResolvedValueOnce({
+        LoadBalancers: [{ LoadBalancerArn: 'arn:lb' }],
+      })
+      .mockResolvedValueOnce({
+        Listeners: [{ ListenerArn: 'arn:lst' }],
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('exists'), {
+          name: 'DuplicateTargetGroupNameException',
+        }),
+      )
+    logsSendMock.mockResolvedValue({})
+    ecsSendMock.mockResolvedValueOnce({
+      taskDefinition: { taskDefinitionArn: 'arn:tdf' },
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(409)
+  })
+})

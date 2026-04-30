@@ -28,7 +28,9 @@
     "postinstall": "node -e \"try{require('better-sqlite3')}catch(e){if(e.code==='ERR_DLOPEN_FAILED'||/NODE_MODULE_VERSION/.test(e.message)){console.error('\\n⚠  better-sqlite3 compiled for wrong Node version. Run: pnpm rebuild better-sqlite3\\n');process.exit(1)}}\""
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.1039.0",
     "@aws-sdk/client-ecs": "^3.726.1",
+    "@aws-sdk/client-elastic-load-balancing-v2": "^3.1039.0",
     "@radix-ui/react-slot": "^1.2.4",
     "@scalar/api-reference-react": "^0.8.66",
     "@xterm/addon-fit": "^0.11.0",
