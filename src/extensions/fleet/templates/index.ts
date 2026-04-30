@@ -41,9 +41,13 @@ export interface HarnessTemplate {
   renderListenerRule: typeof openclaw.renderListenerRule
   /** Validates the harness-specific shape of the form input. Throws on invalid. */
   validateInput: (input: openclaw.OpenClawAgentInput) => void
-  /** Sentinel — the handler reads this when constructing the log group name. */
-  containerName: string
 }
+
+// Caps mirror the rationale that drove dropping slackWebhookUrl —
+// task-def revisions are immutable and retained indefinitely, so an
+// unbounded admin input becomes permanent storage.
+const ROLE_DESCRIPTION_MAX_BYTES = 1024
+const IMAGE_MAX_BYTES = 512
 
 function validateOpenClawInput(input: openclaw.OpenClawAgentInput): void {
   if (!/^[a-z0-9-]{3,32}$/.test(input.agentName)) {
@@ -56,8 +60,18 @@ function validateOpenClawInput(input: openclaw.OpenClawAgentInput): void {
       'image must be a fully-qualified container ref including a tag or digest',
     )
   }
+  if (input.image.length > IMAGE_MAX_BYTES) {
+    throw new Error(
+      `image must be ≤ ${IMAGE_MAX_BYTES} bytes; got ${input.image.length}`,
+    )
+  }
   if (!input.roleDescription.trim()) {
     throw new Error('roleDescription is required')
+  }
+  if (input.roleDescription.length > ROLE_DESCRIPTION_MAX_BYTES) {
+    throw new Error(
+      `roleDescription must be ≤ ${ROLE_DESCRIPTION_MAX_BYTES} bytes; got ${input.roleDescription.length}`,
+    )
   }
 }
 
@@ -68,7 +82,6 @@ export const HARNESS_TEMPLATES: Record<HarnessType, HarnessTemplate> = {
     renderService: openclaw.renderService,
     renderListenerRule: openclaw.renderListenerRule,
     validateInput: validateOpenClawInput,
-    containerName: 'gateway',
   },
 }
 

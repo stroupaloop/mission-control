@@ -36,6 +36,10 @@ vi.mock('@aws-sdk/client-elastic-load-balancing-v2', () => ({
     __type: 'DescribeListenersCommand',
     input,
   })),
+  DescribeRulesCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DescribeRulesCommand',
+    input,
+  })),
 }))
 
 vi.mock('@aws-sdk/client-cloudwatch-logs', () => ({
@@ -72,7 +76,6 @@ const importHandler = async () => {
 const setRequiredEnv = () => {
   process.env.AWS_REGION = 'us-east-1'
   process.env.MC_FLEET_CLUSTER_NAME = 'ender-stack-dev'
-  process.env.MC_AWS_ACCOUNT_ID = '398152419239'
   process.env.MC_FLEET_PROJECT_NAME = 'ender-stack'
   process.env.MC_FLEET_ENVIRONMENT = 'dev'
   process.env.MC_AGENT_TASK_ROLE_ARN =
@@ -102,7 +105,8 @@ const mkRequest = (body: unknown) =>
 
 const happyPathMocks = () => {
   // Order: DescribeLBs → DescribeListeners → CreateLogGroup →
-  // PutRetentionPolicy → RegisterTaskDef → CreateTargetGroup → CreateRule → CreateService.
+  // PutRetentionPolicy → RegisterTaskDef → CreateTargetGroup →
+  // DescribeRules (priority allocation) → CreateRule → CreateService.
   elbv2SendMock.mockReset()
   ecsSendMock.mockReset()
   logsSendMock.mockReset()
@@ -132,6 +136,11 @@ const happyPathMocks = () => {
             'arn:aws:elasticloadbalancing:us-east-1:398152419239:targetgroup/ender-stack-dev-agent-hello-world/tg1',
         },
       ],
+    })
+    .mockResolvedValueOnce({
+      // DescribeRules — empty listener (no occupied priorities), so
+      // allocatePriority returns the hashed slot directly.
+      Rules: [{ Priority: 'default' }],
     })
     .mockResolvedValueOnce({
       Rules: [
@@ -188,6 +197,19 @@ describe('POST /api/fleet/agents — env validation', () => {
     expect(json.detail).toContain('MC_AGENT_VPC_ID')
     expect(json.detail).toContain('MC_AGENT_SECURITY_GROUP_ID')
   })
+
+  it('rejects agentName with invalid characters at the type-guard layer (defense-in-depth)', async () => {
+    // Length window passes (11 chars, in [3,32]) but the regex fails
+    // on the space. Confirms that even if a future harness's
+    // validateInput drops the regex, the type guard catches it.
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ ...validBody(), agentName: 'hello world' }),
+    )
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('InvalidRequestShape')
+  })
 })
 
 describe('POST /api/fleet/agents — request validation', () => {
@@ -216,15 +238,18 @@ describe('POST /api/fleet/agents — request validation', () => {
     )
   })
 
-  it('returns 400 ValidationError when agentName fails the regex', async () => {
+  it('returns 400 InvalidRequestShape when agentName fails the regex (caught at type guard)', async () => {
+    // After auditor round 5, the regex moved into isCreateAgentRequest
+    // as the harness-agnostic security boundary, so invalid agent names
+    // are caught here BEFORE the template's validateInput sees them.
+    // Both layers still apply the same regex (defense-in-depth).
     const POST = await importHandler()
     const resp = await POST(
       mkRequest({ ...validBody(), agentName: 'BAD_NAME' }),
     )
     expect(resp.status).toBe(400)
-    const json = (await resp.json()) as { error: string; detail?: string }
-    expect(json.error).toBe('ValidationError')
-    expect(json.detail).toMatch(/agentName/)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('InvalidRequestShape')
   })
 
   it('returns 400 InvalidRequestShape on unknown harnessType', async () => {
@@ -383,6 +408,8 @@ describe('POST /api/fleet/agents — error handling', () => {
   })
 
   it('returns 409 on DuplicateTargetGroupNameException', async () => {
+    // CreateTargetGroup is called before DescribeRules (the priority
+    // allocator), so this error path doesn't reach DescribeRules.
     elbv2SendMock
       .mockResolvedValueOnce({
         LoadBalancers: [{ LoadBalancerArn: 'arn:lb' }],
@@ -487,6 +514,10 @@ describe('POST /api/fleet/agents — listener selection', () => {
       })
       .mockResolvedValueOnce({
         TargetGroups: [{ TargetGroupArn: 'arn:tg' }],
+      })
+      .mockResolvedValueOnce({
+        // DescribeRules — empty for priority allocation
+        Rules: [{ Priority: 'default' }],
       })
       .mockResolvedValueOnce({
         Rules: [{ RuleArn: 'arn:rule' }],

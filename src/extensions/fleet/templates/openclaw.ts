@@ -83,8 +83,6 @@ export interface OpenClawAgentInput {
  * from the template lets unit tests render with stable fixture values.
  */
 export interface OpenClawAgentEnv {
-  /** AWS account ID (e.g., '398152419239'). Used for ARN construction. */
-  accountId: string
   /** AWS region (e.g., 'us-east-1'). */
   region: string
   /** `{project}-{environment}` (e.g., 'ender-stack-dev'). Drives every per-agent name. */

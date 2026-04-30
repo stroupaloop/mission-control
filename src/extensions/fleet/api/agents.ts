@@ -10,6 +10,7 @@ import {
   CreateRuleCommand,
   DescribeLoadBalancersCommand,
   DescribeListenersCommand,
+  DescribeRulesCommand,
 } from '@aws-sdk/client-elastic-load-balancing-v2'
 import {
   CloudWatchLogsClient,
@@ -89,7 +90,6 @@ const logsClient = new CloudWatchLogsClient({ region: AWS_REGION_AT_LOAD })
 interface ResolvedEnv {
   region: string
   clusterName: string
-  accountId: string
   projectName: string
   environment: string
   prefix: string
@@ -121,7 +121,6 @@ function resolveEnv(): ResolvedEnv {
   return {
     region: process.env.AWS_REGION || 'us-east-1',
     clusterName,
-    accountId: process.env.MC_AWS_ACCOUNT_ID || '',
     projectName,
     environment,
     prefix: `${projectName}-${environment}`,
@@ -200,6 +199,55 @@ function priorityFor(agentName: string): number {
   return PRIORITY_RANGE_MIN + (Math.abs(h) % range)
 }
 
+/**
+ * Find a free listener-rule priority via DescribeRules + linear scan
+ * from the agent-name hash. Avoids the UX-hostile "rename and retry"
+ * workflow that the bare hash imposes on prefix-collision agents
+ * (~9.5% probability at 100 agents — birthday-paradox over 49,900
+ * slots; see ender-stack#214).
+ *
+ * Strategy: hash gives a stable starting point, scan forward (with
+ * wraparound) until an unoccupied priority is found. When the listener
+ * is sparse (the common case), the hashed slot is free on the first
+ * check and there's no behavioral difference. Under collision, the
+ * scan picks the next free slot deterministically.
+ *
+ * Race window: a concurrent CreateRule could reserve the picked
+ * priority between this call and our own CreateRule, in which case
+ * AWS returns PriorityInUseException → the outer 409 path. Phase 2.2
+ * is single-MC so the race is theoretical; the reconciler in Beat 3c
+ * is the proper home for transactional allocation.
+ */
+async function allocatePriority(
+  client: ElasticLoadBalancingV2Client,
+  listenerArn: string,
+  agentName: string,
+): Promise<number> {
+  const start = priorityFor(agentName)
+  const rules = await client.send(
+    new DescribeRulesCommand({ ListenerArn: listenerArn }),
+  )
+  const occupied = new Set<number>()
+  for (const rule of rules.Rules ?? []) {
+    // The default rule has Priority 'default' (string); skip it. Only
+    // numeric priorities count toward our 100-49999 range.
+    const p = rule.Priority
+    if (typeof p === 'string' && /^\d+$/.test(p)) {
+      occupied.add(Number(p))
+    }
+  }
+  const range = PRIORITY_RANGE_MAX - PRIORITY_RANGE_MIN + 1
+  for (let i = 0; i < range; i++) {
+    const candidate = PRIORITY_RANGE_MIN + ((start - PRIORITY_RANGE_MIN + i) % range)
+    if (!occupied.has(candidate)) return candidate
+  }
+  // 49,900 occupied slots. In the absence of a quota bug, this is
+  // unreachable; the AWS account-level rule limit is far below 49,900.
+  throw new Error(
+    `No free listener-rule priority available on ${listenerArn} (${occupied.size} occupied)`,
+  )
+}
+
 function buildTags(env: ResolvedEnv): Record<string, string> {
   return {
     Project: env.projectName,
@@ -212,7 +260,6 @@ function buildTags(env: ResolvedEnv): Record<string, string> {
 /** Returns the names of any required env vars that are unset. Empty list = all set. */
 function getMissingEnv(env: ResolvedEnv): string[] {
   const missing: string[] = []
-  if (!env.accountId) missing.push('MC_AWS_ACCOUNT_ID')
   if (!env.taskRoleArn) missing.push('MC_AGENT_TASK_ROLE_ARN')
   if (!env.executionRoleArn) missing.push('MC_AGENT_EXECUTION_ROLE_ARN')
   if (!env.vpcId) missing.push('MC_AGENT_VPC_ID')
@@ -222,6 +269,15 @@ function getMissingEnv(env: ResolvedEnv): string[] {
   return missing
 }
 
+// agentName regex applied at the harness-agnostic type-guard layer.
+// The template-level validateInput re-applies the same regex per-harness
+// (defense-in-depth), but the type guard is the load-bearing layer
+// because it runs for every harness type and gates ALL access to the
+// `ecs:RegisterTaskDefinition Resource:*` grant. If a future harness
+// ever omits the regex from its validateInput, this layer keeps the
+// security boundary intact.
+const AGENT_NAME_RE = /^[a-z0-9-]{3,32}$/
+
 function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
   if (!body || typeof body !== 'object') return false
   const b = body as Record<string, unknown>
@@ -229,13 +285,7 @@ function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
     typeof b.harnessType === 'string' &&
     HARNESS_TYPES.includes(b.harnessType as HarnessType) &&
     typeof b.agentName === 'string' &&
-    // Length pre-check: defense-in-depth so the type guard rejects
-    // obviously out-of-range names BEFORE they reach the template's
-    // regex enforcement. If a future refactor reorders the calls,
-    // the basic length window stays enforced even if regex
-    // validation runs later (or briefly drops out).
-    b.agentName.length >= 3 &&
-    b.agentName.length <= 32 &&
+    AGENT_NAME_RE.test(b.agentName as string) &&
     typeof b.roleDescription === 'string' &&
     typeof b.image === 'string' &&
     typeof b.modelTier === 'string' &&
@@ -306,7 +356,6 @@ export async function POST(request: NextRequest) {
   }
 
   const env: OpenClawAgentEnv = {
-    accountId: resolved.accountId,
     region: resolved.region,
     prefix: resolved.prefix,
     clusterName: resolved.clusterName,
@@ -416,19 +465,21 @@ export async function POST(request: NextRequest) {
     // docstring for why prefix-pair agent names (e.g. `bot` + `bot-test`)
     // require the anchoring.
     //
-    // Priority is hashed from agentName. djb2 over the 100-49999
-    // range (49,900 slots) gives:
-    //   - expected first collision: ~280 agents (birthday paradox)
-    //   - 1% collision probability at ~31 agents
-    //   - 9.5% at ~100 agents
-    // On collision, AWS returns PriorityInUseException → handled below
-    // as 409. The interim fix is renaming the agent (which re-hashes);
-    // a real collision-free allocator is queued in ender-stack#214 to
-    // ship alongside Beat 3b's UI form, where collision rate scales
-    // with operator-driven creation volume.
+    // Priority allocated via DescribeRules preflight + linear scan from
+    // the agent-name hash (see allocatePriority). The hash provides a
+    // stable starting point; the scan picks the next free slot under
+    // collision. Beat 3c's reconciler will replace this with a
+    // transactional allocator backed by SQLite (ender-stack#214) — the
+    // preflight pattern races with concurrent CreateRule calls in a
+    // multi-MC future, which Phase 2.2 doesn't have.
+    const allocatedPriority = await allocatePriority(
+      elbv2Client,
+      listenerArn,
+      input.agentName,
+    )
     const ruleSpec = template.renderListenerRule(input, env, {
       targetGroupArn,
-      priority: priorityFor(input.agentName),
+      priority: allocatedPriority,
     })
     const ruleResp = await elbv2Client.send(
       new CreateRuleCommand({

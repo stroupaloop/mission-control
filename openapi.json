@@ -12889,7 +12889,7 @@
             }
           },
           "500": {
-            "description": "ConfigurationError — the MC task is missing one or more required env vars (MC_AWS_ACCOUNT_ID, MC_AGENT_TASK_ROLE_ARN, MC_AGENT_EXECUTION_ROLE_ARN, MC_AGENT_VPC_ID, MC_AGENT_SUBNET_IDS, MC_AGENT_SECURITY_GROUP_ID, MC_LITELLM_ALB_DNS_NAME). Detail field lists which env vars are missing — this is a deliberate exception to the rest of the endpoint's 'error name only, no message detail' policy because the variable names are operator-facing config (no IAM ARNs / account IDs leak through them) and surfacing them shaves an entire CloudWatch lookup off the ops loop.",
+            "description": "ConfigurationError — the MC task is missing one or more required env vars (MC_AGENT_TASK_ROLE_ARN, MC_AGENT_EXECUTION_ROLE_ARN, MC_AGENT_VPC_ID, MC_AGENT_SUBNET_IDS, MC_AGENT_SECURITY_GROUP_ID, MC_LITELLM_ALB_DNS_NAME). Detail field lists which env vars are missing — this is a deliberate exception to the rest of the endpoint's 'error name only, no message detail' policy because the variable names are operator-facing config (no IAM ARNs / account IDs leak through them) and surfacing them shaves an entire CloudWatch lookup off the ops loop.",
             "content": {
               "application/json": {
                 "schema": {
