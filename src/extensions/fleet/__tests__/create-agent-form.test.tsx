@@ -58,6 +58,17 @@ describe('<CreateAgentForm />', () => {
     ).toBeDisabled()
   })
 
+  it('rejects an image with a separator but empty tag (e.g. `img:`)', () => {
+    // Round-8 audit: `image.includes(':')` would have accepted `img:`,
+    // which then 502s at AWS-side InvalidParameterException. Catching
+    // it client-side gives immediate operator feedback.
+    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    fill({ image: 'ghcr.io/stroupaloop/openclaw:' })
+    expect(
+      screen.getByRole('button', { name: /Create agent/i }),
+    ).toBeDisabled()
+  })
+
   it('rejects a whitespace-only role description at the client layer', () => {
     render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
     fill({ roleDescription: '    ' })

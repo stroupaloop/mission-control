@@ -75,9 +75,20 @@ import {
  *   with an arbitrary family name (e.g., overwriting `litellm`). Treat
  *   it accordingly: it's a security control, not a UX nicety.
  *
- * Error responses return only the SDK error name (no message detail) to
- * avoid leaking IAM ARNs / account IDs into the browser. Full stack
- * remains in CloudWatch via the logger.error call.
+ * Error response shape:
+ *   - **AWS-SDK errors (5xx + 4xx-on-AWS)**: only the SDK `error.name`
+ *     surfaces — no `detail` — so IAM ARNs / account IDs stay out of
+ *     the browser. Full stack stays in CloudWatch via logger.error.
+ *   - **`ValidationError` (400) and `ConfigurationError` (500)**:
+ *     intentionally include a `detail` field. The values that surface
+ *     are either the operator's own input (echoed back so they can
+ *     fix it) or the misconfigured env-var name + its bad value (so
+ *     the operator knows what to fix in their deployment). Both
+ *     paths are admin-only; the reflected content is the admin's own
+ *     input or their own env. The form renders only `error`, not
+ *     `detail`, so this never reaches an unprivileged screen, but
+ *     the `detail` is preserved in the JSON response for tooling
+ *     and CloudWatch access logs.
  */
 
 // Listener-rule priority bounds. AWS requires unique priorities per

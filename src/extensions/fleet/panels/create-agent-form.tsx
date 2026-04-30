@@ -79,7 +79,17 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
   // still the authoritative gate; this layer is UX-only. Keep the rules
   // in lockstep with constraints.ts.
   const agentNameValid = AGENT_NAME_RE.test(agentName)
-  const imageValid = image.length > 0 && image.includes(':') && image.length <= IMAGE_MAX_BYTES
+  // image must contain a separator AND have something after it.
+  // `img:` (empty tag) passes a naive `includes(':')` check but
+  // ECS rejects it as InvalidParameterException at registration —
+  // catch it client-side so the operator gets immediate feedback
+  // instead of a confusing 502 round-trip.
+  const lastTagSegment = image.split(':').at(-1) ?? ''
+  const imageValid =
+    image.length > 0 &&
+    image.includes(':') &&
+    lastTagSegment.length > 0 &&
+    image.length <= IMAGE_MAX_BYTES
   const roleDescriptionValid =
     roleDescription.trim().length > 0 &&
     roleDescription.length <= ROLE_DESCRIPTION_MAX_BYTES
