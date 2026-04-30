@@ -162,6 +162,17 @@ export function renderTaskDefinition(
         ],
         environment: [
           { name: 'OPENCLAW_AGENT_NAME', value: input.agentName },
+          // OPENCLAW_ROLE_DESCRIPTION becomes part of the agent's runtime
+          // role prompt. It is admin-supplied free text written into a
+          // task-def revision, which AWS retains indefinitely and
+          // anyone with `ecs:DescribeTaskDefinition` can read. Treat
+          // this as a permanent prompt-injection surface: a crafted
+          // description survives container restarts AND survives the
+          // agent itself (deregistered task-def revisions still serve
+          // describe calls until deleted out-of-band). The
+          // ROLE_DESCRIPTION_MAX_BYTES cap in templates/index.ts is
+          // the only Phase-2.2 mitigation; tighter content review +
+          // a secondary approval step are tracked for the Beat 3b UI.
           { name: 'OPENCLAW_ROLE_DESCRIPTION', value: input.roleDescription },
           { name: 'OPENCLAW_MODEL', value: input.modelTier },
           // http:// is intentional — the LiteLLM ALB is internal-only

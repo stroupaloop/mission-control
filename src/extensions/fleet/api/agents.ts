@@ -54,13 +54,15 @@ import {
  *   deferred to Beat 3c (the scheduled reconciler).
  *
  * Validation:
- *   `agentName` must match `^[a-z0-9-]{3,32}$`. The IAM policy doc for
- *   `task_ecs_write` (ender-stack PR #208) explicitly cites this regex
- *   as load-bearing — `ecs:RegisterTaskDefinition` is granted Resource:"*"
- *   because the AWS verb has no resource-level auth, so this regex is
- *   the only thing keeping a compromised request from registering a
- *   task-def with an arbitrary family name (e.g., overwriting `litellm`).
- *   Treat it accordingly: it's a security control, not a UX nicety.
+ *   `agentName` must match `^[a-z][a-z0-9-]{1,30}[a-z0-9]$` (length
+ *   3-32, lowercase-letter start, alphanumeric end — no leading or
+ *   trailing hyphens). The IAM policy doc for `task_ecs_write`
+ *   (ender-stack PR #208) explicitly cites this regex as load-bearing
+ *   — `ecs:RegisterTaskDefinition` is granted Resource:"*" because the
+ *   AWS verb has no resource-level auth, so this regex is the only
+ *   thing keeping a compromised request from registering a task-def
+ *   with an arbitrary family name (e.g., overwriting `litellm`). Treat
+ *   it accordingly: it's a security control, not a UX nicety.
  *
  * Error responses return only the SDK error name (no message detail) to
  * avoid leaking IAM ARNs / account IDs into the browser. Full stack
@@ -169,7 +171,28 @@ export interface CreateAgentResponse {
     logGroup: string
     listenerPath: string
   }
+  /**
+   * Operational warnings about the created resources. Each entry is a
+   * stable code (machine-parseable) + a human-readable message. The
+   * 201 response means AWS resources were created successfully — but
+   * they may not yet result in a healthy serving agent. Operators (and
+   * the Beat 3b UI form) should surface this list rather than silently
+   * trust 201 = ready-to-serve. Empty array when there are no known
+   * runtime gaps.
+   */
+  warnings: Array<{ code: string; message: string }>
 }
+
+// Stable warning codes. Keep the list small and code-named so the UI
+// can render specific guidance per code without parsing message text.
+const WARNING_RUNTIME_CONFIG_GAP = {
+  code: 'runtime-config-gap',
+  message:
+    'Agent task will fail health checks until ender-stack#215 closes ' +
+    '(init-config sidecar + EFS, or upstream env-var-only config mode). ' +
+    'AWS resources were created successfully; the gateway container will ' +
+    'loop on missing /home/node/.openclaw/openclaw.json until #215 lands.',
+} as const
 
 export interface CreateAgentErrorResponse {
   error: string
@@ -592,6 +615,7 @@ export async function POST(request: NextRequest) {
           logGroup: logGroupName,
           listenerPath,
         },
+        warnings: [WARNING_RUNTIME_CONFIG_GAP],
       } satisfies CreateAgentResponse,
       { status: 201, headers: { 'Cache-Control': 'no-store' } },
     )
@@ -609,15 +633,25 @@ export async function POST(request: NextRequest) {
       '[fleet] create-agent failed',
     )
     // Conflict statuses (service already exists, target group name
-    // taken, etc.) → 409. Validation/IAM/account quota → 502. Anything
-    // else → 502 conservatively.
-    const status =
-      error.name === 'InvalidParameterException' ||
+    // taken, etc.) → 409. Validation / IAM / account quota → 502.
+    //
+    // ECS uses InvalidParameterException for BOTH "service already
+    // exists" (a real conflict → 409) AND parameter validation
+    // failures (bad CPU/memory for Fargate, malformed subnet, etc.
+    // → 502). Map by name+message together: only when the message
+    // hints at a conflict do we return 409. Otherwise an upstream
+    // misconfig like a bad MC_AGENT_SUBNET_IDS would surface as a
+    // confusing 409 Conflict instead of the actionable 502.
+    const isAlwaysConflictName =
       error.name === 'ResourceAlreadyExistsException' ||
       error.name === 'DuplicateTargetGroupNameException' ||
       error.name === 'PriorityInUseException'
-        ? 409
-        : 502
+    const isInvalidParameterConflict =
+      error.name === 'InvalidParameterException' &&
+      typeof error.message === 'string' &&
+      /already exists|in use/i.test(error.message)
+    const status =
+      isAlwaysConflictName || isInvalidParameterConflict ? 409 : 502
     // Surface partialResources so the operator knows what to clean up
     // before retrying — DuplicateTargetGroupNameException on a retry
     // typically means the prior CreateTargetGroup succeeded but the

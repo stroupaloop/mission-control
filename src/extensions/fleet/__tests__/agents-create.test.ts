@@ -353,6 +353,23 @@ describe('POST /api/fleet/agents — happy path', () => {
     expect(resp.status).toBe(201)
   })
 
+  it('surfaces a runtime-config-gap warning on 201 referencing the open ender-stack issue', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(201)
+    const json = (await resp.json()) as {
+      warnings: Array<{ code: string; message: string }>
+    }
+    expect(Array.isArray(json.warnings)).toBe(true)
+    const codes = json.warnings.map((w) => w.code)
+    expect(codes).toContain('runtime-config-gap')
+    const msg = json.warnings.find(
+      (w) => w.code === 'runtime-config-gap',
+    )?.message
+    expect(msg).toMatch(/ender-stack#215/i)
+  })
+
   it('CreateRule routes /agent/{name} and /agent/{name}/* to the new TG', async () => {
     happyPathMocks()
     const POST = await importHandler()
@@ -402,6 +419,32 @@ describe('POST /api/fleet/agents — error handling', () => {
     const POST = await importHandler()
     const resp = await POST(mkRequest(validBody()))
     expect(resp.status).toBe(409)
+    expect(((await resp.json()) as { error: string }).error).toBe(
+      'InvalidParameterException',
+    )
+  })
+
+  it('returns 502 (not 409) when InvalidParameterException is a parameter-validation failure, not a conflict', async () => {
+    happyPathMocks()
+    ecsSendMock.mockReset()
+    ecsSendMock
+      .mockResolvedValueOnce({
+        taskDefinition: { taskDefinitionArn: 'arn:tdf' },
+      })
+      .mockRejectedValueOnce(
+        Object.assign(
+          new Error(
+            'Subnet is not a valid Fargate-compatible subnet ID',
+          ),
+          { name: 'InvalidParameterException' },
+        ),
+      )
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    // Pre-fix: this would 409 because InvalidParameterException name was
+    // hard-mapped to 409. Post-fix: only "already exists"/"in use"
+    // messages map to 409; everything else is 502.
+    expect(resp.status).toBe(502)
     expect(((await resp.json()) as { error: string }).error).toBe(
       'InvalidParameterException',
     )

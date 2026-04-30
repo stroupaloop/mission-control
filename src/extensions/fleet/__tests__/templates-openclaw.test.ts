@@ -208,10 +208,96 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
     )
   })
 
+  it('rejects names starting with a hyphen', () => {
+    expect(() => validate({ ...fixtureInput, agentName: '-hello' })).toThrow(
+      /agentName/,
+    )
+  })
+
+  it('rejects names ending with a hyphen', () => {
+    expect(() => validate({ ...fixtureInput, agentName: 'hello-' })).toThrow(
+      /agentName/,
+    )
+  })
+
+  it('rejects names that are only hyphens', () => {
+    expect(() => validate({ ...fixtureInput, agentName: '---' })).toThrow(
+      /agentName/,
+    )
+  })
+
+  it('rejects names starting with a digit (lowercase-letter start required)', () => {
+    expect(() => validate({ ...fixtureInput, agentName: '1abc' })).toThrow(
+      /agentName/,
+    )
+  })
+
+  it('accepts names with internal hyphens and digits', () => {
+    expect(() =>
+      validate({ ...fixtureInput, agentName: 'bot-v2-prod' }),
+    ).not.toThrow()
+  })
+
   it('rejects an image without a tag/digest separator', () => {
     expect(() => validate({ ...fixtureInput, image: 'untagged-image' })).toThrow(
       /image/,
     )
+  })
+
+  it('rejects an image from an unallowed registry', () => {
+    expect(() =>
+      validate({
+        ...fixtureInput,
+        image: 'docker.io/attacker/malicious:latest',
+      }),
+    ).toThrow(/registry/)
+  })
+
+  it('accepts images from ECR in this account', () => {
+    expect(() =>
+      validate({
+        ...fixtureInput,
+        image:
+          '398152419239.dkr.ecr.us-east-1.amazonaws.com/ender-stack/openclaw:sha-deadbeef',
+      }),
+    ).not.toThrow()
+  })
+
+  it('accepts images from public ECR', () => {
+    expect(() =>
+      validate({
+        ...fixtureInput,
+        image: 'public.ecr.aws/openclaw/openclaw:v1.2.3',
+      }),
+    ).not.toThrow()
+  })
+
+  it('honors MC_FLEET_IMAGE_REGISTRY_ALLOWLIST override', () => {
+    const original = process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST
+    process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST =
+      String.raw`example\.com/`
+    try {
+      expect(() =>
+        validate({
+          ...fixtureInput,
+          image: 'example.com/some/image:tag',
+        }),
+      ).not.toThrow()
+      // Default-allowed registry now rejected because the override
+      // replaces the list rather than appending.
+      expect(() =>
+        validate({
+          ...fixtureInput,
+          image: 'ghcr.io/stroupaloop/openclaw:tag',
+        }),
+      ).toThrow(/registry/)
+    } finally {
+      if (original === undefined) {
+        delete process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST
+      } else {
+        process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST = original
+      }
+    }
   })
 
   it('rejects an empty roleDescription', () => {
