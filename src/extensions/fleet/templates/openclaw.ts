@@ -15,12 +15,35 @@ import type { CreateTargetGroupCommandInput } from '@aws-sdk/client-elastic-load
  * patterns derived from `{prefix}-companion-openclaw-{name}`. Drift
  * between the templated names here and the IAM scopes will silently 403.
  *
- * The container surface mirrors the canonical Terraform-bootstrapped
- * openclaw module (ender-stack/terraform/modules/companion/openclaw/main.tf)
- * — two-container task with init-config + gateway, awsvpc network mode,
- * /healthz health check on port 18789. Kept intentionally minimal for
- * Phase 2.2 MVP; per-agent extensions, persona configs, and channel-token
- * binding are out of scope for this template (deferred to Phase 2.3).
+ * KNOWN GAP — runtime config wiring:
+ *   This template emits a single-container (gateway-only) task. The
+ *   canonical Terraform-bootstrapped openclaw module
+ *   (ender-stack/terraform/modules/companion/openclaw/main.tf) ships a
+ *   TWO-container task with an init-config sidecar that templates
+ *   `openclaw.json` onto an EFS access point before the gateway
+ *   starts; the gateway mounts that EFS read-only and reads its
+ *   config from disk.
+ *
+ *   MC-deployed agents created via this template do NOT get that
+ *   wiring. The endpoint creates the ECS service successfully, but
+ *   the gateway task will fail to start cleanly until one of the
+ *   following lands as a follow-up:
+ *
+ *     (a) OpenClaw runtime gains env-var-only config mode (no EFS
+ *         dependency). Requires an upstream change to OpenClaw.
+ *     (b) MC handler wires EFS volumes + an init-config container
+ *         when rendering the task-def. Requires either a pool of
+ *         pre-provisioned EFS access points OR an `efs:CreateAccessPoint`
+ *         IAM grant on MC's task role.
+ *
+ *   Tracked as ender-stack#215. The endpoint is shipping in Beat 3a
+ *   so the API surface, IAM permissions, ALB integration, and
+ *   tagging conventions can be exercised + reviewed without blocking
+ *   on the runtime resolution. The first /fleet/new dev validation
+ *   will fail health checks until #215 closes.
+ *
+ * Per-agent extensions, persona configs, and channel-token binding
+ * are out of scope for Phase 2.2 (deferred to Phase 2.3).
  */
 
 /**
@@ -43,8 +66,15 @@ export interface OpenClawAgentInput {
   image: string
   /** Model tier passed to the agent runtime as `OPENCLAW_MODEL`. */
   modelTier: 'opus-4-7' | 'sonnet-4-6' | 'haiku-4-5'
-  /** Optional Slack webhook URL for the per-agent channel. Stored unmasked in env. */
-  slackWebhookUrl?: string
+  // Note: slackWebhookUrl removed in this template version. A Slack
+  // webhook is a bearer token; storing it as a plaintext env var on a
+  // task-def revision means anyone with `ecs:DescribeTaskDefinition`
+  // (CI, monitoring, dev roles) can read it, and revisions are
+  // immutable + retained indefinitely. Slack provisioning lands with
+  // Phase 2.5's secrets-manager-aware Slack-app-factory work
+  // (memory: project_phase2_platform_decisions.md). For Phase 2.2
+  // operator-driven deploys, attach the Slack webhook via task-def
+  // edit + Secrets Manager binding after the agent is running.
 }
 
 /**
@@ -142,9 +172,6 @@ export function renderTaskDefinition(
           // platform. Don't "fix" this to https:// without coordinating
           // with ACM Private CA provisioning.
           { name: 'LITELLM_API_BASE', value: `http://${env.litellmAlbDnsName}` },
-          ...(input.slackWebhookUrl
-            ? [{ name: 'SLACK_WEBHOOK_URL', value: input.slackWebhookUrl }]
-            : []),
         ],
         healthCheck: {
           command: [

@@ -157,7 +157,6 @@ export interface CreateAgentRequest {
   roleDescription: string
   image: string
   modelTier: 'opus-4-7' | 'sonnet-4-6' | 'haiku-4-5'
-  slackWebhookUrl?: string
 }
 
 export interface CreateAgentResponse {
@@ -230,11 +229,17 @@ function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
     typeof b.harnessType === 'string' &&
     HARNESS_TYPES.includes(b.harnessType as HarnessType) &&
     typeof b.agentName === 'string' &&
+    // Length pre-check: defense-in-depth so the type guard rejects
+    // obviously out-of-range names BEFORE they reach the template's
+    // regex enforcement. If a future refactor reorders the calls,
+    // the basic length window stays enforced even if regex
+    // validation runs later (or briefly drops out).
+    b.agentName.length >= 3 &&
+    b.agentName.length <= 32 &&
     typeof b.roleDescription === 'string' &&
     typeof b.image === 'string' &&
     typeof b.modelTier === 'string' &&
-    ['opus-4-7', 'sonnet-4-6', 'haiku-4-5'].includes(b.modelTier as string) &&
-    (b.slackWebhookUrl === undefined || typeof b.slackWebhookUrl === 'string')
+    ['opus-4-7', 'sonnet-4-6', 'haiku-4-5'].includes(b.modelTier as string)
   )
 }
 
@@ -284,7 +289,6 @@ export async function POST(request: NextRequest) {
     roleDescription: body.roleDescription,
     image: body.image,
     modelTier: body.modelTier,
-    slackWebhookUrl: body.slackWebhookUrl,
   }
 
   // Per-harness validation. Throws on bad input — caught below as 400.

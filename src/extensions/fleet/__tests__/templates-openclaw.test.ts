@@ -66,22 +66,10 @@ describe('renderTaskDefinition', () => {
     })
   })
 
-  it('omits SLACK_WEBHOOK_URL when slackWebhookUrl is unset', () => {
+  it('does not emit a SLACK_WEBHOOK_URL env var (deferred to Phase 2.5 secrets-manager wiring)', () => {
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
     const env = taskDef.containerDefinitions?.[0]?.environment ?? []
     expect(env.find((e) => e.name === 'SLACK_WEBHOOK_URL')).toBeUndefined()
-  })
-
-  it('includes SLACK_WEBHOOK_URL when slackWebhookUrl is provided', () => {
-    const taskDef = renderTaskDefinition(
-      { ...fixtureInput, slackWebhookUrl: 'https://hooks.slack.com/abc' },
-      fixtureEnv,
-    )
-    const env = taskDef.containerDefinitions?.[0]?.environment ?? []
-    expect(env).toContainEqual({
-      name: 'SLACK_WEBHOOK_URL',
-      value: 'https://hooks.slack.com/abc',
-    })
   })
 
   it('points awslogs-group at the per-agent log group', () => {

@@ -12803,10 +12803,6 @@
                   "modelTier": {
                     "type": "string",
                     "enum": ["opus-4-7", "sonnet-4-6", "haiku-4-5"]
-                  },
-                  "slackWebhookUrl": {
-                    "type": "string",
-                    "description": "Optional Slack webhook URL for the per-agent channel. Stored unmasked in the task-def env (Phase 2.5 will move secrets to Secrets Manager)."
                   }
                 }
               }
