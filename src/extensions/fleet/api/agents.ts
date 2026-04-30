@@ -229,6 +229,23 @@ export interface CreateAgentErrorResponse {
     targetGroupArn?: string
     listenerRuleArn?: string
     logGroup?: string
+    /**
+     * Defensive: present only when CreateService completed without
+     * the serviceArn field (an SDK contract violation — extremely
+     * unlikely, but the cost of getting it wrong is an orphaned ECS
+     * service the operator can't locate from this response).
+     *
+     * - `string` value: rare scenario where the SDK returned a
+     *   service object with serviceArn populated but a later
+     *   verification step (none today) would still throw.
+     * - `null` value: we got a response but the serviceArn field was
+     *   missing or empty. Operator should `aws ecs describe-services`
+     *   on the templated name (`{prefix}-companion-{harness}-{name}`)
+     *   to check for an orphan.
+     *
+     * Round-4 audit on PR #37 (Beat 3b).
+     */
+    serviceArn?: string | null
   }
 }
 
@@ -601,6 +618,14 @@ export async function POST(request: NextRequest) {
     )
     const serviceArn = serviceResp.service?.serviceArn
     if (!serviceArn) {
+      // SDK contract violation: CreateService returned without the
+      // serviceArn field. The service WAS likely created on AWS —
+      // set partial.serviceArn to `null` (not undefined) so it
+      // survives JSON serialization in the response body and
+      // signals "we got a CreateService response but no ARN; check
+      // ECS console for an orphan." Operator locates via
+      // `aws ecs describe-services` on the templated service name.
+      partial.serviceArn = null
       throw new Error('CreateService returned no ARN')
     }
 
