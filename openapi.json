@@ -12760,6 +12760,170 @@
         }
       }
     },
+    "/api/fleet/agents": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Create a new MC-managed agent (Fleet create-agent)",
+        "description": "Phase 2.2 Beat 3a backend. Orchestrates the full create-agent fan-out: DescribeLoadBalancers + DescribeListeners (resolve shared agents ALB by name) → CreateLogGroup + PutRetentionPolicy → RegisterTaskDefinition → CreateTargetGroup → CreateRule → CreateService. Auth: admin role (one tier above Redeploy because Create is permanent + irreversible at the IAM grant boundary). Validation: agentName must match `^[a-z0-9-]{3,32}$` — load-bearing per ender-stack #208's IAM comment, since ecs:RegisterTaskDefinition is granted Resource:* (no AWS resource-level auth) and this regex is the only thing keeping a compromised request from registering a task-def with an arbitrary family. Error responses return only the SDK error name (no message detail) to avoid leaking IAM ARNs / account IDs.",
+        "operationId": "createFleetAgent",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "harnessType",
+                  "agentName",
+                  "roleDescription",
+                  "image",
+                  "modelTier"
+                ],
+                "properties": {
+                  "harnessType": {
+                    "type": "string",
+                    "enum": ["companion/openclaw"],
+                    "description": "Per-harness deploy template selector. Phase 2.2 ships only `companion/openclaw`; Hermes lands when its architecture decision is finalized."
+                  },
+                  "agentName": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9-]{3,32}$",
+                    "description": "Unique identifier — becomes the suffix on every per-agent ARN. Validated server-side; the regex IS the security control protecting RegisterTaskDefinition's Resource:* grant."
+                  },
+                  "roleDescription": {
+                    "type": "string",
+                    "description": "Operator-facing role description, surfaced in MC's agent detail panel and exported to the agent runtime as OPENCLAW_ROLE_DESCRIPTION."
+                  },
+                  "image": {
+                    "type": "string",
+                    "description": "Container image — full ECR or GHCR URI with tag or digest (must contain a `:` separator)."
+                  },
+                  "modelTier": {
+                    "type": "string",
+                    "enum": ["opus-4-7", "sonnet-4-6", "haiku-4-5"]
+                  },
+                  "slackWebhookUrl": {
+                    "type": "string",
+                    "description": "Optional Slack webhook URL for the per-agent channel. Stored unmasked in the task-def env (Phase 2.5 will move secrets to Secrets Manager)."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Agent created. The ECS service is created but the task is still being provisioned; the Fleet panel reflects rollout progress via DescribeServices polling.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "agentName",
+                    "resources"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [true]
+                    },
+                    "agentName": {
+                      "type": "string"
+                    },
+                    "resources": {
+                      "type": "object",
+                      "required": [
+                        "serviceArn",
+                        "taskDefinitionArn",
+                        "targetGroupArn",
+                        "listenerRuleArn",
+                        "logGroup",
+                        "listenerPath"
+                      ],
+                      "properties": {
+                        "serviceArn": { "type": "string" },
+                        "taskDefinitionArn": { "type": "string" },
+                        "targetGroupArn": { "type": "string" },
+                        "listenerRuleArn": { "type": "string" },
+                        "logGroup": { "type": "string" },
+                        "listenerPath": { "type": "string", "description": "ALB path pattern this agent now serves (e.g. /agent/hello-world*)." }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request validation failed. Possible error values: InvalidRequestBody, InvalidRequestShape, ValidationError (with detail).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": { "type": "string" },
+                    "detail": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "Agent or one of its resources already exists. AWS SDK errors mapped here: InvalidParameterException (service-already-exists), ResourceAlreadyExistsException, DuplicateTargetGroupNameException, PriorityInUseException.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "ConfigurationError — the MC task is missing one or more required env vars (MC_AWS_ACCOUNT_ID, MC_AGENT_TASK_ROLE_ARN, MC_AGENT_EXECUTION_ROLE_ARN, MC_AGENT_VPC_ID, MC_AGENT_SUBNET_IDS, MC_AGENT_SECURITY_GROUP_ID, MC_LITELLM_ALB_DNS_NAME). Detail field lists which.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": { "type": "string" },
+                    "detail": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "AWS SDK error (IAM scope, AWS service issue, etc.). Response returns only the SDK error name; message suppressed to avoid leaking IAM ARNs / account IDs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/security-audit": {
       "get": {
         "tags": [
