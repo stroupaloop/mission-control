@@ -24,6 +24,16 @@ export const MODEL_TIERS = ['opus-4-7', 'sonnet-4-6', 'haiku-4-5'] as const
 export type ModelTier = (typeof MODEL_TIERS)[number]
 
 /**
+ * Default tier the create-agent form selects on initial render and on
+ * "Create another" reset. Sonnet 4.6 is the cost-balance default —
+ * Opus 4.7 is for capability-heavy agents and Haiku 4.5 for
+ * latency-sensitive / cheap fan-out. Exported (rather than redeclared
+ * in the form) so the form stays aligned when the default changes
+ * here.
+ */
+export const MODEL_TIER_DEFAULT: ModelTier = 'sonnet-4-6'
+
+/**
  * agentName must:
  * - start with a lowercase letter (AWS resource-name rules + simpler
  *   IAM ARN templating).

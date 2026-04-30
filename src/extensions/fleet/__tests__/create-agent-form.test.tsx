@@ -205,6 +205,55 @@ describe('<CreateAgentForm />', () => {
     expect(errBox).toHaveTextContent('task-definition/t:1')
   })
 
+  it('preserves the HTTP status when the response body is not valid JSON (502 with HTML proxy body)', async () => {
+    // Round-6 audit caught: a proxy returning HTML on a gateway error
+    // would have surfaced as "0 — SyntaxError" instead of the actual
+    // "502 — ResponseParseError". Operator misdiagnoses a real
+    // failure mode if the status doesn't survive the JSON parse.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response('<html><body>502 Bad Gateway</body></html>', {
+        status: 502,
+        headers: { 'content-type': 'text/html' },
+      }) as unknown as Response,
+    )
+
+    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    fill()
+    fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('create-agent-error')).toBeInTheDocument(),
+    )
+    const errBox = screen.getByTestId('create-agent-error')
+    // The status (502) must surface — pre-fix this would have been "0".
+    expect(errBox).toHaveTextContent('502')
+    // ResponseParseError marks "got a Response, couldn't parse it" —
+    // distinct from a network failure (status=0).
+    expect(errBox).toHaveTextContent('ResponseParseError')
+  })
+
+  it('surfaces SubmitTimeout when fetch is aborted by the timeout guard', async () => {
+    // Round-6 audit caught: AWS calls fan out across ≥6 sequential
+    // SDK calls; a degraded service would leave the form stuck
+    // "Creating…" indefinitely. AbortController fires SubmitTimeout
+    // (not generic NetworkError) so operators distinguish hard
+    // timeouts from transient network glitches.
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(
+      Object.assign(new Error('aborted'), { name: 'AbortError' }),
+    )
+
+    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    fill()
+    fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('create-agent-error')).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('create-agent-error')).toHaveTextContent(
+      'SubmitTimeout',
+    )
+  })
+
   it('renders an error block with a "0 — NetworkError" code on fetch reject', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(
       Object.assign(new Error('boom'), { name: 'TypeError' }),

@@ -7,6 +7,7 @@ import {
   HARNESS_TYPES,
   IMAGE_MAX_BYTES,
   MODEL_TIERS,
+  MODEL_TIER_DEFAULT,
   ROLE_DESCRIPTION_MAX_BYTES,
   type HarnessType,
   type ModelTier,
@@ -49,7 +50,16 @@ type FormState =
   | { kind: 'error'; status: number; body: CreateAgentErrorResponse }
 
 const HARNESS_TYPE_DEFAULT: HarnessType = HARNESS_TYPES[0]
-const MODEL_TIER_DEFAULT: ModelTier = 'sonnet-4-6'
+
+// Soft cap on the create-agent fetch. The handler runs ≥6 sequential
+// AWS API calls (RegisterTaskDefinition → CreateTargetGroup →
+// DescribeRules → CreateRule → CreateLogGroup → CreateService); a
+// degraded service would otherwise leave the form stuck "Creating…"
+// with no way for the operator to bail. 30s gives a generous buffer
+// over the realistic happy-path (~3-5s) without leaving the operator
+// waiting on a hanging connection. Mirrors the AbortController pattern
+// fleet-panel.tsx uses for its services-list polling.
+const SUBMIT_TIMEOUT_MS = 30_000
 
 export function CreateAgentForm({ onCreated, onClose }: Props) {
   const [harnessType, setHarnessType] = useState<HarnessType>(
@@ -79,11 +89,17 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
     e.preventDefault()
     if (!formValid || submitting) return
     setState({ kind: 'submitting' })
+
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), SUBMIT_TIMEOUT_MS)
+
+    let resp: Response
     try {
-      const resp = await fetch('/api/fleet/agents', {
+      resp = await fetch('/api/fleet/agents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         cache: 'no-store',
+        signal: ac.signal,
         body: JSON.stringify({
           harnessType,
           agentName,
@@ -92,26 +108,48 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
           modelTier,
         }),
       })
-      const body = (await resp.json()) as
+    } catch (err) {
+      // Network failure or timeout — no `Response` was received, so
+      // there's no HTTP status to surface. status=0 is the correct
+      // "we never got past the wire" sentinel here. AbortError fires
+      // when SUBMIT_TIMEOUT_MS elapses; surface a clearer name so
+      // operators distinguish a hard timeout from a generic network
+      // glitch.
+      const name = (err as Error).name
+      const code = name === 'AbortError' ? 'SubmitTimeout' : name || 'NetworkError'
+      setState({ kind: 'error', status: 0, body: { error: code } })
+      return
+    } finally {
+      clearTimeout(timer)
+    }
+
+    // From this point we DO have a Response — `resp.status` must
+    // surface even if JSON parse fails (e.g. proxy returned HTML on a
+    // 502). Splitting the JSON parse into its own try/catch lets the
+    // operator see "502 — ResponseParseError" instead of the
+    // misleading "0 — SyntaxError" the unified catch produced.
+    let body: CreateAgentResponse | CreateAgentErrorResponse
+    try {
+      body = (await resp.json()) as
         | CreateAgentResponse
         | CreateAgentErrorResponse
-      if (resp.ok && 'ok' in body && body.ok) {
-        setState({ kind: 'success', response: body })
-        onCreated()
-      } else {
-        setState({
-          kind: 'error',
-          status: resp.status,
-          body: body as CreateAgentErrorResponse,
-        })
-      }
-    } catch (err) {
-      // Network / JSON-parse failure. Surface the Error.name as the code
-      // — same shape the server uses (suppressed-message convention).
+    } catch {
       setState({
         kind: 'error',
-        status: 0,
-        body: { error: (err as Error).name || 'NetworkError' },
+        status: resp.status,
+        body: { error: 'ResponseParseError' },
+      })
+      return
+    }
+
+    if (resp.ok && 'ok' in body && body.ok) {
+      setState({ kind: 'success', response: body })
+      onCreated()
+    } else {
+      setState({
+        kind: 'error',
+        status: resp.status,
+        body: body as CreateAgentErrorResponse,
       })
     }
   }
@@ -252,8 +290,11 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
                         <>
                           Service ARN unknown — run{' '}
                           <code className="font-mono">
-                            aws ecs describe-services --cluster &lt;cluster&gt;
-                            --services &lt;prefix&gt;-companion-openclaw-&lt;name&gt;
+                            aws ecs describe-services --cluster
+                            &lt;cluster&gt; --services
+                            &lt;prefix&gt;-{harnessType.replace('/', '-')}-{
+                              agentName || '<name>'
+                            }
                           </code>{' '}
                           to check for an orphaned service before retrying.
                         </>
