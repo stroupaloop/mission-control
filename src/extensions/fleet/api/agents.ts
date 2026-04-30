@@ -224,25 +224,34 @@ async function allocatePriority(
   agentName: string,
 ): Promise<number> {
   const start = priorityFor(agentName)
-  const rules = await client.send(
-    new DescribeRulesCommand({ ListenerArn: listenerArn }),
-  )
+  // Paginate through all rules — DescribeRules caps at 100/page. A
+  // listener with >100 rules would otherwise leave occupied slots
+  // beyond page 1 invisible, leading to a falsely-free pick that
+  // 409s at CreateRule time.
   const occupied = new Set<number>()
-  for (const rule of rules.Rules ?? []) {
-    // The default rule has Priority 'default' (string); skip it. Only
-    // numeric priorities count toward our 100-49999 range.
-    const p = rule.Priority
-    if (typeof p === 'string' && /^\d+$/.test(p)) {
-      occupied.add(Number(p))
+  let marker: string | undefined
+  do {
+    const page = await client.send(
+      new DescribeRulesCommand({ ListenerArn: listenerArn, Marker: marker }),
+    )
+    for (const rule of page.Rules ?? []) {
+      // Default rule has Priority='default' (string). Only count the
+      // numeric priorities that fall in our 100-49999 allocation range.
+      const p = rule.Priority
+      if (typeof p === 'string' && /^\d+$/.test(p)) {
+        occupied.add(Number(p))
+      }
     }
-  }
+    marker = page.NextMarker
+  } while (marker)
+
   const range = PRIORITY_RANGE_MAX - PRIORITY_RANGE_MIN + 1
   for (let i = 0; i < range; i++) {
     const candidate = PRIORITY_RANGE_MIN + ((start - PRIORITY_RANGE_MIN + i) % range)
     if (!occupied.has(candidate)) return candidate
   }
-  // 49,900 occupied slots. In the absence of a quota bug, this is
-  // unreachable; the AWS account-level rule limit is far below 49,900.
+  // 49,900 occupied slots. Unreachable in practice — the AWS
+  // account-level rule limit is far below 49,900 — but defensive.
   throw new Error(
     `No free listener-rule priority available on ${listenerArn} (${occupied.size} occupied)`,
   )
@@ -276,7 +285,17 @@ function getMissingEnv(env: ResolvedEnv): string[] {
 // `ecs:RegisterTaskDefinition Resource:*` grant. If a future harness
 // ever omits the regex from its validateInput, this layer keeps the
 // security boundary intact.
-const AGENT_NAME_RE = /^[a-z0-9-]{3,32}$/
+//
+// Anchoring rules: must start with a lowercase letter, must end with
+// alphanumeric (no leading/trailing hyphens, no double-hyphens at the
+// ends). ELBv2 target-group names and ECS service names enforce these
+// at the AWS layer too, so a name like `-foo` or `foo-` would 409 at
+// CreateTargetGroup with a confusing InvalidParameterException; the
+// tighter regex catches it at the validation step instead.
+//
+// Length window 3-32 preserved (min via the {1,30} middle interval +
+// the 1-char start + 1-char end anchors).
+const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/
 
 function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
   if (!body || typeof body !== 'object') return false
