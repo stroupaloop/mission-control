@@ -17,7 +17,6 @@ const fixtureInput: OpenClawAgentInput = {
 }
 
 const fixtureEnv: OpenClawAgentEnv = {
-  accountId: '398152419239',
   region: 'us-east-1',
   prefix: 'ender-stack-dev',
   clusterName: 'ender-stack-dev',
