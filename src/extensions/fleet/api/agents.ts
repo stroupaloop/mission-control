@@ -675,9 +675,18 @@ export async function POST(request: NextRequest) {
           actor,
         }),
       })
-    } catch {
+    } catch (auditErr) {
       // Audit logging is best-effort — don't fail the create over a
-      // SQLite hiccup. The CloudWatch entry remains.
+      // SQLite hiccup. The CloudWatch entry from logger.info above
+      // remains the durable record. Surface the failure as a warn-
+      // level log so persistent audit-DB breakage is visible (without
+      // it, the security_events dashboard would silently lose every
+      // fleet.agent_created row for days before someone noticed). Same
+      // pattern auth.ts uses for its own best-effort audit writes.
+      logger.warn(
+        { err: auditErr, agentName: input.agentName },
+        '[fleet] audit log write failed (best-effort; CloudWatch entry above is the authoritative record)',
+      )
     }
 
     return NextResponse.json(
