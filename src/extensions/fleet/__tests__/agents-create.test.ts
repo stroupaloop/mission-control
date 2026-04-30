@@ -60,6 +60,10 @@ vi.mock('@/lib/auth', () => ({
   requireRole: vi.fn(() => ({ user: { id: 'test', role: 'admin' } })),
 }))
 
+vi.mock('@/lib/security-events', () => ({
+  logSecurityEvent: vi.fn(),
+}))
+
 const importHandler = async () => {
   const mod = await import('../api/agents')
   return mod.POST
@@ -393,5 +397,78 @@ describe('POST /api/fleet/agents — error handling', () => {
     const POST = await importHandler()
     const resp = await POST(mkRequest(validBody()))
     expect(resp.status).toBe(409)
+  })
+
+  it('surfaces partialResources on partial-failure 5xx so operators can clean up orphans', async () => {
+    happyPathMocks()
+    // Override the LAST ecs call (CreateService) with a non-conflict
+    // failure — earlier creates succeeded so partialResources should
+    // surface taskDefinitionArn + targetGroupArn + listenerRuleArn +
+    // logGroup.
+    ecsSendMock.mockReset()
+    ecsSendMock
+      .mockResolvedValueOnce({
+        taskDefinition: { taskDefinitionArn: 'arn:tdf-1' },
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('aws explosion'), { name: 'ServerException' }),
+      )
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as {
+      error: string
+      partialResources?: {
+        taskDefinitionArn?: string
+        targetGroupArn?: string
+        listenerRuleArn?: string
+        logGroup?: string
+      }
+    }
+    expect(json.error).toBe('ServerException')
+    expect(json.partialResources).toBeDefined()
+    expect(json.partialResources?.taskDefinitionArn).toBe('arn:tdf-1')
+    expect(json.partialResources?.targetGroupArn).toContain(
+      'targetgroup/ender-stack-dev-agent-hello-world',
+    )
+    expect(json.partialResources?.listenerRuleArn).toContain(
+      'listener-rule/app/ender-stack-dev-agents-shared',
+    )
+    expect(json.partialResources?.logGroup).toBe(
+      '/ecs/ender-stack-dev/companion-openclaw-hello-world',
+    )
+  })
+})
+
+describe('POST /api/fleet/agents — audit trail', () => {
+  it('writes a fleet.agent_created security event on successful create', async () => {
+    happyPathMocks()
+    const securityEvents = await import('@/lib/security-events')
+    const POST = await importHandler()
+    await POST(mkRequest(validBody()))
+    expect(vi.mocked(securityEvents.logSecurityEvent)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event_type: 'fleet.agent_created',
+        agent_name: 'hello-world',
+        source: 'fleet',
+      }),
+    )
+  })
+})
+
+describe('POST /api/fleet/agents — env edge cases', () => {
+  it('falls back to retention=365 when MC_AGENT_LOG_RETENTION_DAYS is non-numeric', async () => {
+    process.env.MC_AGENT_LOG_RETENTION_DAYS = 'totally-bogus'
+    happyPathMocks()
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(201)
+    const retentionCall = logsSendMock.mock.calls.find(
+      (c) => (c[0] as { __type: string }).__type === 'PutRetentionPolicyCommand',
+    )
+    const input = (
+      retentionCall![0] as { input: { retentionInDays: number } }
+    ).input
+    expect(input.retentionInDays).toBe(365)
   })
 })

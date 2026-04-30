@@ -18,6 +18,7 @@ import {
 } from '@aws-sdk/client-cloudwatch-logs'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
+import { logSecurityEvent } from '@/lib/security-events'
 import {
   HARNESS_TEMPLATES,
   HARNESS_TYPES,
@@ -123,7 +124,17 @@ function resolveEnv(): ResolvedEnv {
     executionRoleArn: process.env.MC_AGENT_EXECUTION_ROLE_ARN || '',
     logGroupPrefix:
       process.env.MC_AGENT_LOG_GROUP_PREFIX || `/ecs/${clusterName}`,
-    logRetentionDays: Number(process.env.MC_AGENT_LOG_RETENTION_DAYS || '365'),
+    logRetentionDays: (() => {
+      const raw = process.env.MC_AGENT_LOG_RETENTION_DAYS
+      if (!raw) return 365
+      const parsed = parseInt(raw, 10)
+      // Fall back to the documented default rather than letting NaN reach
+      // PutRetentionPolicy (which would 502 with a confusing serialization
+      // error from the AWS SDK). Out-of-range values flow through and get
+      // rejected by AWS with a clear message — that's still better than
+      // silently retaining for the wrong duration.
+      return Number.isFinite(parsed) ? parsed : 365
+    })(),
     vpcId: process.env.MC_AGENT_VPC_ID || '',
     subnetIds: (process.env.MC_AGENT_SUBNET_IDS || '')
       .split(',')
@@ -160,6 +171,19 @@ export interface CreateAgentResponse {
 export interface CreateAgentErrorResponse {
   error: string
   detail?: string
+  /**
+   * Resources successfully created before the failure. Operators can use
+   * this to clean up orphans (delete listener rule → delete TG → drop
+   * task-def revision) before retrying. Empty when the failure happened
+   * before the first successful create. Tracked for partial-failure
+   * compensating-transaction support deferred to Beat 3c (the reconciler).
+   */
+  partialResources?: {
+    taskDefinitionArn?: string
+    targetGroupArn?: string
+    listenerRuleArn?: string
+    logGroup?: string
+  }
 }
 
 /** Hash agent name to a deterministic priority within the allowed range. */
@@ -290,10 +314,24 @@ export async function POST(request: NextRequest) {
   const logGroupName = `${resolved.logGroupPrefix}/companion-openclaw-${input.agentName}`
   const listenerPath = `/agent/${input.agentName}*`
 
+  // Track resources successfully created so partial-failure 5xx
+  // responses can surface them for operator-driven cleanup. Beat 3c
+  // (reconciler) will land compensating transactions; until then,
+  // operators delete orphans manually using these ARNs.
+  const partial: NonNullable<CreateAgentErrorResponse['partialResources']> = {}
+
   try {
     // 1. Resolve the shared listener ARN. DescribeLoadBalancers (by
     // name) → DescribeListeners (by LB ARN). Both are read-only and
     // covered by the ELBv2DescribeReadOnly IAM grant.
+    //
+    // Single-listener assumption: we pick Listeners[0]. Today the
+    // shared agents ALB has exactly one HTTP/80 listener (see
+    // ender-stack/terraform/modules/agents-shared-alb/main.tf). When
+    // ACM Private CA lands and an HTTPS:443 listener is added
+    // alongside (or in place of) HTTP:80, this needs to filter by
+    // protocol/port — AWS doesn't guarantee Listeners[0] is the
+    // intended one (typically ordered by creation time, not port).
     const lbResp = await elbv2Client.send(
       new DescribeLoadBalancersCommand({ Names: [resolved.sharedAlbName] }),
     )
@@ -319,13 +357,14 @@ export async function POST(request: NextRequest) {
     // in the log driver options) requires `logs:CreateLogGroup` on the
     // exec role, which is broader than the explicit pre-create here.
     try {
-      await logsClient.send(
-        new CreateLogGroupCommand({ logGroupName }),
-      )
+      await logsClient.send(new CreateLogGroupCommand({ logGroupName }))
+      partial.logGroup = logGroupName
     } catch (err) {
       const error = err as { name?: string }
       if (error.name !== 'ResourceAlreadyExistsException') throw err
       // Idempotent on retry: log group already exists from a prior partial create.
+      // Track it as partial anyway — operator may want to clean up.
+      partial.logGroup = logGroupName
     }
     await logsClient.send(
       new PutRetentionPolicyCommand({
@@ -343,6 +382,7 @@ export async function POST(request: NextRequest) {
     if (!taskDefinitionArn) {
       throw new Error('RegisterTaskDefinition returned no ARN')
     }
+    partial.taskDefinitionArn = taskDefinitionArn
 
     // 4. Create the per-agent target group.
     const tgInput = template.renderTargetGroup(input, env)
@@ -351,8 +391,17 @@ export async function POST(request: NextRequest) {
     if (!targetGroupArn) {
       throw new Error('CreateTargetGroup returned no ARN')
     }
+    partial.targetGroupArn = targetGroupArn
 
     // 5. Attach a listener rule for `/agent/{agentName}*` → this TG.
+    //
+    // Priority is hashed from agentName. djb2 over the 100-49999
+    // range gives ~315-agent first-collision (birthday paradox), 1%
+    // collision probability at ~100 agents. On collision, AWS returns
+    // PriorityInUseException → handled below as 409. The fix is
+    // renaming the agent (not retrying); a real collision-free
+    // priority allocator is queued for Beat 3c alongside the
+    // reconciler that has a live priority map.
     const ruleSpec = template.renderListenerRule(input, env, {
       targetGroupArn,
       priority: priorityFor(input.agentName),
@@ -380,6 +429,7 @@ export async function POST(request: NextRequest) {
     if (!listenerRuleArn) {
       throw new Error('CreateRule returned no ARN')
     }
+    partial.listenerRuleArn = listenerRuleArn
 
     // 6. Create the ECS service. Once this returns, ECS starts
     // pulling the image and provisioning the task; the Fleet panel
@@ -396,6 +446,8 @@ export async function POST(request: NextRequest) {
       throw new Error('CreateService returned no ARN')
     }
 
+    const actor = 'user' in auth ? auth.user.id : undefined
+
     logger.info(
       {
         agentName: input.agentName,
@@ -404,10 +456,35 @@ export async function POST(request: NextRequest) {
         taskDefinitionArn,
         targetGroupArn,
         listenerRuleArn,
-        actor: 'user' in auth ? auth.user.id : undefined,
+        actor,
       },
       '[fleet] created agent',
     )
+
+    // Audit-trail entry — surfaces the irreversible admin action in
+    // MC's security_events table so an operator reviewing the audit
+    // dashboard sees who created which agents and when. The
+    // CloudWatch logger.info above captures the full mutation set;
+    // this row is the index that points back to it.
+    try {
+      logSecurityEvent({
+        event_type: 'fleet.agent_created',
+        severity: 'info',
+        source: 'fleet',
+        agent_name: input.agentName,
+        detail: JSON.stringify({
+          harnessType,
+          serviceArn,
+          taskDefinitionArn,
+          targetGroupArn,
+          listenerRuleArn,
+          actor,
+        }),
+      })
+    } catch {
+      // Audit logging is best-effort — don't fail the create over a
+      // SQLite hiccup. The CloudWatch entry remains.
+    }
 
     return NextResponse.json(
       {
@@ -433,6 +510,7 @@ export async function POST(request: NextRequest) {
         harnessType,
         cluster: resolved.clusterName,
         region: resolved.region,
+        partialResources: partial,
       },
       '[fleet] create-agent failed',
     )
@@ -446,9 +524,15 @@ export async function POST(request: NextRequest) {
       error.name === 'PriorityInUseException'
         ? 409
         : 502
+    // Surface partialResources so the operator knows what to clean up
+    // before retrying — DuplicateTargetGroupNameException on a retry
+    // typically means the prior CreateTargetGroup succeeded but the
+    // CreateService that followed it failed.
+    const hasPartial = Object.keys(partial).length > 0
     return NextResponse.json(
       {
         error: error.name || 'AWSError',
+        ...(hasPartial ? { partialResources: partial } : {}),
       } satisfies CreateAgentErrorResponse,
       { status },
     )
