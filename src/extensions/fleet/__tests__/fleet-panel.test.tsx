@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { FleetPanel } from '../panels/fleet-panel'
 
 // Use vitest's globalThis.fetch mocking pattern (matches MC fork's litellm
@@ -743,5 +743,164 @@ describe('<FleetPanel /> — AbortController + staleness indicator', () => {
 
     // No error → no staleness indicator, even though we DO have data
     expect(screen.queryByTestId('staleness-indicator')).not.toBeInTheDocument()
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 2.2 Beat 3b — create-agent toggle + parent-child contract
+//
+// The form itself is unit-tested in create-agent-form.test.tsx. These tests
+// cover the wiring between the panel and the form: that the toggle button
+// opens/closes the form, that onClose dismisses it, and that onCreated
+// triggers a refresh of the services table. Round-2 audit recommendation —
+// without these, mis-wiring `setCreateOpen` to the wrong callback would
+// silently ship.
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('<FleetPanel /> — create-agent toggle', () => {
+  function mkServicesResp(services: object[] = []) {
+    return new Response(
+      JSON.stringify({
+        cluster: 'ender-stack-dev',
+        region: 'us-east-1',
+        services,
+        truncated: false,
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )
+  }
+
+  it('"Create agent" button opens the form section; "Close create form" closes it', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      mkServicesResp() as unknown as Response,
+    )
+    render(<FleetPanel />)
+
+    // Wait for initial fetch to complete so the button is responsive.
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('button', { name: /Loading…/i }),
+      ).not.toBeInTheDocument()
+    })
+
+    // Form section starts hidden.
+    expect(screen.queryByTestId('create-agent-form')).not.toBeInTheDocument()
+
+    const toggle = screen.getByTestId('toggle-create-agent')
+    expect(toggle).toHaveTextContent('Create agent')
+
+    fireEvent.click(toggle)
+    expect(screen.getByTestId('create-agent-form')).toBeInTheDocument()
+    expect(toggle).toHaveTextContent('Close create form')
+
+    fireEvent.click(toggle)
+    expect(screen.queryByTestId('create-agent-form')).not.toBeInTheDocument()
+    expect(toggle).toHaveTextContent('Create agent')
+  })
+
+  it('form Cancel button closes the form section', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      mkServicesResp() as unknown as Response,
+    )
+    render(<FleetPanel />)
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('button', { name: /Loading…/i }),
+      ).not.toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByTestId('toggle-create-agent'))
+    expect(screen.getByTestId('create-agent-form')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /Cancel/i }))
+    expect(screen.queryByTestId('create-agent-form')).not.toBeInTheDocument()
+  })
+
+  it('successful create triggers a refresh on the services table (onCreated → load())', async () => {
+    // Three fetches expected, in order:
+    //   1. initial GET /api/fleet/services (mount)
+    //   2. POST /api/fleet/agents (form submit, returns 201)
+    //   3. GET /api/fleet/services (refresh, triggered by onCreated)
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      // 1. initial load
+      .mockResolvedValueOnce(mkServicesResp() as unknown as Response)
+      // 2. POST /api/fleet/agents
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            agentName: 'smoke-2',
+            resources: {
+              serviceArn: 'arn:s',
+              taskDefinitionArn: 'arn:t',
+              targetGroupArn: 'arn:tg',
+              listenerRuleArn: 'arn:lr',
+              logGroup: '/ecs/lg',
+              listenerPath: '/agent/smoke-2',
+            },
+            warnings: [],
+          }),
+          { status: 201, headers: { 'content-type': 'application/json' } },
+        ) as unknown as Response,
+      )
+      // 3. refresh after create — returns the new agent in the table
+      .mockResolvedValueOnce(
+        mkServicesResp([
+          {
+            name: 'ender-stack-dev-companion-openclaw-smoke-2',
+            status: 'ACTIVE',
+            desiredCount: 1,
+            runningCount: 0,
+            pendingCount: 1,
+            taskDefinition: 'family:1',
+            launchType: 'FARGATE',
+            activeDeployments: 1,
+          },
+        ]) as unknown as Response,
+      )
+
+    render(<FleetPanel />)
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('button', { name: /Loading…/i }),
+      ).not.toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByTestId('toggle-create-agent'))
+
+    // Fill the minimum-valid form via DOM events (matches the
+    // create-agent-form.test.tsx fill helper).
+    fireEvent.change(screen.getByLabelText(/Agent name/i), {
+      target: { value: 'smoke-2' },
+    })
+    fireEvent.change(screen.getByLabelText(/Container image/i), {
+      target: { value: 'ghcr.io/stroupaloop/openclaw:sha-abc1234' },
+    })
+    fireEvent.change(screen.getByLabelText(/Role description/i), {
+      target: { value: 'integration test' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
+
+    // Wait for success block — confirms 201 was received.
+    await screen.findByTestId('create-agent-success')
+
+    // Then wait for the refresh: the new agent appears in the table.
+    await screen.findByText(
+      'ender-stack-dev-companion-openclaw-smoke-2',
+    )
+
+    // Verify the call sequence — proves onCreated() fired the refresh.
+    const calls = fetchSpy.mock.calls.map((c) => {
+      const [url, init] = c as [string | URL | Request, RequestInit?]
+      const u = typeof url === 'string' ? url : (url as URL).toString()
+      return { url: u, method: init?.method ?? 'GET' }
+    })
+    expect(calls[0]).toMatchObject({ url: '/api/fleet/services', method: 'GET' })
+    expect(calls[1]).toMatchObject({ url: '/api/fleet/agents', method: 'POST' })
+    expect(calls[2]).toMatchObject({ url: '/api/fleet/services', method: 'GET' })
   })
 })
