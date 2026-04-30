@@ -270,14 +270,16 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
                   )}
                   {/* `serviceArn` may be null (not undefined) when the
                       backend caught a CreateService SDK contract
-                      violation — see api/agents.ts ImageAllowlistConfigError
-                      sibling block. The truthy check on the other
-                      ARNs above would skip null; use `'serviceArn' in
-                      partialResources` so the operator gets a clear
-                      "possibly-orphaned service" signal even when the
-                      ARN itself is unknown. Most expensive orphan to
-                      leave behind (running ECS task = ongoing cost +
-                      ALB misroute risk). */}
+                      violation — see the `partial.serviceArn = null`
+                      assignment in api/agents.ts on the
+                      "CreateService returned no ARN" path. The truthy
+                      check on the other ARNs above would skip null;
+                      use `'serviceArn' in partialResources` so the
+                      operator gets a clear "possibly-orphaned
+                      service" signal even when the ARN itself is
+                      unknown. Most expensive orphan to leave behind
+                      (running ECS task = ongoing cost + ALB misroute
+                      risk). */}
                   {'serviceArn' in state.body.partialResources && (
                     <li
                       className="text-amber-700 not-italic"

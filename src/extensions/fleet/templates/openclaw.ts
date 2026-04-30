@@ -169,10 +169,19 @@ export function renderTaskDefinition(
           // this as a permanent prompt-injection surface: a crafted
           // description survives container restarts AND survives the
           // agent itself (deregistered task-def revisions still serve
-          // describe calls until deleted out-of-band). The
-          // ROLE_DESCRIPTION_MAX_BYTES cap in templates/index.ts is
-          // the only Phase-2.2 mitigation; tighter content review +
-          // a secondary approval step are tracked for the Beat 3b UI.
+          // describe calls until deleted out-of-band). Mitigations:
+          //   - Endpoint is admin-only (`requireRole('admin')`).
+          //   - ROLE_DESCRIPTION_MAX_BYTES cap (templates/index.ts)
+          //     bounds blast radius per agent.
+          //   - The Beat 3b form surfaces "treat as permanent +
+          //     public" guidance to the operator at submit time.
+          //
+          // Not in scope here: a secondary approval gate (e.g.
+          // require a second admin to approve before the task-def is
+          // registered). The phase-2 vertical slice ships with the
+          // single-admin trust model; multi-operator approval is a
+          // Phase 2.x hardening follow-up if/when that model expands
+          // to non-admin operator roles.
           { name: 'OPENCLAW_ROLE_DESCRIPTION', value: input.roleDescription },
           { name: 'OPENCLAW_MODEL', value: input.modelTier },
           // http:// is intentional — the LiteLLM ALB is internal-only
