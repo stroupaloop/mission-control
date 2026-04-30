@@ -136,6 +136,11 @@ export function renderTaskDefinition(
           { name: 'OPENCLAW_AGENT_NAME', value: input.agentName },
           { name: 'OPENCLAW_ROLE_DESCRIPTION', value: input.roleDescription },
           { name: 'OPENCLAW_MODEL', value: input.modelTier },
+          // http:// is intentional — the LiteLLM ALB is internal-only
+          // (private subnets, internal=true) with no ACM cert. Same
+          // disposition as every other VPC-internal service in the
+          // platform. Don't "fix" this to https:// without coordinating
+          // with ACM Private CA provisioning.
           { name: 'LITELLM_API_BASE', value: `http://${env.litellmAlbDnsName}` },
           ...(input.slackWebhookUrl
             ? [{ name: 'SLACK_WEBHOOK_URL', value: input.slackWebhookUrl }]

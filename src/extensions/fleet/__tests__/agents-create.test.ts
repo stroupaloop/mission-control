@@ -121,6 +121,7 @@ const happyPathMocks = () => {
         {
           ListenerArn:
             'arn:aws:elasticloadbalancing:us-east-1:398152419239:listener/app/ender-stack-dev-agents-shared/abc/lst1',
+          Protocol: 'HTTP',
         },
       ],
     })
@@ -383,7 +384,7 @@ describe('POST /api/fleet/agents — error handling', () => {
         LoadBalancers: [{ LoadBalancerArn: 'arn:lb' }],
       })
       .mockResolvedValueOnce({
-        Listeners: [{ ListenerArn: 'arn:lst' }],
+        Listeners: [{ ListenerArn: 'arn:lst', Protocol: 'HTTP' }],
       })
       .mockRejectedValueOnce(
         Object.assign(new Error('exists'), {
@@ -453,6 +454,72 @@ describe('POST /api/fleet/agents — audit trail', () => {
         source: 'fleet',
       }),
     )
+  })
+})
+
+describe('POST /api/fleet/agents — listener selection', () => {
+  it('picks the HTTP listener when an HTTPS one is also present', async () => {
+    elbv2SendMock.mockReset()
+    ecsSendMock.mockReset()
+    logsSendMock.mockReset()
+
+    elbv2SendMock
+      .mockResolvedValueOnce({
+        LoadBalancers: [{ LoadBalancerArn: 'arn:lb' }],
+      })
+      .mockResolvedValueOnce({
+        Listeners: [
+          // Order intentionally reversed — handler must filter by
+          // protocol, not pick by index.
+          {
+            ListenerArn: 'arn:lst-https',
+            Protocol: 'HTTPS',
+          },
+          {
+            ListenerArn: 'arn:lst-http',
+            Protocol: 'HTTP',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        TargetGroups: [{ TargetGroupArn: 'arn:tg' }],
+      })
+      .mockResolvedValueOnce({
+        Rules: [{ RuleArn: 'arn:rule' }],
+      })
+
+    logsSendMock.mockResolvedValue({})
+    ecsSendMock
+      .mockResolvedValueOnce({
+        taskDefinition: { taskDefinitionArn: 'arn:tdf' },
+      })
+      .mockResolvedValueOnce({
+        service: { serviceArn: 'arn:svc' },
+      })
+
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(201)
+
+    const ruleCall = elbv2SendMock.mock.calls.find(
+      (c) => (c[0] as { __type: string }).__type === 'CreateRuleCommand',
+    )
+    const input = (ruleCall![0] as { input: { ListenerArn: string } }).input
+    expect(input.ListenerArn).toBe('arn:lst-http')
+  })
+
+  it('502s with a clear error when the LB has only an HTTPS listener', async () => {
+    elbv2SendMock.mockReset()
+    elbv2SendMock
+      .mockResolvedValueOnce({
+        LoadBalancers: [{ LoadBalancerArn: 'arn:lb' }],
+      })
+      .mockResolvedValueOnce({
+        Listeners: [{ ListenerArn: 'arn:lst-https', Protocol: 'HTTPS' }],
+      })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
   })
 })
 

@@ -26,13 +26,21 @@ import * as openclaw from './openclaw'
 export const HARNESS_TYPES = ['companion/openclaw'] as const
 export type HarnessType = (typeof HARNESS_TYPES)[number]
 
-export interface HarnessTemplate<I, E> {
+/**
+ * Concrete shape today (OpenClaw only). Generics removed until a second
+ * harness lands — adding `<I, E>` while every render method is bound to
+ * `typeof openclaw.*` was a false-extensibility signal that would have
+ * needed a real generalization pass on the first Hermes/etc. PR anyway.
+ * The right time to re-add the generics is when we have ≥2 input/env
+ * shapes to vary over.
+ */
+export interface HarnessTemplate {
   renderTaskDefinition: typeof openclaw.renderTaskDefinition
   renderTargetGroup: typeof openclaw.renderTargetGroup
   renderService: typeof openclaw.renderService
   renderListenerRule: typeof openclaw.renderListenerRule
   /** Validates the harness-specific shape of the form input. Throws on invalid. */
-  validateInput: (input: I) => void
+  validateInput: (input: openclaw.OpenClawAgentInput) => void
   /** Sentinel — the handler reads this when constructing the log group name. */
   containerName: string
 }
@@ -53,10 +61,7 @@ function validateOpenClawInput(input: openclaw.OpenClawAgentInput): void {
   }
 }
 
-export const HARNESS_TEMPLATES: Record<
-  HarnessType,
-  HarnessTemplate<openclaw.OpenClawAgentInput, openclaw.OpenClawAgentEnv>
-> = {
+export const HARNESS_TEMPLATES: Record<HarnessType, HarnessTemplate> = {
   'companion/openclaw': {
     renderTaskDefinition: openclaw.renderTaskDefinition,
     renderTargetGroup: openclaw.renderTargetGroup,

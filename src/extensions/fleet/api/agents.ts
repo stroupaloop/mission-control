@@ -73,13 +73,18 @@ import {
 const PRIORITY_RANGE_MIN = 100
 const PRIORITY_RANGE_MAX = 49999
 
-// AWS clients are constructed lazily so test mutations of AWS_REGION
-// take effect on import. Same singleton pattern as services.ts /
-// redeploy.ts but accessed via getter functions.
-const AWS_REGION = process.env.AWS_REGION || 'us-east-1'
-const ecsClient = new ECSClient({ region: AWS_REGION })
-const elbv2Client = new ElasticLoadBalancingV2Client({ region: AWS_REGION })
-const logsClient = new CloudWatchLogsClient({ region: AWS_REGION })
+// AWS clients are eagerly initialized at module load (same pattern as
+// services.ts / redeploy.ts — reuses the SDK's connection pool +
+// credential cache across requests). Tests work because Vitest mocks
+// the entire AWS SDK module, not because of any lazy-init magic in
+// this file. The region captured here is what the clients actually
+// use; resolveEnv()'s `region` field re-reads process.env per-request
+// only for response-shape consistency — the AWS calls themselves
+// always use AWS_REGION_AT_LOAD.
+const AWS_REGION_AT_LOAD = process.env.AWS_REGION || 'us-east-1'
+const ecsClient = new ECSClient({ region: AWS_REGION_AT_LOAD })
+const elbv2Client = new ElasticLoadBalancingV2Client({ region: AWS_REGION_AT_LOAD })
+const logsClient = new CloudWatchLogsClient({ region: AWS_REGION_AT_LOAD })
 
 interface ResolvedEnv {
   region: string
@@ -205,8 +210,8 @@ function buildTags(env: ResolvedEnv): Record<string, string> {
   }
 }
 
-/** Validate every required env var; surface a single 500 with the missing list. */
-function checkEnvOrThrow(env: ResolvedEnv): string[] {
+/** Returns the names of any required env vars that are unset. Empty list = all set. */
+function getMissingEnv(env: ResolvedEnv): string[] {
   const missing: string[] = []
   if (!env.accountId) missing.push('MC_AWS_ACCOUNT_ID')
   if (!env.taskRoleArn) missing.push('MC_AGENT_TASK_ROLE_ARN')
@@ -240,7 +245,7 @@ export async function POST(request: NextRequest) {
   }
 
   const resolved = resolveEnv()
-  const missing = checkEnvOrThrow(resolved)
+  const missing = getMissingEnv(resolved)
   if (missing.length > 0) {
     logger.error(
       { missing },
@@ -322,16 +327,18 @@ export async function POST(request: NextRequest) {
 
   try {
     // 1. Resolve the shared listener ARN. DescribeLoadBalancers (by
-    // name) → DescribeListeners (by LB ARN). Both are read-only and
-    // covered by the ELBv2DescribeReadOnly IAM grant.
+    // name) → DescribeListeners (by LB ARN) → filter to the HTTP:80
+    // listener. Both calls are read-only and covered by the
+    // ELBv2DescribeReadOnly IAM grant.
     //
-    // Single-listener assumption: we pick Listeners[0]. Today the
-    // shared agents ALB has exactly one HTTP/80 listener (see
-    // ender-stack/terraform/modules/agents-shared-alb/main.tf). When
-    // ACM Private CA lands and an HTTPS:443 listener is added
-    // alongside (or in place of) HTTP:80, this needs to filter by
-    // protocol/port — AWS doesn't guarantee Listeners[0] is the
-    // intended one (typically ordered by creation time, not port).
+    // The `Protocol === 'HTTP'` filter is load-bearing for the
+    // post-ACM-Private-CA future: when an HTTPS:443 listener is added
+    // alongside (or in place of) HTTP:80, picking Listeners[0] would
+    // route per-agent rules to whichever listener AWS returned first
+    // (typically by creation time, not port — silent misrouting).
+    // The filter forces a deliberate choice: per-agent rules attach
+    // to the HTTP listener until we explicitly migrate to HTTPS, at
+    // which point this filter is the one place to flip.
     const lbResp = await elbv2Client.send(
       new DescribeLoadBalancersCommand({ Names: [resolved.sharedAlbName] }),
     )
@@ -344,10 +351,13 @@ export async function POST(request: NextRequest) {
     const listenersResp = await elbv2Client.send(
       new DescribeListenersCommand({ LoadBalancerArn: lbArn }),
     )
-    const listenerArn = listenersResp.Listeners?.[0]?.ListenerArn
+    const httpListener = listenersResp.Listeners?.find(
+      (l) => l.Protocol === 'HTTP',
+    )
+    const listenerArn = httpListener?.ListenerArn
     if (!listenerArn) {
       throw new Error(
-        `Shared agents ALB has no listeners: ${resolved.sharedAlbName}`,
+        `Shared agents ALB has no HTTP listener: ${resolved.sharedAlbName}`,
       )
     }
 
