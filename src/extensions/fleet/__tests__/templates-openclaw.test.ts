@@ -244,6 +244,19 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
     )
   })
 
+  it('rejects an image with a separator but empty tag (server-side, mirrors client check)', () => {
+    // Round-9 audit: client form catches `img:` already, but a direct
+    // POST that bypasses the form needs the same protection — otherwise
+    // it surfaces as an AWS-layer InvalidParameterException 502 instead
+    // of a clean 400 ValidationError.
+    expect(() =>
+      validate({
+        ...fixtureInput,
+        image: 'ghcr.io/stroupaloop/openclaw:',
+      }),
+    ).toThrow(/image/)
+  })
+
   it('rejects an image from an unallowed registry', () => {
     expect(() =>
       validate({

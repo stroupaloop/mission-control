@@ -113,9 +113,21 @@ function validateOpenClawInput(input: openclaw.OpenClawAgentInput): void {
       `agentName must match ${AGENT_NAME_RE}; got ${JSON.stringify(input.agentName)}`,
     )
   }
-  if (!input.image || !input.image.includes(':')) {
+  // Image must contain a tag/digest separator AND have something after
+  // it. `img:` (empty tag) passes a naive includes(':') check but ECS
+  // rejects it as InvalidParameterException at RegisterTaskDefinition,
+  // surfacing as a confusing 502 to the operator. Mirror the client-
+  // side `lastTagSegment.length > 0` check (panels/create-agent-form.tsx)
+  // here so a direct POST that bypasses the form gets the same clean
+  // 400 ValidationError instead of an opaque AWS-layer 502. Round-9
+  // audit on PR #37.
+  if (
+    !input.image ||
+    !input.image.includes(':') ||
+    !(input.image.split(':').at(-1) ?? '')
+  ) {
     throw new Error(
-      'image must be a fully-qualified container ref including a tag or digest',
+      'image must be a fully-qualified container ref with a non-empty tag or digest',
     )
   }
   if (input.image.length > IMAGE_MAX_BYTES) {
