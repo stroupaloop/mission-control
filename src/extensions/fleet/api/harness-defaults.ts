@@ -211,6 +211,13 @@ export async function GET(request: NextRequest) {
   // Form would silently fall back to maxLength=32 and every submit
   // would 400 with a confusing AGENT_NAME_RE rejection. Surface the
   // misconfig at the endpoint instead.
+  //
+  // TODO(harness-2): this guard is OpenClaw-specific (TG-name limit)
+  // but short-circuits the entire endpoint. When HARNESS_TYPES gains
+  // a harness without an ALB target group (e.g. EventBridge worker),
+  // move this check inside the per-harness defaults block and surface
+  // as a per-harness `constraintError` field rather than a top-level
+  // 500. Tracking: stroupaloop/ender-stack#243.
   const openclawMaxLen = maxAgentNameLengthForPrefix(prefix)
   if (openclawMaxLen < AGENT_NAME_MIN_LENGTH) {
     logger.error(
@@ -221,8 +228,11 @@ export async function GET(request: NextRequest) {
       {
         error: PREFIX_TOO_LONG_ERROR,
         // Surface prefix in detail so operators without log access
-        // can self-diagnose. Admin-only endpoint; reflected value
-        // is server config, not user input. Round-4 audit.
+        // can self-diagnose. Viewer-role endpoint (matches the
+        // `requireRole(request, 'viewer')` check above and the
+        // JSDoc on HarnessDefaultsErrorResponse.detail); reflected
+        // value is server config, not user input. Round-4 audit
+        // added; round-12 corrected "Admin-only" → "viewer-role".
         detail: `prefix "${prefix}" leaves only ${openclawMaxLen} chars for the agent-name segment, but agent names require at least ${AGENT_NAME_MIN_LENGTH}`,
       } satisfies HarnessDefaultsErrorResponse,
       { status: 500 },
