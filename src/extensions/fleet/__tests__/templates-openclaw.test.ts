@@ -192,6 +192,16 @@ describe('renderTaskDefinition', () => {
     // init-config writes openclaw.json removal + workspace state-dir
     // mkdir. Doesn't touch plugin-deps so the mount is omitted to
     // keep the surface tight.
+    //
+    // Shadow invariant (see init-config mountPoints comment in
+    // templates/openclaw.ts): init-config's mkdir of
+    // `plugin-runtime-deps` lands on the workspace volume; the
+    // gateway later mounts a SEPARATE `plugin-deps` volume at the
+    // same path, shadowing it. Removing this mount-absence assertion
+    // (e.g. "let init-config also mount plugin-deps so the mkdir
+    // takes effect everywhere") would break that shadow contract
+    // and let workspace state silently accumulate the dir if the
+    // plugin-deps volume were ever removed. Round-3 audit on PR #40.
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
     const init = findContainer(taskDef, 'init-config')
     const mounts = init?.mountPoints ?? []
