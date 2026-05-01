@@ -85,6 +85,14 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   const [maxAgentNameByHarness, setMaxAgentNameByHarness] = useState<
     Partial<Record<HarnessType, number>>
   >({})
+  // Surface harness-defaults endpoint failures (non-200) so operators
+  // see WHY the form might be unsubmittable. Particularly important
+  // for the PrefixTooLongForHarness 500 case — without this, the
+  // form falls back to maxLength=32, looks normal, but every submit
+  // fails the server-side cap with a confusing 400. Round-6 audit
+  // upgraded this from "post-merge follow-up" to "should fix before
+  // merge" — operator trap.
+  const [defaultsError, setDefaultsError] = useState<string | null>(null)
 
   const firstInputRef = useRef<HTMLInputElement | null>(null)
   const previousFocusRef = useRef<Element | null>(null)
@@ -131,6 +139,7 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     setHarnessType(HARNESS_TYPE_DEFAULT)
     setImage('')
     setMaxAgentNameByHarness({})
+    setDefaultsError(null)
     // Also clear the cached defaults so a fresh fetch on next open
     // is the only source of pre-fill. Otherwise: open → fetch
     // (cache populates) → close → reopen → close-effect sets
@@ -188,9 +197,13 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   }, [open, onClose, submitting])
 
   // Pre-fill `image` from /api/fleet/harness-defaults on first open.
-  // Endpoint never 5xx's on a missing default (returns null) — fetch
-  // failure here is non-blocking; the operator just sees the empty
-  // field with the placeholder example.
+  // The endpoint MAY 500 with PrefixTooLongForHarness on a deployment
+  // misconfig — surface that to the operator via `defaultsError` so
+  // they don't see a working-looking form that fails every submit.
+  // For the missing-default case (DescribeServices returns no
+  // smoke-test, etc.), the endpoint returns 200 with
+  // `defaultImage: null` and the operator just types the image
+  // manually — no error needed.
   //
   // AbortController matches the submit-path pattern. On quick
   // open→close (accidental click), the in-flight fetch is cancelled
@@ -205,7 +218,27 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           cache: 'no-store',
           signal: ac.signal,
         })
-        if (!resp.ok) return
+        if (!resp.ok) {
+          // Try to extract the error code + detail so operators
+          // know exactly what's misconfigured (e.g. the
+          // PrefixTooLongForHarness 500 names the offending prefix
+          // in detail). Falls back to a generic message if the body
+          // isn't JSON or doesn't match the expected shape.
+          let code = `HTTP ${resp.status}`
+          let detail = ''
+          try {
+            const errBody = (await resp.json()) as
+              | { error?: string; detail?: string }
+              | undefined
+            if (errBody?.error) code = errBody.error
+            if (errBody?.detail) detail = errBody.detail
+          } catch {
+            // body not JSON — keep the generic code
+          }
+          if (ac.signal.aborted) return
+          setDefaultsError(detail ? `${code}: ${detail}` : code)
+          return
+        }
         const body = (await resp.json()) as HarnessDefaultsResponse
         if (ac.signal.aborted) return
         const nextImages: Partial<Record<HarnessType, string>> = {}
@@ -408,6 +441,7 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           onSubmit={handleSubmit}
           onClose={onClose}
           onResetForCreateAnother={reset}
+          defaultsError={defaultsError}
         />
       </div>
     </div>,
@@ -456,6 +490,13 @@ interface FormBodyProps {
   onSubmit: (e: React.FormEvent) => void
   onClose: () => void
   onResetForCreateAnother: () => void
+  /** Non-null when the harness-defaults endpoint returned non-200.
+   *  Format: `<error-code>: <detail>` from the response body, or
+   *  `HTTP <status>` if the body wasn't parseable. Surfaces a banner
+   *  above the form so operators see deployment misconfigs (e.g.
+   *  PrefixTooLongForHarness) rather than a working-looking form
+   *  that fails every submit. */
+  defaultsError: string | null
 }
 
 function FormBody({
@@ -477,6 +518,7 @@ function FormBody({
   onSubmit,
   onClose,
   onResetForCreateAnother,
+  defaultsError,
 }: FormBodyProps) {
   if (state.kind === 'success') {
     const r = state.response
@@ -565,6 +607,27 @@ function FormBody({
           ✕
         </button>
       </div>
+
+      {defaultsError && (
+        <div
+          role="alert"
+          className="rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm"
+          data-testid="create-agent-defaults-error"
+        >
+          <div className="font-medium text-amber-700 mb-1">
+            Form pre-fill unavailable
+          </div>
+          <div className="text-xs">
+            <code>{defaultsError}</code>
+          </div>
+          <div className="text-xs mt-1 text-muted-foreground">
+            The deployment&apos;s harness defaults endpoint failed.
+            Submissions may still go through, but per-deployment
+            constraints (e.g. agent name length cap) won&apos;t be
+            enforced client-side. Check MC logs for details.
+          </div>
+        </div>
+      )}
 
       {state.kind === 'error' && (
         <div

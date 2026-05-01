@@ -114,6 +114,11 @@ function clusterName(): string {
  * agents.ts and would have produced wrong service names for
  * deployments that set ONLY MC_FLEET_CLUSTER_NAME (without
  * project/env). Round-3 audit P2.
+ *
+ * KEEP IN SYNC with `resolveEnv()` in api/agents.ts. The form's
+ * client-side caps (driven by this endpoint) must match the
+ * server's enforced caps (driven by agents.ts). If agents.ts ever
+ * gains a new fallback or env var, update both files together.
  */
 function projectPrefix(): string {
   const cluster = clusterName()
@@ -213,7 +218,7 @@ export async function GET(request: NextRequest) {
   if (openclawMaxLen < AGENT_NAME_MIN_LENGTH) {
     logger.error(
       { prefix, openclawMaxLen, minRequired: AGENT_NAME_MIN_LENGTH },
-      '[fleet] harness-defaults: deployment prefix leaves insufficient room for any legal agent name (regex min < computed max)',
+      '[fleet] harness-defaults: deployment prefix leaves insufficient room for any legal agent name (computed max < regex min)',
     )
     return NextResponse.json(
       {

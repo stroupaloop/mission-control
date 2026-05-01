@@ -566,6 +566,44 @@ describe('<CreateAgentForm />', () => {
     ).not.toBeDisabled()
   })
 
+  it('surfaces a banner when /api/fleet/harness-defaults returns 500 (PrefixTooLongForHarness — round-6 audit operator-trap fix)', async () => {
+    // Round-6 audit caught: previously `if (!resp.ok) return`
+    // silently swallowed PrefixTooLongForHarness 500s, leaving the
+    // form looking functional but submitting names that always 400.
+    // Now the form parses the error body and surfaces a banner with
+    // the code + detail so operators see the deployment misconfig.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url =
+        typeof input === 'string' ? input : (input as URL | Request).toString()
+      if (url.includes('/api/fleet/harness-defaults')) {
+        return new Response(
+          JSON.stringify({
+            error: 'PrefixTooLongForHarness',
+            detail:
+              'prefix "really-really-long-prefix-staging" leaves only 1 chars for the agent-name segment, but agent names require at least 3',
+          }),
+          {
+            status: 500,
+            headers: { 'content-type': 'application/json' },
+          },
+        ) as unknown as Response
+      }
+      throw new Error(`Unmocked: ${url}`)
+    })
+
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('create-agent-defaults-error'),
+      ).toBeInTheDocument(),
+    )
+    const banner = screen.getByTestId('create-agent-defaults-error')
+    expect(banner).toHaveTextContent('PrefixTooLongForHarness')
+    expect(banner).toHaveTextContent('really-really-long-prefix-staging')
+    expect(banner).toHaveTextContent(/Form pre-fill unavailable/)
+  })
+
   it('marks Agent name, Container image, and Role description as required (visual asterisks + native required attr for screen readers)', () => {
     mockFetch({})
     render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)

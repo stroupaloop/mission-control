@@ -226,7 +226,7 @@ describe('POST /api/fleet/agents — env validation', () => {
   it('returns 400 ValidationError when the resulting target-group name would exceed AWS 32-char limit (round-3b.2)', async () => {
     // Real failure mode that bit operators in dev: a name like
     // `260501-test1` (12 chars) passes the regex but produces a
-    // target-group name `ender-stack-dev-agent-260501-test1` (35
+    // target-group name `ender-stack-dev-agent-260501-test1` (34
     // chars) which AWS rejects AFTER task-def + log group are
     // created — orphaning real billed resources. Pre-check fails
     // fast with a clear 400 + no AWS calls made.
