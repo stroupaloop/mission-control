@@ -49,7 +49,8 @@ import type { CreateTargetGroupCommandInput } from '@aws-sdk/client-elastic-load
 /**
  * Validated form input for an OpenClaw create-agent request.
  *
- * agentName regex `^[a-z0-9-]{3,32}$` is enforced server-side at the
+ * agentName regex `AGENT_NAME_RE` (constraints.ts —
+ * `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$`) is enforced server-side at the
  * handler boundary BEFORE this template is rendered. The IAM policy doc
  * for `task_ecs_write` (ender-stack PR #208) explicitly cites this regex
  * as a load-bearing security control: ecs:RegisterTaskDefinition is
@@ -333,7 +334,8 @@ export function renderService(
  * so `bot-test` traffic could silently land on `bot`'s target group).
  * Anchoring with `/{name}` (exact) and `/{name}/*` (subtree) makes the
  * patterns mutually exclusive across distinct agent names. The
- * agentName regex `^[a-z0-9-]{3,32}$` permits hyphenated names that
+ * agentName regex `AGENT_NAME_RE` (constraints.ts —
+ * `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$`) permits hyphenated names that
  * would trigger this overlap, so the anchoring is required.
  *
  * Priority is computed by the handler from a hash of the agent name;

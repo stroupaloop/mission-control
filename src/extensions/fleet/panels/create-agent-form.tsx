@@ -96,6 +96,28 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     }
   }, [open])
 
+  // Reset on close so the next open shows a fresh form, not the
+  // prior success/error view.
+  //
+  // The conditional-render → always-mounted refactor in this PR
+  // dropped the unmount-on-close state teardown that React used to
+  // do for free. Without this effect, a successful create followed
+  // by close → reopen would show the previous agent's success
+  // summary (with the wrong ARNs!) instead of an empty form.
+  // Round-1 audit (Claude + Greptile P1) caught this.
+  useEffect(() => {
+    if (open) return
+    setState({ kind: 'idle' })
+    setAgentName('')
+    setRoleDescription('')
+    setHarnessType(HARNESS_TYPE_DEFAULT)
+    // image gets re-pre-filled from defaultsByHarness when open flips
+    // back to true (the existing pre-fill effect runs on harness-
+    // type change). Setting to '' here keeps the pre-fill logic
+    // simple — non-empty image suppresses the auto-fill.
+    setImage('')
+  }, [open])
+
   // Esc to dismiss. Only attached while open. Submit-in-flight blocks
   // dismiss to avoid losing the in-flight create — operator must wait
   // for the response (success/error) before closing.

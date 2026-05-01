@@ -52,6 +52,21 @@ export interface HarnessDefaultsErrorResponse {
 const AWS_REGION_AT_LOAD = process.env.AWS_REGION || 'us-east-1'
 const ecsClient = new ECSClient({ region: AWS_REGION_AT_LOAD })
 
+// Per-call timeout for the two ECS lookups. Form is operator-facing;
+// a stuck handler would block the form's pre-fill effect with no
+// error visible to the operator (catch is silent by design — falls
+// back to placeholder example). 5s gives ECS plenty of headroom over
+// the realistic ~50-150ms happy path while preventing indefinite
+// hangs during AWS throttling or transient network issues. Round-1
+// audit on PR #38.
+const ECS_CALL_TIMEOUT_MS = 5_000
+
+function withTimeout(): AbortSignal {
+  const ac = new AbortController()
+  setTimeout(() => ac.abort(), ECS_CALL_TIMEOUT_MS)
+  return ac.signal
+}
+
 function clusterName(): string {
   return process.env.MC_FLEET_CLUSTER_NAME || 'ender-stack-dev'
 }
@@ -79,8 +94,15 @@ async function openclawDefaultImage(): Promise<string | null> {
         cluster,
         services: [serviceName],
       }),
+      { abortSignal: withTimeout() },
     )
-    taskDefArn = resp.services?.[0]?.taskDefinition
+    // Filter to ACTIVE only — DescribeServices returns DRAINING +
+    // INACTIVE records too, with their last-known taskDefinition.
+    // A torn-down smoke-test would otherwise pre-fill a stale image
+    // (the operator sees a sha that's no longer running anywhere).
+    // Round-1 audit on PR #38 (Greptile P2).
+    const activeService = resp.services?.find((s) => s.status === 'ACTIVE')
+    taskDefArn = activeService?.taskDefinition
   } catch (err) {
     logger.warn(
       { err, cluster, serviceName },
@@ -90,15 +112,15 @@ async function openclawDefaultImage(): Promise<string | null> {
   }
 
   if (!taskDefArn) {
-    // Service doesn't exist (fresh cluster, smoke-test not deployed
-    // yet). Not an error — operator just gets the placeholder
-    // example in the form.
+    // Service doesn't exist OR is in DRAINING/INACTIVE state. Either
+    // way, no current default to surface — operator gets placeholder.
     return null
   }
 
   try {
     const tdResp = await ecsClient.send(
       new DescribeTaskDefinitionCommand({ taskDefinition: taskDefArn }),
+      { abortSignal: withTimeout() },
     )
     const gateway = tdResp.taskDefinition?.containerDefinitions?.find(
       (c) => c.name === 'openclaw-gateway',

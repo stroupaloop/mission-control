@@ -51,6 +51,7 @@ describe('GET /api/fleet/harness-defaults', () => {
       .mockResolvedValueOnce({
         services: [
           {
+            status: 'ACTIVE',
             taskDefinition:
               'arn:aws:ecs:us-east-1:1:task-definition/ender-stack-dev-companion-openclaw-smoke-test:7',
           },
@@ -108,10 +109,34 @@ describe('GET /api/fleet/harness-defaults', () => {
     expect(json.defaults['companion/openclaw'].defaultImage).toBeNull()
   })
 
+  it('returns null defaultImage when the smoke-test service is INACTIVE / DRAINING (filters to ACTIVE only)', async () => {
+    // Round-1 audit (Greptile P2): DescribeServices returns
+    // decommissioned services with their last-known taskDefinition.
+    // Without an ACTIVE filter, the form would pre-fill an image
+    // that's no longer running anywhere. Filter to status==='ACTIVE'
+    // so torn-down smoke-tests get null (placeholder fallback in form).
+    ecsSendMock.mockResolvedValueOnce({
+      services: [
+        {
+          status: 'INACTIVE',
+          taskDefinition:
+            'arn:aws:ecs:us-east-1:1:task-definition/stale-decom:99',
+        },
+      ],
+    })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest())
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      defaults: Record<string, { defaultImage: string | null }>
+    }
+    expect(json.defaults['companion/openclaw'].defaultImage).toBeNull()
+  })
+
   it('returns null defaultImage when the gateway container is missing from the task-def', async () => {
     ecsSendMock
       .mockResolvedValueOnce({
-        services: [{ taskDefinition: 'arn:tdf' }],
+        services: [{ status: 'ACTIVE', taskDefinition: 'arn:tdf' }],
       })
       .mockResolvedValueOnce({
         taskDefinition: {
