@@ -49,8 +49,19 @@ export interface HarnessTemplate {
   renderTargetGroup: typeof openclaw.renderTargetGroup
   renderService: typeof openclaw.renderService
   renderListenerRule: typeof openclaw.renderListenerRule
-  /** Validates the harness-specific shape of the form input. Throws on invalid. */
-  validateInput: (input: openclaw.OpenClawAgentInput) => void
+  /**
+   * Validates the harness-specific shape of the form input. Throws on
+   * invalid.
+   *
+   * `prefix` is optional for backward compatibility with callers that
+   * only have the input (e.g. unit tests asserting input-only
+   * constraints). When provided, the validator also enforces
+   * deployment-aware constraints — for OpenClaw, that's the
+   * `${prefix}-agent-${name}` target-group-name length cap (AWS 32
+   * char limit). The handler always passes prefix; tests for
+   * input-only invariants can omit it.
+   */
+  validateInput: (input: openclaw.OpenClawAgentInput, prefix?: string) => void
 }
 
 // Image registry allowlist. Defaults to ECR-in-this-account, GHCR
@@ -107,11 +118,31 @@ function imageRegistryAllowlist(): RegExp[] {
   })
 }
 
-function validateOpenClawInput(input: openclaw.OpenClawAgentInput): void {
+function validateOpenClawInput(
+  input: openclaw.OpenClawAgentInput,
+  prefix?: string,
+): void {
   if (!AGENT_NAME_RE.test(input.agentName)) {
     throw new Error(
       `agentName must match ${AGENT_NAME_RE}; got ${JSON.stringify(input.agentName)}`,
     )
+  }
+  // Combined target-group-name length cap (AWS 32-char limit on
+  // ELBv2 target group names). Only enforced when prefix is provided
+  // — handlers always pass it; input-only unit tests can omit it.
+  // Round-3b.2 round-2 audit moved this from the handler-only
+  // pre-check into validateInput for layering symmetry with the
+  // other input constraints.
+  if (typeof prefix === 'string') {
+    const tgName = openclaw.targetGroupName(prefix, input.agentName)
+    if (tgName.length > openclaw.TARGET_GROUP_NAME_MAX_LENGTH) {
+      const maxName = openclaw.maxAgentNameLengthForPrefix(prefix)
+      throw new Error(
+        `agentName too long for this deployment: target group name "${tgName}" ` +
+          `is ${tgName.length} chars, AWS limit is ${openclaw.TARGET_GROUP_NAME_MAX_LENGTH}. ` +
+          `Max agentName length here is ${maxName}.`,
+      )
+    }
   }
   // Image must contain a tag/digest separator AND have something after
   // it. `img:` (empty tag) passes a naive includes(':') check but ECS

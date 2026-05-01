@@ -330,4 +330,30 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
       validate({ ...fixtureInput, roleDescription: '   ' }),
     ).toThrow(/roleDescription/)
   })
+
+  it('enforces deployment-aware combined-name cap when prefix is provided (round-2 audit on PR #39)', () => {
+    // Round-2 audit on PR #39 relocated the combined-name check
+    // from the handler's pre-check INTO validateInput so any future
+    // caller of validateOpenClawInput (test helpers, alternative
+    // harnesses) gets the same enforcement. Prefix is optional —
+    // input-only callers (most tests above) skip the check.
+    // For prefix `ender-stack-dev` (15 chars) + `-agent-` (7) = 22
+    // overhead → max agentName = 10. `a-bit-too-long-12c` is 18
+    // chars, well over.
+    expect(() =>
+      validate(
+        { ...fixtureInput, agentName: 'a-bit-too-long-12c' },
+        'ender-stack-dev',
+      ),
+    ).toThrow(/target group name/)
+    // Same input without prefix → input-only path → no combined-name
+    // check → passes.
+    expect(() =>
+      validate({ ...fixtureInput, agentName: 'a-bit-too-long-12c' }),
+    ).not.toThrow()
+    // Within the cap with prefix → passes.
+    expect(() =>
+      validate({ ...fixtureInput, agentName: 'bot-v2-prd' }, 'ender-stack-dev'),
+    ).not.toThrow()
+  })
 })

@@ -189,6 +189,25 @@ describe('GET /api/fleet/harness-defaults', () => {
     )
   })
 
+  it('returns 500 PrefixTooLongForHarness when the deployment prefix leaves no room for any legal agent name (round-2 audit on PR #39)', async () => {
+    // Round-2 audit caught the degenerate path: a 26+ char prefix
+    // makes maxAgentNameLengthForPrefix return ≤ 0. The form's
+    // `m > 0` guard would silently fall back to maxLength=32 and
+    // the operator would see every submission rejected with a
+    // confusing 400. Surface the misconfig at the endpoint instead
+    // so MC ops sees a clear 500 with the prefix named.
+    delete process.env.MC_FLEET_PROJECT_NAME
+    delete process.env.MC_FLEET_ENVIRONMENT
+    process.env.MC_FLEET_CLUSTER_NAME =
+      'this-is-an-extremely-long-cluster-name-staging' // 47 chars
+
+    const GET = await importHandler()
+    const resp = await GET(mkRequest())
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('PrefixTooLongForHarness')
+  })
+
   it('rejects unauthorized callers via requireRole', async () => {
     const auth = await import('@/lib/auth')
     vi.mocked(auth.requireRole).mockReturnValueOnce({

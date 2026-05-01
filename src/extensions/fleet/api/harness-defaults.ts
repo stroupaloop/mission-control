@@ -191,10 +191,34 @@ export async function GET(request: NextRequest) {
   // keyed by HARNESS_TYPES so adding Hermes (or any other harness)
   // is a single-line extension.
   const prefix = projectPrefix()
+
+  // Defensive: catch the degenerate case where the deployment
+  // prefix is so long that no legal agent name fits under the AWS
+  // 32-char target-group-name limit. The form's `m > 0` guard would
+  // silently fall back to maxLength=32 and the operator would see
+  // every submission rejected with a confusing 400 from the
+  // server-side check. Surface the misconfig at the endpoint
+  // instead so MC ops sees a clear 500 with the prefix named —
+  // they fix it once at the deployment level rather than
+  // diagnosing per-create failures. Round-2 audit on PR #39.
+  const openclawMaxLen = maxAgentNameLengthForPrefix(prefix)
+  if (openclawMaxLen <= 0) {
+    logger.error(
+      { prefix, openclawMaxLen },
+      '[fleet] harness-defaults: deployment prefix is too long; no legal agent name fits under AWS 32-char target-group-name limit',
+    )
+    return NextResponse.json(
+      {
+        error: 'PrefixTooLongForHarness',
+      } satisfies HarnessDefaultsErrorResponse,
+      { status: 500 },
+    )
+  }
+
   const defaults: Record<HarnessType, HarnessDefault> = {
     'companion/openclaw': {
       defaultImage: await openclawDefaultImage(),
-      agentNameMaxLength: maxAgentNameLengthForPrefix(prefix),
+      agentNameMaxLength: openclawMaxLen,
     },
   }
 
