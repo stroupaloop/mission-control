@@ -39,6 +39,7 @@ function mockFetch(opts: {
   post?: Response
   postReject?: Error
   defaultImage?: string | null
+  agentNameMaxLength?: number
 }) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url =
@@ -47,7 +48,10 @@ function mockFetch(opts: {
       return new Response(
         JSON.stringify({
           defaults: {
-            'companion/openclaw': { defaultImage: opts.defaultImage ?? null },
+            'companion/openclaw': {
+              defaultImage: opts.defaultImage ?? null,
+              agentNameMaxLength: opts.agentNameMaxLength ?? 32,
+            },
           },
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -449,7 +453,12 @@ describe('<CreateAgentForm />', () => {
             : 'ghcr.io/stroupaloop/openclaw:sha-NEW'
         return new Response(
           JSON.stringify({
-            defaults: { 'companion/openclaw': { defaultImage: image } },
+            defaults: {
+              'companion/openclaw': {
+                defaultImage: image,
+                agentNameMaxLength: 32,
+              },
+            },
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         ) as unknown as Response
@@ -520,6 +529,150 @@ describe('<CreateAgentForm />', () => {
     expect(screen.getByLabelText(/Container image/i)).toHaveValue(
       'ghcr.io/stroupaloop/openclaw:sha-typed',
     )
+  })
+
+  it('honors agentNameMaxLength from harness-defaults — rejects names longer than the per-deployment cap (round-3b.2)', async () => {
+    // Server returns 10 (the ender-stack-dev cap); names longer than
+    // that fail client validation immediately. Catches the "looks
+    // valid by regex but exceeds AWS target-group-name limit" trap.
+    mockFetch({ agentNameMaxLength: 10 })
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    // Wait for the harness-defaults response so the maxLength is in
+    // state before we attempt the fill.
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Agent name/i)).toHaveAttribute(
+        'maxlength',
+        '10',
+      )
+    })
+    fill({ agentName: 'agent-name-too-long-for-deployment' })
+    expect(
+      screen.getByRole('button', { name: /Create agent/i }),
+    ).toBeDisabled()
+  })
+
+  it('accepts a 10-char agent name when the per-deployment cap is 10', async () => {
+    mockFetch({ agentNameMaxLength: 10 })
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    await waitFor(() =>
+      expect(screen.getByLabelText(/Agent name/i)).toHaveAttribute(
+        'maxlength',
+        '10',
+      ),
+    )
+    fill({ agentName: 'bot-v2-prd' })
+    expect(
+      screen.getByRole('button', { name: /Create agent/i }),
+    ).not.toBeDisabled()
+  })
+
+  it('surfaces a banner when /api/fleet/harness-defaults returns 500 (PrefixTooLongForHarness — round-6 audit operator-trap fix)', async () => {
+    // Round-6 audit caught: previously `if (!resp.ok) return`
+    // silently swallowed PrefixTooLongForHarness 500s, leaving the
+    // form looking functional but submitting names that always 400.
+    // Now the form parses the error body and surfaces a banner with
+    // the code + detail so operators see the deployment misconfig.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url =
+        typeof input === 'string' ? input : (input as URL | Request).toString()
+      if (url.includes('/api/fleet/harness-defaults')) {
+        return new Response(
+          JSON.stringify({
+            error: 'PrefixTooLongForHarness',
+            detail:
+              'prefix "really-really-long-prefix-staging" leaves only 1 chars for the agent-name segment, but agent names require at least 3',
+          }),
+          {
+            status: 500,
+            headers: { 'content-type': 'application/json' },
+          },
+        ) as unknown as Response
+      }
+      throw new Error(`Unmocked: ${url}`)
+    })
+
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('create-agent-defaults-error'),
+      ).toBeInTheDocument(),
+    )
+    const banner = screen.getByTestId('create-agent-defaults-error')
+    expect(banner).toHaveTextContent('PrefixTooLongForHarness')
+    expect(banner).toHaveTextContent('really-really-long-prefix-staging')
+    // Round-7 audit upgraded the banner copy from hedged
+    // "Form pre-fill unavailable" to definitive "Cannot create
+    // agents" for PrefixTooLongForHarness specifically — that
+    // error means EVERY submit will fail; submit is also disabled.
+    expect(banner).toHaveTextContent(/Cannot create agents/)
+    // Even with a valid-looking name typed, submit is disabled
+    // because formValid bakes in defaultsErrorBlocksSubmit.
+    fill({ agentName: 'mybot' })
+    expect(
+      screen.getByRole('button', { name: /Create agent/i }),
+    ).toBeDisabled()
+  })
+
+  it('shows hedged banner + KEEPS submit enabled for non-blocking harness-defaults errors (round-7 audit)', async () => {
+    // For non-PrefixTooLongForHarness 5xx (e.g. transient AWS
+    // throttle upstream of the ECS lookup, JSON parse failure on
+    // a downstream service), the form falls back to maxLength=32
+    // and the server-side gate still applies. Submit stays enabled
+    // — operator can still type a name the server accepts.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url =
+        typeof input === 'string' ? input : (input as URL | Request).toString()
+      if (url.includes('/api/fleet/harness-defaults')) {
+        return new Response(JSON.stringify({ error: 'TransientUpstream' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        }) as unknown as Response
+      }
+      throw new Error(`Unmocked: ${url}`)
+    })
+
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('create-agent-defaults-error'),
+      ).toBeInTheDocument(),
+    )
+    const banner = screen.getByTestId('create-agent-defaults-error')
+    expect(banner).toHaveTextContent(/Form pre-fill unavailable/)
+    expect(banner).toHaveTextContent('TransientUpstream')
+    fill({ agentName: 'mybot' })
+    // Submit enabled — server-side validation is the authoritative
+    // gate when defaults aren't available.
+    expect(
+      screen.getByRole('button', { name: /Create agent/i }),
+    ).not.toBeDisabled()
+  })
+
+  it('marks Agent name, Container image, and Role description as required (visual asterisks + native required attr for screen readers)', () => {
+    mockFetch({})
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    // Modal renders via React.createPortal into document.body, so
+    // the rendered container is empty — query the document directly.
+    const marks = document.body.querySelectorAll('[data-testid="required-mark"]')
+    expect(marks.length).toBe(3)
+    const labelTexts = Array.from(marks).map(
+      (m) => m.parentElement?.textContent ?? '',
+    )
+    expect(labelTexts.some((t) => t.includes('Agent name'))).toBe(true)
+    expect(labelTexts.some((t) => t.includes('Container image'))).toBe(true)
+    expect(labelTexts.some((t) => t.includes('Role description'))).toBe(true)
+    // Marks are decorative — aria-hidden so screen readers rely on
+    // the native `required` attribute on the inputs (the canonical
+    // semantic signal).
+    Array.from(marks).forEach((m) => {
+      expect(m.getAttribute('aria-hidden')).toBe('true')
+    })
+    // Inputs have the native required attribute that screen readers
+    // surface as "required field" announcements.
+    expect(screen.getByLabelText(/Agent name/i)).toBeRequired()
+    expect(screen.getByLabelText(/Container image/i)).toBeRequired()
+    expect(screen.getByLabelText(/Role description/i)).toBeRequired()
   })
 
   it('accepts an agent name starting with a digit (date prefix like `2026-04-30-bot`)', () => {

@@ -6,7 +6,17 @@ import {
 } from '@aws-sdk/client-ecs'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
-import { HARNESS_TYPES, type HarnessType } from '@/extensions/fleet/templates/constraints'
+import {
+  AGENT_NAME_MIN_LENGTH,
+  HARNESS_TYPES,
+  PREFIX_TOO_LONG_ERROR,
+  type HarnessType,
+} from '@/extensions/fleet/templates/constraints'
+import { maxAgentNameLengthForPrefix } from '@/extensions/fleet/templates/openclaw'
+import {
+  resolveFleetPrefix,
+  type FleetPrefix,
+} from '@/extensions/fleet/lib/fleet-prefix'
 
 /**
  * GET /api/fleet/harness-defaults — per-harness defaults the
@@ -39,6 +49,31 @@ import { HARNESS_TYPES, type HarnessType } from '@/extensions/fleet/templates/co
 interface HarnessDefault {
   /** Pre-fill value for the create-agent form's image field; null when unknown. */
   defaultImage: string | null
+  /**
+   * Maximum legal `agentName` length for THIS deployment, when the
+   * harness has a per-deployment cap that's tighter than the
+   * AGENT_NAME_RE regex max. Computed server-side from the actual
+   * `{prefix}` so the form's input `maxLength` is accurate
+   * per-deployment.
+   *
+   * Optional because not every harness has this constraint — it's
+   * specifically driven by the AWS ELBv2 target-group-name 32-char
+   * limit, which only applies to ALB-attached harnesses (OpenClaw
+   * companion shape). When omitted, the form falls back to the
+   * regex max (AGENT_NAME_RE upper bound). Future harnesses that
+   * use a different routing primitive (e.g. a Hermes worker
+   * triggered by EventBridge → no ALB → no TG-name limit) should
+   * leave this undefined.
+   *
+   * For OpenClaw: derived from the AWS target-group-name 32-char
+   * limit minus the `{prefix}-agent-` overhead. See
+   * `maxAgentNameLengthForPrefix` in templates/openclaw.ts.
+   *
+   * Round-8 audit on PR #39 made this optional to avoid forcing
+   * future-harness implementers to reverse-engineer an OpenClaw-
+   * specific constraint.
+   */
+  agentNameMaxLength?: number
 }
 
 export interface HarnessDefaultsResponse {
@@ -47,6 +82,14 @@ export interface HarnessDefaultsResponse {
 
 export interface HarnessDefaultsErrorResponse {
   error: string
+  /** Operator-actionable detail. The endpoint requires `viewer`
+   *  role (any authenticated MC user), so anything reflected in
+   *  `detail` is visible to all viewers — keep it to non-secret
+   *  config (the deployment prefix qualifies; secret values must
+   *  never land here). For PrefixTooLongForHarness: names the
+   *  offending prefix so operators without log access can
+   *  self-diagnose. Round-8 audit clarified the auth scope. */
+  detail?: string
 }
 
 const AWS_REGION_AT_LOAD = process.env.AWS_REGION || 'us-east-1'
@@ -76,32 +119,10 @@ function withTimeout(): TimeoutHandle {
   return { signal: ac.signal, clear: () => clearTimeout(id) }
 }
 
-function clusterName(): string {
-  return process.env.MC_FLEET_CLUSTER_NAME || 'ender-stack-dev'
-}
-
-/**
- * Resolve the `{project}-{env}` prefix used for service-name
- * templating. Mirrors agents.ts's derivation:
- *   - MC_FLEET_PROJECT_NAME wins if set
- *   - else fall back to all-but-last segment of MC_FLEET_CLUSTER_NAME
- *     (default cluster `ender-stack-dev` → project `ender-stack`)
- *   - same for MC_FLEET_ENVIRONMENT, but tail segment instead
- *
- * The previous hardcoded `'ender-stack'` fallback drifted from
- * agents.ts and would have produced wrong service names for
- * deployments that set ONLY MC_FLEET_CLUSTER_NAME (without
- * project/env). Round-3 audit P2.
- */
-function projectPrefix(): string {
-  const cluster = clusterName()
-  const project =
-    process.env.MC_FLEET_PROJECT_NAME ||
-    cluster.split('-').slice(0, -1).join('-')
-  const env =
-    process.env.MC_FLEET_ENVIRONMENT || cluster.split('-').pop() || 'dev'
-  return `${project}-${env}`
-}
+// Cluster + project/env/prefix derivation shared with agents.ts via
+// `lib/fleet-prefix.ts`. Round-7 audit on PR #39 caught the prior
+// duplicate logic as a drift risk — extracted so future fallback
+// additions land in one place.
 
 /**
  * Lookup the OpenClaw smoke-test service's currently-deployed image.
@@ -109,9 +130,11 @@ function projectPrefix(): string {
  * task-def missing the gateway container) — caller treats null as
  * "no default known."
  */
-async function openclawDefaultImage(): Promise<string | null> {
-  const cluster = clusterName()
-  const serviceName = `${projectPrefix()}-companion-openclaw-smoke-test`
+async function openclawDefaultImage(
+  fleet: FleetPrefix,
+): Promise<string | null> {
+  const cluster = fleet.clusterName
+  const serviceName = `${fleet.prefix}-companion-openclaw-smoke-test`
 
   let taskDefArn: string | undefined
   const t1 = withTimeout()
@@ -176,9 +199,50 @@ export async function GET(request: NextRequest) {
   // Per-harness lookup. Today only OpenClaw; structured as a record
   // keyed by HARNESS_TYPES so adding Hermes (or any other harness)
   // is a single-line extension.
+  const fleet = resolveFleetPrefix()
+  const prefix = fleet.prefix
+
+  // Defensive: catch the degenerate case where the deployment
+  // prefix is so long that no legal agent name fits under the AWS
+  // 32-char target-group-name limit. Threshold is `<
+  // AGENT_NAME_MIN_LENGTH` (not `<= 0`) — round-4 audit caught that
+  // a 23-24 char prefix produces maxLen=1 or 2, which passes a
+  // `<= 0` guard but is structurally impossible (regex min is 3).
+  // Form would silently fall back to maxLength=32 and every submit
+  // would 400 with a confusing AGENT_NAME_RE rejection. Surface the
+  // misconfig at the endpoint instead.
+  //
+  // TODO(harness-2): this guard is OpenClaw-specific (TG-name limit)
+  // but short-circuits the entire endpoint. When HARNESS_TYPES gains
+  // a harness without an ALB target group (e.g. EventBridge worker),
+  // move this check inside the per-harness defaults block and surface
+  // as a per-harness `constraintError` field rather than a top-level
+  // 500. Tracking: stroupaloop/ender-stack#243.
+  const openclawMaxLen = maxAgentNameLengthForPrefix(prefix)
+  if (openclawMaxLen < AGENT_NAME_MIN_LENGTH) {
+    logger.error(
+      { prefix, openclawMaxLen, minRequired: AGENT_NAME_MIN_LENGTH },
+      '[fleet] harness-defaults: deployment prefix leaves insufficient room for any legal agent name (computed max < regex min)',
+    )
+    return NextResponse.json(
+      {
+        error: PREFIX_TOO_LONG_ERROR,
+        // Surface prefix in detail so operators without log access
+        // can self-diagnose. Viewer-role endpoint (matches the
+        // `requireRole(request, 'viewer')` check above and the
+        // JSDoc on HarnessDefaultsErrorResponse.detail); reflected
+        // value is server config, not user input. Round-4 audit
+        // added; round-12 corrected "Admin-only" → "viewer-role".
+        detail: `prefix "${prefix}" leaves only ${openclawMaxLen} chars for the agent-name segment, but agent names require at least ${AGENT_NAME_MIN_LENGTH}`,
+      } satisfies HarnessDefaultsErrorResponse,
+      { status: 500 },
+    )
+  }
+
   const defaults: Record<HarnessType, HarnessDefault> = {
     'companion/openclaw': {
-      defaultImage: await openclawDefaultImage(),
+      defaultImage: await openclawDefaultImage(fleet),
+      agentNameMaxLength: openclawMaxLen,
     },
   }
 

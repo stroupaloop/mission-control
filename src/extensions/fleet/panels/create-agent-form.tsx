@@ -4,9 +4,11 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'
 import {
+  AGENT_NAME_MIN_LENGTH,
   AGENT_NAME_RE,
   HARNESS_TYPES,
   IMAGE_MAX_BYTES,
+  PREFIX_TOO_LONG_ERROR,
   ROLE_DESCRIPTION_MAX_BYTES,
   type HarnessType,
 } from '../templates/constraints'
@@ -77,6 +79,28 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   const [defaultsByHarness, setDefaultsByHarness] = useState<
     Partial<Record<HarnessType, string>>
   >({})
+  // Per-harness maxLength for agentName, computed server-side from
+  // the deployment prefix so the form's input attribute is accurate
+  // (default 32 = the regex max; the dynamic value is tighter when
+  // the prefix forces it). Updated by the harness-defaults fetch.
+  const [maxAgentNameByHarness, setMaxAgentNameByHarness] = useState<
+    Partial<Record<HarnessType, number>>
+  >({})
+  // Surface harness-defaults endpoint failures (non-200) so operators
+  // see WHY the form might be unsubmittable. Particularly important
+  // for the PrefixTooLongForHarness 500 case — without this, the
+  // form falls back to maxLength=32, looks normal, but every submit
+  // fails the server-side cap with a confusing 400. Round-6 audit
+  // upgraded this from "post-merge follow-up" to "should fix before
+  // merge" — operator trap.
+  const [defaultsError, setDefaultsError] = useState<string | null>(null)
+  // When the deployment is misconfigured such that NO legal agent
+  // name is creatable (PrefixTooLongForHarness), every submit will
+  // 400 server-side. Disable submit entirely + change banner copy
+  // from "may still go through" hedge to a definitive "cannot
+  // create agents until X" message. Round-7 audit caught the
+  // misleading hedge + the still-enabled Create button.
+  const [defaultsErrorBlocksSubmit, setDefaultsErrorBlocksSubmit] = useState(false)
 
   const firstInputRef = useRef<HTMLInputElement | null>(null)
   const previousFocusRef = useRef<Element | null>(null)
@@ -122,6 +146,9 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     setRoleDescription('')
     setHarnessType(HARNESS_TYPE_DEFAULT)
     setImage('')
+    setMaxAgentNameByHarness({})
+    setDefaultsError(null)
+    setDefaultsErrorBlocksSubmit(false)
     // Also clear the cached defaults so a fresh fetch on next open
     // is the only source of pre-fill. Otherwise: open → fetch
     // (cache populates) → close → reopen → close-effect sets
@@ -179,9 +206,13 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   }, [open, onClose, submitting])
 
   // Pre-fill `image` from /api/fleet/harness-defaults on first open.
-  // Endpoint never 5xx's on a missing default (returns null) — fetch
-  // failure here is non-blocking; the operator just sees the empty
-  // field with the placeholder example.
+  // The endpoint MAY 500 with PrefixTooLongForHarness on a deployment
+  // misconfig — surface that to the operator via `defaultsError` so
+  // they don't see a working-looking form that fails every submit.
+  // For the missing-default case (DescribeServices returns no
+  // smoke-test, etc.), the endpoint returns 200 with
+  // `defaultImage: null` and the operator just types the image
+  // manually — no error needed.
   //
   // AbortController matches the submit-path pattern. On quick
   // open→close (accidental click), the in-flight fetch is cancelled
@@ -196,15 +227,56 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           cache: 'no-store',
           signal: ac.signal,
         })
-        if (!resp.ok) return
+        if (!resp.ok) {
+          // Try to extract the error code + detail so operators
+          // know exactly what's misconfigured (e.g. the
+          // PrefixTooLongForHarness 500 names the offending prefix
+          // in detail). Falls back to a generic message if the body
+          // isn't JSON or doesn't match the expected shape.
+          let code = `HTTP ${resp.status}`
+          let detail = ''
+          try {
+            const errBody = (await resp.json()) as
+              | { error?: string; detail?: string }
+              | undefined
+            if (errBody?.error) code = errBody.error
+            if (errBody?.detail) detail = errBody.detail
+          } catch {
+            // body not JSON — keep the generic code
+          }
+          if (ac.signal.aborted) return
+          setDefaultsError(detail ? `${code}: ${detail}` : code)
+          // PrefixTooLongForHarness means NO legal agent name fits
+          // under the AWS 32-char cap given this prefix — every
+          // submit will 400. Block submit definitively. Other 5xx
+          // codes (e.g. transient AWS API failures upstream of the
+          // ECS lookup) leave submit enabled — the operator can
+          // still type a name that the server-side gate accepts.
+          if (code === PREFIX_TOO_LONG_ERROR) {
+            setDefaultsErrorBlocksSubmit(true)
+          }
+          return
+        }
         const body = (await resp.json()) as HarnessDefaultsResponse
         if (ac.signal.aborted) return
-        const next: Partial<Record<HarnessType, string>> = {}
+        const nextImages: Partial<Record<HarnessType, string>> = {}
+        const nextMaxLengths: Partial<Record<HarnessType, number>> = {}
         for (const h of HARNESS_TYPES) {
           const d = body.defaults[h]?.defaultImage
-          if (typeof d === 'string') next[h] = d
+          if (typeof d === 'string') nextImages[h] = d
+          const m = body.defaults[h]?.agentNameMaxLength
+          // Belt-and-suspenders: require maxLength >= the regex
+          // minimum, not just > 0. Server's PrefixTooLongForHarness
+          // 500 is the primary gate (caught before this point), but
+          // if a future server bug ever returned a positive but
+          // sub-minimum value, the form would set maxLength <
+          // minLength and trap operators in an unsubmittable state.
+          if (typeof m === 'number' && m >= AGENT_NAME_MIN_LENGTH) {
+            nextMaxLengths[h] = m
+          }
         }
-        setDefaultsByHarness(next)
+        setDefaultsByHarness(nextImages)
+        setMaxAgentNameByHarness(nextMaxLengths)
       } catch {
         // AbortError + network/JSON failures all silent — the
         // operator can still type the image manually.
@@ -228,10 +300,21 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
 
   // Local pre-validation before POSTing — catches the obvious failures
   // without a network round-trip. Server-side validation (in
-  // templates/index.ts validateOpenClawInput + agents.ts type guard) is
-  // still the authoritative gate; this layer is UX-only. Keep the rules
-  // in lockstep with constraints.ts.
-  const agentNameValid = AGENT_NAME_RE.test(agentName)
+  // templates/index.ts validateOpenClawInput + agents.ts type guard +
+  // the prefix-aware target-group-name length cap) is still the
+  // authoritative gate; this layer is UX-only. Keep the rules in
+  // lockstep with constraints.ts.
+  //
+  // `agentNameMaxForHarness` is the per-deployment cap from the
+  // harness-defaults endpoint (computed from the actual prefix so a
+  // shorter fork prefix gets a longer cap). Defaults to 32 (the regex
+  // upper bound) when the endpoint hasn't responded yet; the server
+  // is the authoritative gate either way.
+  const agentNameMaxForHarness =
+    maxAgentNameByHarness[harnessType] ?? 32
+  const agentNameValid =
+    AGENT_NAME_RE.test(agentName) &&
+    agentName.length <= agentNameMaxForHarness
   // image must contain a separator AND have something after it.
   // `img:` (empty tag) passes a naive `includes(':')` check but
   // ECS rejects it as InvalidParameterException at registration —
@@ -246,7 +329,11 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   const roleDescriptionValid =
     roleDescription.trim().length > 0 &&
     roleDescription.length <= ROLE_DESCRIPTION_MAX_BYTES
-  const formValid = agentNameValid && imageValid && roleDescriptionValid
+  const formValid =
+    agentNameValid &&
+    imageValid &&
+    roleDescriptionValid &&
+    !defaultsErrorBlocksSubmit
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -318,12 +405,27 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
 
   function reset() {
     setAgentName('')
-    setImage(defaultsByHarness[HARNESS_TYPE_DEFAULT] ?? '')
+    // "Create another" — preserve the operator's last harness
+    // selection (likely creating multiple agents of the same type)
+    // and pre-fill the image from THAT harness's default, not the
+    // default-default. With a single harness today this is
+    // equivalent to HARNESS_TYPE_DEFAULT, but it's the correct
+    // shape when a second harness lands. Round-9 audit P3.
+    setImage(defaultsByHarness[harnessType] ?? '')
     setRoleDescription('')
-    setHarnessType(HARNESS_TYPE_DEFAULT)
     setState({ kind: 'idle' })
     // "Create another" treats the just-applied default as the
     // canonical starting point; the operator hasn't edited yet.
+    imageEditedRef.current = false
+  }
+
+  function handleHarnessChange(next: HarnessType) {
+    setHarnessType(next)
+    // Switching harness should re-arm the pre-fill effect — the new
+    // harness's default may differ. Clearing the image too so the
+    // pre-fill effect's `image === ''` gate fires. Latent for the
+    // single-harness phase, correct for harness-2. Round-9 audit P3.
+    setImage('')
     imageEditedRef.current = false
   }
 
@@ -361,10 +463,11 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           state={state}
           submitting={submitting}
           harnessType={harnessType}
-          setHarnessType={setHarnessType}
+          setHarnessType={handleHarnessChange}
           agentName={agentName}
           setAgentName={setAgentName}
           agentNameValid={agentNameValid}
+          agentNameMaxForHarness={agentNameMaxForHarness}
           image={image}
           onImageChange={handleImageChange}
           imageValid={imageValid}
@@ -375,10 +478,34 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           onSubmit={handleSubmit}
           onClose={onClose}
           onResetForCreateAnother={reset}
+          defaultsError={defaultsError}
+          defaultsErrorBlocksSubmit={defaultsErrorBlocksSubmit}
         />
       </div>
     </div>,
     document.body,
+  )
+}
+
+/**
+ * Visual marker on field labels that the field is required. Asterisk
+ * is the established convention for sighted users. Marked
+ * `aria-hidden="true"` because the canonical screen-reader signal
+ * is the input's native `required` attribute — the asterisk is
+ * presentational supplement, not the semantic source of truth.
+ * (Round-1 audit on PR #39 flagged that aria-label="required" duped
+ * the native required attribute; aria-hidden is the conventional
+ * pattern for purely decorative requirement markers.)
+ */
+function RequiredMark() {
+  return (
+    <span
+      className="text-destructive ml-0.5"
+      aria-hidden="true"
+      data-testid="required-mark"
+    >
+      *
+    </span>
   )
 }
 
@@ -390,6 +517,7 @@ interface FormBodyProps {
   agentName: string
   setAgentName: (s: string) => void
   agentNameValid: boolean
+  agentNameMaxForHarness: number
   image: string
   onImageChange: (s: string) => void
   imageValid: boolean
@@ -400,6 +528,17 @@ interface FormBodyProps {
   onSubmit: (e: React.FormEvent) => void
   onClose: () => void
   onResetForCreateAnother: () => void
+  /** Non-null when the harness-defaults endpoint returned non-200.
+   *  Format: `<error-code>: <detail>` from the response body, or
+   *  `HTTP <status>` if the body wasn't parseable. Surfaces a banner
+   *  above the form so operators see deployment misconfigs (e.g.
+   *  PrefixTooLongForHarness) rather than a working-looking form
+   *  that fails every submit. */
+  defaultsError: string | null
+  /** True when the defaults error means NO legal agent name is
+   *  creatable (today: PrefixTooLongForHarness). Disables submit
+   *  + uses a definitive banner copy. */
+  defaultsErrorBlocksSubmit: boolean
 }
 
 function FormBody({
@@ -410,6 +549,7 @@ function FormBody({
   agentName,
   setAgentName,
   agentNameValid,
+  agentNameMaxForHarness,
   image,
   onImageChange,
   imageValid,
@@ -420,6 +560,8 @@ function FormBody({
   onSubmit,
   onClose,
   onResetForCreateAnother,
+  defaultsError,
+  defaultsErrorBlocksSubmit,
 }: FormBodyProps) {
   if (state.kind === 'success') {
     const r = state.response
@@ -508,6 +650,51 @@ function FormBody({
           ✕
         </button>
       </div>
+
+      {defaultsError && (
+        <div
+          role="alert"
+          className={
+            defaultsErrorBlocksSubmit
+              ? 'rounded border border-destructive/50 bg-destructive/10 p-3 text-sm'
+              : 'rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm'
+          }
+          data-testid="create-agent-defaults-error"
+        >
+          <div
+            className={
+              defaultsErrorBlocksSubmit
+                ? 'font-medium text-destructive mb-1'
+                : 'font-medium text-amber-700 mb-1'
+            }
+          >
+            {defaultsErrorBlocksSubmit
+              ? 'Cannot create agents — deployment misconfigured'
+              : 'Form pre-fill unavailable'}
+          </div>
+          <div className="text-xs">
+            <code>{defaultsError}</code>
+          </div>
+          <div className="text-xs mt-1 text-muted-foreground">
+            {defaultsErrorBlocksSubmit ? (
+              <>
+                The deployment prefix leaves no room for any legal
+                agent name under the AWS 32-char target-group-name
+                limit. Submit is disabled until the prefix is fixed.
+                Check MC logs for the offending value.
+              </>
+            ) : (
+              <>
+                The deployment&apos;s harness defaults endpoint
+                failed. Per-deployment constraints (e.g. agent name
+                length cap) won&apos;t be enforced client-side, but
+                the server-side gate still applies — submissions
+                will be validated there. Check MC logs for details.
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {state.kind === 'error' && (
         <div
@@ -601,7 +788,7 @@ function FormBody({
 
       <div>
         <label htmlFor="agentName" className="block text-sm font-medium mb-1.5">
-          Agent name
+          Agent name <RequiredMark />
         </label>
         <input
           id="agentName"
@@ -612,7 +799,7 @@ function FormBody({
           disabled={submitting}
           required
           minLength={3}
-          maxLength={32}
+          maxLength={agentNameMaxForHarness}
           autoCapitalize="off"
           autoCorrect="off"
           autoComplete="off"
@@ -629,16 +816,26 @@ function FormBody({
           }`}
         >
           Lowercase letters, digits, hyphens. Must start and end with a
-          letter or digit (no leading/trailing hyphens). 3–32 chars.
-          Date prefixes like <code>2026-04-30-bot</code> work. Used in
-          IAM ARN templating — security control, not just a UX
-          validator.
+          letter or digit (no leading/trailing hyphens). 3–
+          {agentNameMaxForHarness} chars.
+          {agentNameMaxForHarness < 32 && (
+            <>
+              {' '}
+              The AWS target-group name <code>{`{prefix}-agent-{name}`}</code>{' '}
+              is capped at 32 chars; this deployment&apos;s prefix
+              overhead leaves {agentNameMaxForHarness} chars for the
+              agent-name segment.
+            </>
+          )}{' '}
+          Date prefixes like <code>2026-04-30</code> work as long as
+          the total fits. Used in IAM ARN templating — security
+          control, not just a UX validator.
         </p>
       </div>
 
       <div>
         <label htmlFor="image" className="block text-sm font-medium mb-1.5">
-          Container image
+          Container image <RequiredMark />
         </label>
         <input
           id="image"
@@ -677,7 +874,7 @@ function FormBody({
           htmlFor="roleDescription"
           className="block text-sm font-medium mb-1.5"
         >
-          Role description
+          Role description <RequiredMark />
         </label>
         <textarea
           id="roleDescription"

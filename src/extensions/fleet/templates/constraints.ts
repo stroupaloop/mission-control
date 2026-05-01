@@ -21,6 +21,17 @@ export const HARNESS_TYPES = ['companion/openclaw'] as const
 export type HarnessType = (typeof HARNESS_TYPES)[number]
 
 /**
+ * Minimum allowed agentName length. Encoded structurally in
+ * AGENT_NAME_RE (1 start + 1 middle + 1 end = 3 chars min), but
+ * exported separately so callers comparing against the cap (e.g.
+ * harness-defaults's degenerate-prefix gate) don't have to reverse-
+ * engineer it from the regex literal. Round-4 audit on PR #39
+ * caught the off-by-two when the gate compared against 0 instead of
+ * the regex min.
+ */
+export const AGENT_NAME_MIN_LENGTH = 3
+
+/**
  * agentName must:
  * - start with an alphanumeric (no leading hyphen — ELBv2 + ECS
  *   reject names with leading hyphens).
@@ -29,6 +40,14 @@ export type HarnessType = (typeof HARNESS_TYPES)[number]
  * - be 3-32 chars total (the {1,30} middle window plus start + end
  *   anchors). Combined-name caps (`{prefix}-agent-{name}` ≤ 32 for
  *   target groups) are enforced separately by validateOpenClawInput.
+ *
+ * Note: the 32-char upper bound here is aspirational for any
+ * non-empty deployment prefix. With OpenClaw's `{prefix}-agent-`
+ * overhead (prefix + 7 chars), no real deployment can use the full
+ * 32. The AWS target-group-name limit (TARGET_GROUP_NAME_MAX_LENGTH
+ * in templates/openclaw.ts) is the operative cap; the regex's `{1,30}`
+ * literal would need a manual update if AWS ever raises the TG-name
+ * limit. Round-7 audit on PR #39 flagged the implicit coupling.
  *
  * Digit-start is permitted: AWS doesn't require letter-start for ECS
  * service names, ECS task-def families, or ELBv2 target group names
@@ -52,3 +71,17 @@ export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/
  */
 export const ROLE_DESCRIPTION_MAX_BYTES = 1024
 export const IMAGE_MAX_BYTES = 512
+
+/**
+ * Wire-protocol error code for the harness-defaults endpoint when
+ * the deployment prefix is so long that no legal agent name fits.
+ * Exported as a shared constant so the server (`api/harness-defaults.ts`)
+ * and client (`panels/create-agent-form.tsx`) reference the same
+ * literal — a server-side rename without updating the client would
+ * silently un-block the form-submit gate that this code triggers.
+ *
+ * Tests intentionally assert the literal string to protect against
+ * accidental rename of the wire shape — they do NOT import this
+ * constant. Round-11 audit on PR #39.
+ */
+export const PREFIX_TOO_LONG_ERROR = 'PrefixTooLongForHarness'

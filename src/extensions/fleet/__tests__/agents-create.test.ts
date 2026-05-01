@@ -91,7 +91,7 @@ const setRequiredEnv = () => {
 
 const validBody = () => ({
   harnessType: 'companion/openclaw',
-  agentName: 'hello-world',
+  agentName: 'hello-bot',
   roleDescription: 'Says hello',
   image: 'ghcr.io/stroupaloop/openclaw:sha-abc123',
 })
@@ -132,7 +132,7 @@ const happyPathMocks = () => {
       TargetGroups: [
         {
           TargetGroupArn:
-            'arn:aws:elasticloadbalancing:us-east-1:398152419239:targetgroup/ender-stack-dev-agent-hello-world/tg1',
+            'arn:aws:elasticloadbalancing:us-east-1:398152419239:targetgroup/ender-stack-dev-agent-hello-bot/tg1',
         },
       ],
     })
@@ -158,13 +158,13 @@ const happyPathMocks = () => {
     .mockResolvedValueOnce({
       taskDefinition: {
         taskDefinitionArn:
-          'arn:aws:ecs:us-east-1:398152419239:task-definition/ender-stack-dev-companion-openclaw-hello-world:1',
+          'arn:aws:ecs:us-east-1:398152419239:task-definition/ender-stack-dev-companion-openclaw-hello-bot:1',
       },
     })
     .mockResolvedValueOnce({
       service: {
         serviceArn:
-          'arn:aws:ecs:us-east-1:398152419239:service/ender-stack-dev/ender-stack-dev-companion-openclaw-hello-world',
+          'arn:aws:ecs:us-east-1:398152419239:service/ender-stack-dev/ender-stack-dev-companion-openclaw-hello-bot',
       },
     })
 }
@@ -221,6 +221,32 @@ describe('POST /api/fleet/agents — env validation', () => {
         process.env.MC_FLEET_IMAGE_REGISTRY_ALLOWLIST = original
       }
     }
+  })
+
+  it('returns 400 ValidationError when the resulting target-group name would exceed AWS 32-char limit (round-3b.2)', async () => {
+    // Real failure mode that bit operators in dev: a name like
+    // `260501-test1` (12 chars) passes the regex but produces a
+    // target-group name `ender-stack-dev-agent-260501-test1` (34
+    // chars) which AWS rejects AFTER task-def + log group are
+    // created — orphaning real billed resources. Pre-check fails
+    // fast with a clear 400 + no AWS calls made.
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ ...validBody(), agentName: 'agent-name-too-long' }),
+    )
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('ValidationError')
+    expect(json.detail).toContain('target group name')
+    expect(json.detail).toContain('agent-name-too-long')
+    expect(json.detail).toMatch(/Max agentName length here is \d+/)
+    // Round-10 audit P3: the "no orphaned resources" guarantee is
+    // load-bearing — the whole point of this pre-check. Assert
+    // explicitly so a regression that makes the pre-check fire
+    // AFTER any AWS call would fail loudly here.
+    expect(elbv2SendMock).not.toHaveBeenCalled()
+    expect(ecsSendMock).not.toHaveBeenCalled()
+    expect(logsSendMock).not.toHaveBeenCalled()
   })
 
   it('rejects agentName with invalid characters at the type-guard layer (defense-in-depth)', async () => {
@@ -321,15 +347,15 @@ describe('POST /api/fleet/agents — happy path', () => {
       }
     }
     expect(json.ok).toBe(true)
-    expect(json.agentName).toBe('hello-world')
+    expect(json.agentName).toBe('hello-bot')
     expect(json.resources.listenerPath).toBe(
-      '/agent/hello-world (+ /agent/hello-world/*)',
+      '/agent/hello-bot (+ /agent/hello-bot/*)',
     )
     expect(json.resources.logGroup).toBe(
-      '/ecs/ender-stack-dev/companion-openclaw-hello-world',
+      '/ecs/ender-stack-dev/companion-openclaw-hello-bot',
     )
     expect(json.resources.serviceArn).toContain(
-      'service/ender-stack-dev/ender-stack-dev-companion-openclaw-hello-world',
+      'service/ender-stack-dev/ender-stack-dev-companion-openclaw-hello-bot',
     )
   })
 
@@ -407,11 +433,11 @@ describe('POST /api/fleet/agents — happy path', () => {
     // Two explicit patterns prevent prefix-pair collisions (e.g.,
     // `bot` + `bot-test`).
     expect((input.Conditions as Array<Record<string, unknown>>)[0].Values).toEqual(
-      ['/agent/hello-world', '/agent/hello-world/*'],
+      ['/agent/hello-bot', '/agent/hello-bot/*'],
     )
     const actions = input.Actions as Array<Record<string, unknown>>
     expect(actions[0].TargetGroupArn).toContain(
-      'targetgroup/ender-stack-dev-agent-hello-world',
+      'targetgroup/ender-stack-dev-agent-hello-bot',
     )
   })
 })
@@ -568,13 +594,13 @@ describe('POST /api/fleet/agents — error handling', () => {
     expect(json.partialResources).toBeDefined()
     expect(json.partialResources?.taskDefinitionArn).toBe('arn:tdf-1')
     expect(json.partialResources?.targetGroupArn).toContain(
-      'targetgroup/ender-stack-dev-agent-hello-world',
+      'targetgroup/ender-stack-dev-agent-hello-bot',
     )
     expect(json.partialResources?.listenerRuleArn).toContain(
       'listener-rule/app/ender-stack-dev-agents-shared',
     )
     expect(json.partialResources?.logGroup).toBe(
-      '/ecs/ender-stack-dev/companion-openclaw-hello-world',
+      '/ecs/ender-stack-dev/companion-openclaw-hello-bot',
     )
   })
 })
@@ -588,7 +614,7 @@ describe('POST /api/fleet/agents — audit trail', () => {
     expect(vi.mocked(securityEvents.logSecurityEvent)).toHaveBeenCalledWith(
       expect.objectContaining({
         event_type: 'fleet.agent_created',
-        agent_name: 'hello-world',
+        agent_name: 'hello-bot',
         source: 'fleet',
       }),
     )

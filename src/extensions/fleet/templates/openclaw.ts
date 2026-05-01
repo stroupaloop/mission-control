@@ -235,6 +235,42 @@ export function renderTaskDefinition(
 }
 
 /**
+ * AWS hard limit on `aws_lb_target_group.name`. Reaching past this
+ * triggers a 400 ValidationError from `CreateTargetGroup` AFTER
+ * task-def + log-group have been created — orphaning real billed
+ * resources. Validate combined-name length BEFORE the AWS fan-out
+ * to fail fast with a clear message.
+ */
+export const TARGET_GROUP_NAME_MAX_LENGTH = 32
+
+/**
+ * Computes the OpenClaw target-group name for a given prefix + agent
+ * name. Single source of truth — used by both renderTargetGroup
+ * (which produces the actual CreateTargetGroup input) and by the
+ * handler-side length-cap pre-check + by the harness-defaults
+ * endpoint to compute the per-deployment max agent name length.
+ */
+export function targetGroupName(prefix: string, agentName: string): string {
+  return `${prefix}-agent-${agentName}`
+}
+
+/**
+ * Returns the maximum legal `agentName` length for a given deployment
+ * prefix, accounting for the `{prefix}-agent-` overhead and the AWS
+ * 32-char target-group-name limit. Negative or zero result indicates
+ * the prefix itself is too long for any usable agent name (the
+ * caller should surface a deployment-config error rather than try
+ * to validate user input against an impossible limit).
+ *
+ * For the canonical `ender-stack-dev` prefix: `32 - 22 = 10` chars
+ * available for the agent name segment.
+ */
+export function maxAgentNameLengthForPrefix(prefix: string): number {
+  // `{prefix}-agent-` overhead = prefix.length + 1 (dash) + 5 ('agent') + 1 (dash) = prefix.length + 7
+  return TARGET_GROUP_NAME_MAX_LENGTH - prefix.length - '-agent-'.length
+}
+
+/**
  * Renders CreateTargetGroup input. Name pattern `{prefix}-agent-{agentName}`
  * matches the IAM grant for ELBv2MutateAgentTargetGroups
  * (targetgroup ARN pattern under `{prefix}-agent-` with a wildcard tail).
@@ -248,7 +284,7 @@ export function renderTargetGroup(
   env: OpenClawAgentEnv,
 ): CreateTargetGroupCommandInput {
   return {
-    Name: `${env.prefix}-agent-${input.agentName}`,
+    Name: targetGroupName(env.prefix, input.agentName),
     Port: CONTAINER_PORT,
     Protocol: 'HTTP',
     VpcId: env.vpcId,

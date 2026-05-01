@@ -36,6 +36,7 @@ import {
   HARNESS_TYPES,
   type HarnessType,
 } from '@/extensions/fleet/templates/constraints'
+import { resolveFleetPrefix } from '@/extensions/fleet/lib/fleet-prefix'
 
 /**
  * POST /api/fleet/agents — create a new MC-managed agent end-to-end.
@@ -136,22 +137,21 @@ interface ResolvedEnv {
  * frequency, not a hot path).
  */
 function resolveEnv(): ResolvedEnv {
-  const clusterName = process.env.MC_FLEET_CLUSTER_NAME || 'ender-stack-dev'
-  const projectName =
-    process.env.MC_FLEET_PROJECT_NAME ||
-    clusterName.split('-').slice(0, -1).join('-')
-  const environment =
-    process.env.MC_FLEET_ENVIRONMENT || clusterName.split('-').pop() || 'dev'
+  // Cluster/project/env/prefix derivation lives in `lib/fleet-prefix.ts`
+  // — single source of truth shared with `harness-defaults.ts`. Round-7
+  // audit on PR #39 caught the prior duplicate logic as a drift risk.
+  const fleetPrefix = resolveFleetPrefix()
   return {
     region: process.env.AWS_REGION || 'us-east-1',
-    clusterName,
-    projectName,
-    environment,
-    prefix: `${projectName}-${environment}`,
+    clusterName: fleetPrefix.clusterName,
+    projectName: fleetPrefix.projectName,
+    environment: fleetPrefix.environment,
+    prefix: fleetPrefix.prefix,
     taskRoleArn: process.env.MC_AGENT_TASK_ROLE_ARN || '',
     executionRoleArn: process.env.MC_AGENT_EXECUTION_ROLE_ARN || '',
     logGroupPrefix:
-      process.env.MC_AGENT_LOG_GROUP_PREFIX || `/ecs/${clusterName}`,
+      process.env.MC_AGENT_LOG_GROUP_PREFIX ||
+      `/ecs/${fleetPrefix.clusterName}`,
     logRetentionDays: (() => {
       const raw = process.env.MC_AGENT_LOG_RETENTION_DAYS
       if (!raw) return 365
@@ -170,7 +170,7 @@ function resolveEnv(): ResolvedEnv {
       .filter(Boolean),
     securityGroupId: process.env.MC_AGENT_SECURITY_GROUP_ID || '',
     litellmAlbDnsName: process.env.MC_LITELLM_ALB_DNS_NAME || '',
-    sharedAlbName: `${projectName}-${environment}-agents-shared`,
+    sharedAlbName: `${fleetPrefix.prefix}-agents-shared`,
   }
 }
 
@@ -432,6 +432,10 @@ export async function POST(request: NextRequest) {
   }
 
   // Per-harness validation. Throws on bad input — caught below as 400.
+  // Pass `resolved.prefix` so the validator can also enforce
+  // deployment-aware constraints (target-group-name combined-length
+  // cap for OpenClaw — AWS rejects > 32 chars AFTER task-def +
+  // log-group are created, orphaning real billed resources).
   // ImageAllowlistConfigError is a special case: thrown when the env
   // var MC_FLEET_IMAGE_REGISTRY_ALLOWLIST contains a malformed regex
   // pattern. That's an operator misconfiguration, not a request
@@ -440,7 +444,7 @@ export async function POST(request: NextRequest) {
   // it as a 500 ConfigurationError that names the bad pattern so the
   // operator can fix the env var rather than the request body.
   try {
-    template.validateInput(input)
+    template.validateInput(input, resolved.prefix)
   } catch (err) {
     if (err instanceof ImageAllowlistConfigError) {
       logger.error(

@@ -74,11 +74,18 @@ describe('GET /api/fleet/harness-defaults', () => {
     const resp = await GET(mkRequest())
     expect(resp.status).toBe(200)
     const json = (await resp.json()) as {
-      defaults: Record<string, { defaultImage: string | null }>
+      defaults: Record<
+        string,
+        { defaultImage: string | null; agentNameMaxLength: number }
+      >
     }
     expect(json.defaults['companion/openclaw'].defaultImage).toBe(
       '1.dkr.ecr.us-east-1.amazonaws.com/ender-stack/companion-openclaw:1dcff0d',
     )
+    // For prefix `ender-stack-dev`: 32 (TG max) - 15 (prefix) - 7
+    // ('-agent-') = 10. Server-computed so the form's maxLength
+    // attribute is accurate per-deployment.
+    expect(json.defaults['companion/openclaw'].agentNameMaxLength).toBe(10)
   })
 
   it('returns null defaultImage when the smoke-test service does not exist (fresh cluster)', async () => {
@@ -180,6 +187,52 @@ describe('GET /api/fleet/harness-defaults', () => {
     expect(firstCall.input.services?.[0]).toBe(
       'foo-bar-staging-companion-openclaw-smoke-test',
     )
+  })
+
+  it('returns 500 PrefixTooLongForHarness when the deployment prefix leaves no room for any legal agent name (round-2 audit on PR #39)', async () => {
+    // Round-2 audit caught the degenerate path: a long prefix
+    // makes maxAgentNameLengthForPrefix return less than the regex
+    // min (3). The form would silently fall back to maxLength=32
+    // and the operator would see every submission rejected with a
+    // confusing 400. Surface the misconfig at the endpoint instead
+    // with a clear 500 + the prefix named in detail.
+    delete process.env.MC_FLEET_PROJECT_NAME
+    delete process.env.MC_FLEET_ENVIRONMENT
+    process.env.MC_FLEET_CLUSTER_NAME =
+      'this-is-an-extremely-long-cluster-name-staging' // 47 chars
+
+    const GET = await importHandler()
+    const resp = await GET(mkRequest())
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('PrefixTooLongForHarness')
+    // Round-4 audit: detail names the prefix so operators without
+    // log access can self-diagnose.
+    expect(json.detail).toContain('this-is-an-extremely-long')
+    expect(json.detail).toMatch(/at least 3/)
+  })
+
+  it('catches the off-by-two boundary: 23-char prefix → maxLen=2 → 500 (regex min is 3, not 1) — round-4 audit on PR #39', async () => {
+    // Round-4 audit caught: prior threshold was `openclawMaxLen <= 0`,
+    // but AGENT_NAME_RE requires minimum 3 chars. A 23-char prefix
+    // (e.g. `acme-platform-staging-x`) produces maxLen=2 which
+    // passes the old guard, endpoint returns 200 with
+    // `agentNameMaxLength: 2`, form sets maxLength=2 < minLength=3
+    // — every submission rejected. New threshold uses
+    // AGENT_NAME_MIN_LENGTH so the gate fires correctly.
+    delete process.env.MC_FLEET_PROJECT_NAME
+    delete process.env.MC_FLEET_ENVIRONMENT
+    // For a 23-char prefix: 23 + 7 ('-agent-') = 30 overhead →
+    // maxLen = 32 - 30 = 2. That's < AGENT_NAME_MIN_LENGTH (3),
+    // so the gate must fire. Pre-fix gate (`<= 0`) let this
+    // through with maxLen=2 → form set maxLength=2 < minLength=3.
+    process.env.MC_FLEET_CLUSTER_NAME = 'endpoint-22charname-dev' // 23 chars
+
+    const GET = await importHandler()
+    const resp = await GET(mkRequest())
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('PrefixTooLongForHarness')
   })
 
   it('rejects unauthorized callers via requireRole', async () => {

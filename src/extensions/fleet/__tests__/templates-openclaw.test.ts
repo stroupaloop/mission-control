@@ -8,9 +8,13 @@ import {
   type OpenClawAgentEnv,
 } from '../templates/openclaw'
 import { HARNESS_TEMPLATES } from '../templates'
+import {
+  AGENT_NAME_MIN_LENGTH,
+  AGENT_NAME_RE,
+} from '../templates/constraints'
 
 const fixtureInput: OpenClawAgentInput = {
-  agentName: 'hello-world',
+  agentName: 'hello-bot',
   roleDescription: 'Says hello',
   image: 'ghcr.io/stroupaloop/openclaw:sha-abc123',
 }
@@ -39,7 +43,7 @@ const fixtureEnv: OpenClawAgentEnv = {
 describe('renderTaskDefinition', () => {
   it('builds the family from prefix + agent name', () => {
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
-    expect(taskDef.family).toBe('ender-stack-dev-companion-openclaw-hello-world')
+    expect(taskDef.family).toBe('ender-stack-dev-companion-openclaw-hello-bot')
   })
 
   it('sets Fargate-compatible launch type and awsvpc network', () => {
@@ -55,7 +59,7 @@ describe('renderTaskDefinition', () => {
     const env = gateway?.environment ?? []
     expect(env).toContainEqual({
       name: 'OPENCLAW_AGENT_NAME',
-      value: 'hello-world',
+      value: 'hello-bot',
     })
     // OPENCLAW_MODEL was dropped in Beat 3b.1 — LiteLLM's smart-router
     // is the authoritative model-selection layer; per-agent tier
@@ -78,7 +82,7 @@ describe('renderTaskDefinition', () => {
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
     const opts = taskDef.containerDefinitions?.[0]?.logConfiguration?.options
     expect(opts?.['awslogs-group']).toBe(
-      '/ecs/ender-stack-dev/companion-openclaw-hello-world',
+      '/ecs/ender-stack-dev/companion-openclaw-hello-bot',
     )
     expect(opts?.['awslogs-region']).toBe('us-east-1')
   })
@@ -88,7 +92,7 @@ describe('renderTaskDefinition', () => {
     const tags = taskDef.tags ?? []
     expect(tags).toContainEqual({ key: 'Component', value: 'agent-harness' })
     expect(tags).toContainEqual({ key: 'Harness', value: 'companion/openclaw' })
-    expect(tags).toContainEqual({ key: 'AgentName', value: 'hello-world' })
+    expect(tags).toContainEqual({ key: 'AgentName', value: 'hello-bot' })
   })
 
   it('uses the IAM-aligned task + exec role ARNs', () => {
@@ -101,7 +105,7 @@ describe('renderTaskDefinition', () => {
 describe('renderTargetGroup', () => {
   it('uses the prefix-agent-{name} pattern (singular agent vs plural agents on the LB)', () => {
     const tg = renderTargetGroup(fixtureInput, fixtureEnv)
-    expect(tg.Name).toBe('ender-stack-dev-agent-hello-world')
+    expect(tg.Name).toBe('ender-stack-dev-agent-hello-bot')
   })
 
   it('uses /healthz on port 18789 (matches OpenClaw gateway)', () => {
@@ -122,10 +126,10 @@ describe('renderService', () => {
     const svc = renderService(fixtureInput, fixtureEnv, {
       taskDefinitionArn: 'arn:aws:ecs:us-east-1:398152419239:task-definition/x:1',
       targetGroupArn:
-        'arn:aws:elasticloadbalancing:us-east-1:398152419239:targetgroup/ender-stack-dev-agent-hello-world/abc',
+        'arn:aws:elasticloadbalancing:us-east-1:398152419239:targetgroup/ender-stack-dev-agent-hello-bot/abc',
     })
     expect(svc.serviceName).toBe(
-      'ender-stack-dev-companion-openclaw-hello-world',
+      'ender-stack-dev-companion-openclaw-hello-bot',
     )
   })
 
@@ -168,8 +172,8 @@ describe('renderListenerRule', () => {
     // Two patterns: exact-name root + subtree. Prevents `/agent/bot-test/api`
     // from matching a `/agent/bot*` glob and silently routing to `bot`.
     expect(rule.pathPatterns).toEqual([
-      '/agent/hello-world',
-      '/agent/hello-world/*',
+      '/agent/hello-bot',
+      '/agent/hello-bot/*',
     ])
     expect(rule.targetGroupArn).toBe('arn:tg')
     expect(rule.priority).toBe(1234)
@@ -329,5 +333,49 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
     expect(() =>
       validate({ ...fixtureInput, roleDescription: '   ' }),
     ).toThrow(/roleDescription/)
+  })
+
+  it('enforces deployment-aware combined-name cap when prefix is provided (round-2 audit on PR #39)', () => {
+    // Round-2 audit on PR #39 relocated the combined-name check
+    // from the handler's pre-check INTO validateInput so any future
+    // caller of validateOpenClawInput (test helpers, alternative
+    // harnesses) gets the same enforcement. Prefix is optional —
+    // input-only callers (most tests above) skip the check.
+    // For prefix `ender-stack-dev` (15 chars) + `-agent-` (7) = 22
+    // overhead → max agentName = 10. `a-bit-too-long-12c` is 18
+    // chars, well over.
+    expect(() =>
+      validate(
+        { ...fixtureInput, agentName: 'a-bit-too-long-12c' },
+        'ender-stack-dev',
+      ),
+    ).toThrow(/target group name/)
+    // Same input without prefix → input-only path → no combined-name
+    // check → passes.
+    expect(() =>
+      validate({ ...fixtureInput, agentName: 'a-bit-too-long-12c' }),
+    ).not.toThrow()
+    // Within the cap with prefix → passes.
+    expect(() =>
+      validate({ ...fixtureInput, agentName: 'bot-v2-prd' }, 'ender-stack-dev'),
+    ).not.toThrow()
+  })
+})
+
+describe('AGENT_NAME_MIN_LENGTH ↔ AGENT_NAME_RE coupling', () => {
+  // Round-10 audit on PR #39 (P2): AGENT_NAME_MIN_LENGTH is a
+  // separate exported constant that the harness-defaults
+  // PrefixTooLongForHarness gate compares against. It must stay
+  // in sync with the regex's effective minimum (currently
+  // `[a-z0-9][a-z0-9-]{1,30}[a-z0-9]` → 3 chars). If the regex
+  // is ever relaxed (e.g. to allow 1-char names) without updating
+  // the constant, the gate would silently allow misconfigs through.
+  // This test makes the coupling machine-checked.
+  it('AGENT_NAME_MIN_LENGTH equals the regex effective minimum (3)', () => {
+    expect(AGENT_NAME_MIN_LENGTH).toBe(3)
+    // 2-char names rejected.
+    expect(AGENT_NAME_RE.test('ab')).toBe(false)
+    // Boundary: AGENT_NAME_MIN_LENGTH-char names accepted.
+    expect(AGENT_NAME_RE.test('abc')).toBe(true)
   })
 })
