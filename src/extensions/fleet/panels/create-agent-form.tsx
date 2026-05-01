@@ -678,13 +678,19 @@ function FormBody({
         >
           Lowercase letters, digits, hyphens. Must start and end with a
           letter or digit (no leading/trailing hyphens). 3–
-          {agentNameMaxForHarness} chars (this deployment&apos;s cap is
-          tighter than the regex upper bound because the AWS
-          target-group name <code>{`{prefix}-agent-{name}`}</code> is
-          capped at 32 chars). Date prefixes like{' '}
-          <code>2026-04-30</code> work as long as the total fits. Used
-          in IAM ARN templating — security control, not just a UX
-          validator.
+          {agentNameMaxForHarness} chars.
+          {agentNameMaxForHarness < 32 && (
+            <>
+              {' '}
+              The AWS target-group name <code>{`{prefix}-agent-{name}`}</code>{' '}
+              is capped at 32 chars; this deployment&apos;s prefix
+              overhead leaves {agentNameMaxForHarness} chars for the
+              agent-name segment.
+            </>
+          )}{' '}
+          Date prefixes like <code>2026-04-30</code> work as long as
+          the total fits. Used in IAM ARN templating — security
+          control, not just a UX validator.
         </p>
       </div>
 
