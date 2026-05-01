@@ -15,35 +15,27 @@ import type { CreateTargetGroupCommandInput } from '@aws-sdk/client-elastic-load
  * patterns derived from `{prefix}-companion-openclaw-{name}`. Drift
  * between the templated names here and the IAM scopes will silently 403.
  *
- * KNOWN GAP — runtime config wiring:
- *   This template emits a single-container (gateway-only) task. The
- *   canonical Terraform-bootstrapped openclaw module
- *   (ender-stack/terraform/modules/companion/openclaw/main.tf) ships a
- *   TWO-container task with an init-config sidecar that templates
- *   `openclaw.json` onto an EFS access point before the gateway
- *   starts; the gateway mounts that EFS read-only and reads its
- *   config from disk.
+ * Two-container task shape (init-config + gateway, dependsOn-gated)
+ * with three ephemeral Fargate volumes (config, workspace, plugin-deps).
+ * Resolves ender-stack#215. Mirrors the smoke-test pattern at
+ * ender-stack/terraform/modules/companion/openclaw/main.tf except for
+ * the storage backing — smoke-test uses EFS, MC-created agents use
+ * Fargate ephemeral. The all-ephemeral choice fits the platform's
+ * external-state architecture (durable state lives in Mem0/KB/S3,
+ * not local disk); see research/openclaw-storage-convergence.md
+ * (filed alongside this PR's ender-stack-side companion if any).
  *
- *   MC-deployed agents created via this template do NOT get that
- *   wiring. The endpoint creates the ECS service successfully, but
- *   the gateway task will fail to start cleanly until one of the
- *   following lands as a follow-up:
- *
- *     (a) OpenClaw runtime gains env-var-only config mode (no EFS
- *         dependency). Requires an upstream change to OpenClaw.
- *     (b) MC handler wires EFS volumes + an init-config container
- *         when rendering the task-def. Requires either a pool of
- *         pre-provisioned EFS access points OR an `efs:CreateAccessPoint`
- *         IAM grant on MC's task role.
- *
- *   Tracked as ender-stack#215. The endpoint is shipping in Beat 3a
- *   so the API surface, IAM permissions, ALB integration, and
- *   tagging conventions can be exercised + reviewed without blocking
- *   on the runtime resolution. The first /fleet/new dev validation
- *   will fail health checks until #215 closes.
+ * Phase-1 boot mode: gateway runs with `--allow-unconfigured`
+ * (baked into the image's entrypoint.sh). The init-config sidecar
+ * pre-creates `OPENCLAW_STATE_DIR` and its known-required subdirs
+ * (plugin-runtime-deps, agents, canvas) so OpenClaw's non-recursive
+ * mkdir at startup doesn't ENOENT against an empty mount. No
+ * openclaw.json is written today — schema-aware templating is its
+ * own multi-day investigation deferred to a Phase-2.x follow-up.
  *
  * Per-agent extensions, persona configs, and channel-token binding
- * are out of scope for Phase 2.2 (deferred to Phase 2.3).
+ * land in Phase 2.4 (#247) — Slack app manifest + per-agent
+ * credential paste-back flow.
  */
 
 /**
@@ -144,12 +136,68 @@ function tagsToElbv2(
  * `{prefix}-companion-openclaw-{agentName}` and matches the IAM
  * authorization patterns (`task-definition/{prefix}-companion-*:*`).
  */
+/**
+ * Mount path constants — used by both the init-config and gateway
+ * containers. These match the upstream OpenClaw image's expected
+ * layout (verified against the smoke-test task-def in
+ * ender-stack/terraform/modules/companion/openclaw/main.tf): config
+ * lives at `/home/node/.openclaw`, the workspace mount nests inside
+ * it at `/home/node/.openclaw/workspace`, and plugin staging is a
+ * dedicated mount under the workspace tree to isolate it from any
+ * future workspace-storage-backing changes (smoke-test originally
+ * hit stale-lock crashes when plugin staging shared an EFS volume
+ * with workspace state — see ender-stack#207).
+ */
+const CONFIG_MOUNT_PATH = '/home/node/.openclaw'
+const WORKSPACE_MOUNT_PATH = '/home/node/.openclaw/workspace'
+const PLUGIN_DEPS_MOUNT_PATH =
+  '/home/node/.openclaw/workspace/.openclaw/plugin-runtime-deps'
+const STATE_DIR = '/home/node/.openclaw/workspace/.openclaw'
+
 export function renderTaskDefinition(
   input: OpenClawAgentInput,
   env: OpenClawAgentEnv,
 ): RegisterTaskDefinitionCommandInput {
   const name = resourceName(env.prefix, input.agentName)
   const logGroup = `${env.logGroupPrefix}/companion-openclaw-${input.agentName}`
+
+  // Shared env across both containers. init-config reads
+  // OPENCLAW_STATE_DIR to know where to pre-create state subdirs;
+  // gateway reads it at runtime so OpenClaw's mutable-state writes
+  // land on the RW workspace mount instead of the RO config mount.
+  // AGENT_NAME (no OPENCLAW_ prefix) is the env name init-config.sh
+  // expects today; OPENCLAW_AGENT_NAME is kept for backward compat
+  // with anything reading the namespaced form.
+  //
+  // OPENCLAW_ROLE_DESCRIPTION becomes part of the agent's runtime
+  // role prompt. Admin-supplied free text written into a task-def
+  // revision (AWS retains revisions indefinitely; anyone with
+  // ecs:DescribeTaskDefinition can read). Treat as a permanent
+  // prompt-injection surface: a crafted description survives
+  // container restarts and survives the agent itself. Mitigations:
+  // endpoint is admin-only; ROLE_DESCRIPTION_MAX_BYTES caps blast
+  // radius; Beat 3b form surfaces operator guidance at submit time.
+  // Multi-operator approval is a Phase 2.x hardening follow-up.
+  //
+  // http:// on LITELLM_API_BASE is intentional — internal-only ALB
+  // (private subnets, internal=true, no ACM cert). Don't "fix" to
+  // https without coordinating ACM Private CA provisioning.
+  const sharedEnvironment = [
+    { name: 'OPENCLAW_AGENT_NAME', value: input.agentName },
+    { name: 'AGENT_NAME', value: input.agentName },
+    { name: 'OPENCLAW_ROLE_DESCRIPTION', value: input.roleDescription },
+    { name: 'LITELLM_API_BASE', value: `http://${env.litellmAlbDnsName}` },
+    { name: 'OPENCLAW_STATE_DIR', value: STATE_DIR },
+  ]
+
+  const logConfig = (streamPrefix: string) => ({
+    logDriver: 'awslogs' as const,
+    options: {
+      'awslogs-group': logGroup,
+      'awslogs-region': env.region,
+      'awslogs-stream-prefix': streamPrefix,
+    },
+  })
 
   return {
     family: name,
@@ -159,50 +207,95 @@ export function renderTaskDefinition(
     memory: '1024',
     taskRoleArn: env.taskRoleArn,
     executionRoleArn: env.executionRoleArn,
+    // Three ephemeral Fargate volumes. No `efsVolumeConfiguration` ⇒
+    // emptyDir-like overlay backed by Fargate's 21 GiB ephemeral
+    // storage. Resets every task launch — config is rebuilt by the
+    // init-config sidecar each boot, workspace state is intentionally
+    // ephemeral (durable state lives in Mem0/KB/S3 per platform-
+    // decisions, not local disk). plugin-deps is its own volume
+    // (NOT nested under workspace) to mirror the smoke-test pattern:
+    // a future workspace-EFS switch shouldn't drag plugin staging
+    // onto EFS.
+    volumes: [{ name: 'config' }, { name: 'workspace' }, { name: 'plugin-deps' }],
     containerDefinitions: [
+      // init-config sidecar — runs the same image but overrides
+      // entryPoint to invoke the bundled init-config.sh. The script:
+      //  - removes any stale openclaw.json at the config mount root
+      //    (Phase-1 boots --allow-unconfigured per the image's
+      //    entrypoint.sh)
+      //  - pre-creates OPENCLAW_STATE_DIR + state subdirs
+      //    (plugin-runtime-deps, agents, canvas) so OpenClaw's
+      //    non-recursive mkdir at startup doesn't ENOENT against an
+      //    empty workspace mount
+      // Gateway's `dependsOn` ensures it doesn't start until init-
+      // config exits 0; failure here aborts the task launch cleanly.
+      {
+        name: 'init-config',
+        image: input.image,
+        essential: false,
+        entryPoint: ['/usr/local/bin/init-config.sh'],
+        // Empty command so any image CMD is fully overridden — the
+        // smoke-test pattern. Without this, a future image change
+        // that adds a CMD (e.g. extra flags) would silently get
+        // appended to init-config.sh and possibly break it.
+        command: [],
+        environment: sharedEnvironment,
+        mountPoints: [
+          {
+            sourceVolume: 'config',
+            containerPath: CONFIG_MOUNT_PATH,
+            readOnly: false,
+          },
+          {
+            sourceVolume: 'workspace',
+            containerPath: WORKSPACE_MOUNT_PATH,
+            readOnly: false,
+          },
+        ],
+        logConfiguration: logConfig('init-config'),
+      },
       {
         name: 'gateway',
         image: input.image,
         essential: true,
+        // Gateway waits for init-config to SUCCESS — task launch
+        // fails fast if init-config can't prep the mounts.
+        dependsOn: [{ containerName: 'init-config', condition: 'SUCCESS' }],
         portMappings: [
           {
             containerPort: CONTAINER_PORT,
             protocol: 'tcp',
           },
         ],
-        environment: [
-          { name: 'OPENCLAW_AGENT_NAME', value: input.agentName },
-          // OPENCLAW_ROLE_DESCRIPTION becomes part of the agent's runtime
-          // role prompt. It is admin-supplied free text written into a
-          // task-def revision, which AWS retains indefinitely and
-          // anyone with `ecs:DescribeTaskDefinition` can read. Treat
-          // this as a permanent prompt-injection surface: a crafted
-          // description survives container restarts AND survives the
-          // agent itself (deregistered task-def revisions still serve
-          // describe calls until deleted out-of-band). Mitigations:
-          //   - Endpoint is admin-only (`requireRole('admin')`).
-          //   - ROLE_DESCRIPTION_MAX_BYTES cap (templates/index.ts)
-          //     bounds blast radius per agent.
-          //   - The Beat 3b form surfaces "treat as permanent +
-          //     public" guidance to the operator at submit time.
-          //
-          // Not in scope here: a secondary approval gate (e.g.
-          // require a second admin to approve before the task-def is
-          // registered). The phase-2 vertical slice ships with the
-          // single-admin trust model; multi-operator approval is a
-          // Phase 2.x hardening follow-up if/when that model expands
-          // to non-admin operator roles.
-          { name: 'OPENCLAW_ROLE_DESCRIPTION', value: input.roleDescription },
-          // OPENCLAW_MODEL removed in Beat 3b.1 — see the
-          // OpenClawAgentInput interface above for rationale (LiteLLM
-          // smart-router is authoritative; per-agent tier was either
-          // ignored or actively conflicted with routing decisions).
-          // http:// is intentional — the LiteLLM ALB is internal-only
-          // (private subnets, internal=true) with no ACM cert. Same
-          // disposition as every other VPC-internal service in the
-          // platform. Don't "fix" this to https:// without coordinating
-          // with ACM Private CA provisioning.
-          { name: 'LITELLM_API_BASE', value: `http://${env.litellmAlbDnsName}` },
+        environment: sharedEnvironment,
+        mountPoints: [
+          // config mounts read-only — gateway reads openclaw.json
+          // (or boots --allow-unconfigured if absent) from this path.
+          {
+            sourceVolume: 'config',
+            containerPath: CONFIG_MOUNT_PATH,
+            readOnly: true,
+          },
+          // workspace mounts RW — OpenClaw writes mutable state
+          // (canvas, agents, etc) here. Nested under config's path;
+          // ECS overlay handles the nesting correctly. Per-task
+          // ephemeral — resets on task restart, durable state lives
+          // externally (Mem0/KB/S3).
+          {
+            sourceVolume: 'workspace',
+            containerPath: WORKSPACE_MOUNT_PATH,
+            readOnly: false,
+          },
+          // plugin-deps at the upstream-expected plugin staging
+          // path. Separate volume so a future workspace backing
+          // change (ephemeral → EFS) doesn't drag plugin staging
+          // with it (smoke-test originally hit stale-lock crashes
+          // when plugin staging shared EFS with workspace state).
+          {
+            sourceVolume: 'plugin-deps',
+            containerPath: PLUGIN_DEPS_MOUNT_PATH,
+            readOnly: false,
+          },
         ],
         healthCheck: {
           command: [
@@ -212,16 +305,15 @@ export function renderTaskDefinition(
           interval: 30,
           timeout: 5,
           retries: 3,
-          startPeriod: 20,
+          // Bumped from 20 → 180s (#215). Init-config script (~5s) +
+          // gateway cold-start (~30-60s) + plugin staging (~30-90s
+          // on a cold mount) adds materially on top of the bare
+          // gateway-only boot the prior 20s targeted. 180s gives
+          // margin without making real failures take 3+ minutes to
+          // surface as unhealthy.
+          startPeriod: 180,
         },
-        logConfiguration: {
-          logDriver: 'awslogs',
-          options: {
-            'awslogs-group': logGroup,
-            'awslogs-region': env.region,
-            'awslogs-stream-prefix': 'gateway',
-          },
-        },
+        logConfiguration: logConfig('gateway'),
       },
     ],
     tags: tagsToEcs({
@@ -344,7 +436,16 @@ export function renderService(
         containerPort: CONTAINER_PORT,
       },
     ],
-    healthCheckGracePeriodSeconds: 60,
+    // Service-level grace ≥ task-level startPeriod. Task healthCheck
+    // startPeriod is 180s (#215) to cover init-config + gateway cold
+    // start + plugin staging. ECS would mark tasks unhealthy and
+    // start replacing them at the service-level boundary, so the
+    // service grace must be ≥ the task health-check start window or
+    // the rollout enters a kill-loop before the task ever has a
+    // chance to come up. 300s gives 120s margin over the task start
+    // period for the first /healthz pass after the start window
+    // expires.
+    healthCheckGracePeriodSeconds: 300,
     tags: tagsToEcs({
       ...env.tags,
       Name: name,
