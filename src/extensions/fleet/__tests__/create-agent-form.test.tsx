@@ -429,6 +429,32 @@ describe('<CreateAgentForm />', () => {
     })
   })
 
+  it('does not re-pre-fill after the operator clears the field (round-2 audit)', async () => {
+    // Round-2 audit caught: previous guard fired on every empty-
+    // string state, so "Ctrl+A + Delete to retype" snapped the
+    // pre-filled value back. New guard tracks user-edit intent via
+    // a ref. Once the operator changes the field (even to ''), the
+    // pre-fill effect must NOT re-fire for the rest of the open
+    // session.
+    mockFetch({
+      defaultImage: 'ghcr.io/stroupaloop/openclaw:sha-default',
+    })
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    // Wait for the default to land.
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Container image/i)).toHaveValue(
+        'ghcr.io/stroupaloop/openclaw:sha-default',
+      )
+    })
+    // Operator clears the field — onChange fires with empty string.
+    fireEvent.change(screen.getByLabelText(/Container image/i), {
+      target: { value: '' },
+    })
+    // Field stays empty; the pre-fill effect does NOT re-fire.
+    await new Promise((r) => setTimeout(r, 30))
+    expect(screen.getByLabelText(/Container image/i)).toHaveValue('')
+  })
+
   it('does not stomp operator-typed image with the fetched default', async () => {
     // Simulate the operator typing before defaults arrive — the
     // useEffect that pre-fills only fires when `image === ''`.

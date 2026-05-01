@@ -80,6 +80,16 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
 
   const firstInputRef = useRef<HTMLInputElement | null>(null)
   const previousFocusRef = useRef<Element | null>(null)
+  const dialogRef = useRef<HTMLDivElement | null>(null)
+  // Tracks whether the operator has manually edited `image` since the
+  // modal last opened. Without this, a "select all + delete" to start
+  // fresh would re-trigger the pre-fill effect (image → '' → effect
+  // re-fires → snaps back to default), and the operator could never
+  // empty the field after a default loaded. Round-2 audit caught
+  // this — the previous `if (image !== '')` guard fired on
+  // *intentional* clears too. Ref (not state) since the value isn't
+  // user-visible and doesn't need to trigger re-renders.
+  const imageEditedRef = useRef(false)
 
   const submitting = state.kind === 'submitting'
 
@@ -111,11 +121,40 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     setAgentName('')
     setRoleDescription('')
     setHarnessType(HARNESS_TYPE_DEFAULT)
-    // image gets re-pre-filled from defaultsByHarness when open flips
-    // back to true (the existing pre-fill effect runs on harness-
-    // type change). Setting to '' here keeps the pre-fill logic
-    // simple — non-empty image suppresses the auto-fill.
     setImage('')
+    // Reset the edited flag too so the next open re-pre-fills from
+    // defaults (operator's intent from the closed-out session
+    // doesn't leak into the next).
+    imageEditedRef.current = false
+  }, [open])
+
+  // Focus trap (WAI-ARIA 1.2 Dialog Pattern §2.25). Without this,
+  // Tab/Shift+Tab from inside the modal escapes into background
+  // panel content. Collect focusable descendants on every Tab keydown
+  // (cheap; modal has ~6-8 tabbable elements) and cycle.
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Tab') return
+      const root = dialogRef.current
+      if (!root) return
+      const focusables = root.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )
+      if (focusables.length === 0) return
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      const active = document.activeElement
+      if (e.shiftKey && active === first) {
+        e.preventDefault()
+        last?.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
   }, [open])
 
   // Esc to dismiss. Only attached while open. Submit-in-flight blocks
@@ -161,12 +200,14 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   }, [open])
 
   // When defaults arrive (or harness selection changes), pre-fill
-  // `image` IFF the operator hasn't already typed something. Don't
-  // stomp in-progress input.
+  // `image` IFF the operator hasn't manually edited the field this
+  // session. The flag (not the field's empty-ness) is the gate so
+  // an intentional clear doesn't re-trigger the pre-fill —
+  // round-2 audit caught the empty-string-as-gate bug.
   useEffect(() => {
-    if (image !== '') return
+    if (imageEditedRef.current) return
     const d = defaultsByHarness[harnessType]
-    if (d) setImage(d)
+    if (d && image === '') setImage(d)
   }, [defaultsByHarness, harnessType, image])
 
   // Local pre-validation before POSTing — catches the obvious failures
@@ -265,6 +306,14 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     setRoleDescription('')
     setHarnessType(HARNESS_TYPE_DEFAULT)
     setState({ kind: 'idle' })
+    // "Create another" treats the just-applied default as the
+    // canonical starting point; the operator hasn't edited yet.
+    imageEditedRef.current = false
+  }
+
+  function handleImageChange(value: string) {
+    setImage(value)
+    imageEditedRef.current = true
   }
 
   function handleBackdropClick() {
@@ -284,6 +333,7 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
       data-testid="create-agent-modal-backdrop"
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="create-agent-title"
@@ -300,7 +350,7 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           setAgentName={setAgentName}
           agentNameValid={agentNameValid}
           image={image}
-          setImage={setImage}
+          onImageChange={handleImageChange}
           imageValid={imageValid}
           roleDescription={roleDescription}
           setRoleDescription={setRoleDescription}
@@ -325,7 +375,7 @@ interface FormBodyProps {
   setAgentName: (s: string) => void
   agentNameValid: boolean
   image: string
-  setImage: (s: string) => void
+  onImageChange: (s: string) => void
   imageValid: boolean
   roleDescription: string
   setRoleDescription: (s: string) => void
@@ -345,7 +395,7 @@ function FormBody({
   setAgentName,
   agentNameValid,
   image,
-  setImage,
+  onImageChange,
   imageValid,
   roleDescription,
   setRoleDescription,
@@ -578,7 +628,7 @@ function FormBody({
           id="image"
           type="text"
           value={image}
-          onChange={(e) => setImage(e.target.value)}
+          onChange={(e) => onImageChange(e.target.value)}
           disabled={submitting}
           required
           maxLength={IMAGE_MAX_BYTES}

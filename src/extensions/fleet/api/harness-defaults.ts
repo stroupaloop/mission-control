@@ -61,10 +61,19 @@ const ecsClient = new ECSClient({ region: AWS_REGION_AT_LOAD })
 // audit on PR #38.
 const ECS_CALL_TIMEOUT_MS = 5_000
 
-function withTimeout(): AbortSignal {
+interface TimeoutHandle {
+  signal: AbortSignal
+  /** Clear the underlying timer to avoid orphaned setTimeout callbacks
+   *  on the happy path (timer would fire 4.85-4.95s later, abort an
+   *  already-settled signal, and only then be GC'd). Round-2 audit
+   *  flagged this as P3 cleanup. */
+  clear: () => void
+}
+
+function withTimeout(): TimeoutHandle {
   const ac = new AbortController()
-  setTimeout(() => ac.abort(), ECS_CALL_TIMEOUT_MS)
-  return ac.signal
+  const id = setTimeout(() => ac.abort(), ECS_CALL_TIMEOUT_MS)
+  return { signal: ac.signal, clear: () => clearTimeout(id) }
 }
 
 function clusterName(): string {
@@ -88,13 +97,14 @@ async function openclawDefaultImage(): Promise<string | null> {
   const serviceName = `${projectPrefix()}-companion-openclaw-smoke-test`
 
   let taskDefArn: string | undefined
+  const t1 = withTimeout()
   try {
     const resp = await ecsClient.send(
       new DescribeServicesCommand({
         cluster,
         services: [serviceName],
       }),
-      { abortSignal: withTimeout() },
+      { abortSignal: t1.signal },
     )
     // Filter to ACTIVE only — DescribeServices returns DRAINING +
     // INACTIVE records too, with their last-known taskDefinition.
@@ -109,6 +119,8 @@ async function openclawDefaultImage(): Promise<string | null> {
       '[fleet] harness-defaults: DescribeServices failed; falling back to null default',
     )
     return null
+  } finally {
+    t1.clear()
   }
 
   if (!taskDefArn) {
@@ -117,10 +129,11 @@ async function openclawDefaultImage(): Promise<string | null> {
     return null
   }
 
+  const t2 = withTimeout()
   try {
     const tdResp = await ecsClient.send(
       new DescribeTaskDefinitionCommand({ taskDefinition: taskDefArn }),
-      { abortSignal: withTimeout() },
+      { abortSignal: t2.signal },
     )
     const gateway = tdResp.taskDefinition?.containerDefinitions?.find(
       (c) => c.name === 'openclaw-gateway',
@@ -132,6 +145,8 @@ async function openclawDefaultImage(): Promise<string | null> {
       '[fleet] harness-defaults: DescribeTaskDefinition failed; falling back to null default',
     )
     return null
+  } finally {
+    t2.clear()
   }
 }
 
