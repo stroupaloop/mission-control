@@ -88,10 +88,10 @@ describe('renderTaskDefinition', () => {
     expect(init?.command).toEqual([])
   })
 
-  it('passes the per-agent env vars on both containers', () => {
-    // Shared env block — init-config reads OPENCLAW_STATE_DIR to
-    // pre-create state subdirs; gateway reads it at runtime. Same
-    // block on both for consistency.
+  it('passes the common env vars (AGENT_NAME, OPENCLAW_AGENT_NAME, OPENCLAW_STATE_DIR) on both containers', () => {
+    // commonEnv: vars both containers actually consume. init-config
+    // uses OPENCLAW_STATE_DIR + AGENT_NAME for state-dir mkdir;
+    // gateway uses them at runtime.
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
     for (const containerName of ['init-config', 'gateway']) {
       const c = findContainer(taskDef, containerName)
@@ -102,10 +102,6 @@ describe('renderTaskDefinition', () => {
       })
       expect(env).toContainEqual({ name: 'AGENT_NAME', value: 'hello-bot' })
       expect(env).toContainEqual({
-        name: 'LITELLM_API_BASE',
-        value: 'http://internal-litellm.us-east-1.elb.amazonaws.com',
-      })
-      expect(env).toContainEqual({
         name: 'OPENCLAW_STATE_DIR',
         value: '/home/node/.openclaw/workspace/.openclaw',
       })
@@ -113,6 +109,33 @@ describe('renderTaskDefinition', () => {
       // catches accidental re-introduction.
       expect(env.find((e) => e?.name === 'OPENCLAW_MODEL')).toBeUndefined()
     }
+  })
+
+  it('places gateway-only env vars only on gateway, not on init-config', () => {
+    // Round-1 audit on PR #40: init-config.sh doesn't read
+    // OPENCLAW_ROLE_DESCRIPTION (prompt-injection surface) or
+    // LITELLM_API_BASE. Same task-def-level blast radius (both
+    // visible to ecs:DescribeTaskDefinition regardless), but
+    // splitting clarifies what each container actually needs.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    const init = findContainer(taskDef, 'init-config')
+    const gateway = findContainer(taskDef, 'gateway')
+    const initEnv = init?.environment ?? []
+    const gatewayEnv = gateway?.environment ?? []
+
+    expect(gatewayEnv).toContainEqual({
+      name: 'OPENCLAW_ROLE_DESCRIPTION',
+      value: 'Says hello',
+    })
+    expect(gatewayEnv).toContainEqual({
+      name: 'LITELLM_API_BASE',
+      value: 'http://internal-litellm.us-east-1.elb.amazonaws.com',
+    })
+
+    expect(
+      initEnv.find((e) => e?.name === 'OPENCLAW_ROLE_DESCRIPTION'),
+    ).toBeUndefined()
+    expect(initEnv.find((e) => e?.name === 'LITELLM_API_BASE')).toBeUndefined()
   })
 
   it('does not emit a SLACK_WEBHOOK_URL env var (deferred to Phase 2.4 — #247)', () => {
@@ -303,6 +326,26 @@ describe('renderService', () => {
       targetGroupArn: 'arn:tg',
     })
     expect(svc.healthCheckGracePeriodSeconds).toBe(300)
+  })
+
+  it('service grace > task startPeriod (machine-checked invariant — round-1 audit)', () => {
+    // The kill-loop invariant: service must give the task more time
+    // to become healthy than the task itself reports as "still
+    // starting." Future tuning of either knob in isolation would
+    // silently break this; this test fires if grace ≤ startPeriod.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    const gateway = taskDef.containerDefinitions?.find(
+      (c) => c.name === 'gateway',
+    )
+    const startPeriod = gateway?.healthCheck?.startPeriod
+    const svc = renderService(fixtureInput, fixtureEnv, {
+      taskDefinitionArn: 'arn:tdf',
+      targetGroupArn: 'arn:tg',
+    })
+    const grace = svc.healthCheckGracePeriodSeconds
+    expect(typeof startPeriod).toBe('number')
+    expect(typeof grace).toBe('number')
+    expect(grace!).toBeGreaterThan(startPeriod!)
   })
 })
 

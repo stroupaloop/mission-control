@@ -147,12 +147,31 @@ function tagsToElbv2(
  * future workspace-storage-backing changes (smoke-test originally
  * hit stale-lock crashes when plugin staging shared an EFS volume
  * with workspace state — see ender-stack#207).
+ *
+ * STATE_DIR and PLUGIN_DEPS_MOUNT_PATH are derived from
+ * WORKSPACE_MOUNT_PATH rather than re-declared as independent
+ * literals — round-1 audit on PR #40 caught the drift risk if
+ * someone changed one without the others (image layout change,
+ * Terraform refactor, etc.). Single edit point per path component.
  */
 const CONFIG_MOUNT_PATH = '/home/node/.openclaw'
-const WORKSPACE_MOUNT_PATH = '/home/node/.openclaw/workspace'
-const PLUGIN_DEPS_MOUNT_PATH =
-  '/home/node/.openclaw/workspace/.openclaw/plugin-runtime-deps'
-const STATE_DIR = '/home/node/.openclaw/workspace/.openclaw'
+const WORKSPACE_MOUNT_PATH = `${CONFIG_MOUNT_PATH}/workspace`
+const STATE_DIR = `${WORKSPACE_MOUNT_PATH}/.openclaw`
+const PLUGIN_DEPS_MOUNT_PATH = `${STATE_DIR}/plugin-runtime-deps`
+
+/**
+ * Path to the init-config script baked into the companion-openclaw
+ * image at build time (see
+ * ender-stack/services/companion/openclaw/Dockerfile). The image
+ * COPY step pins this location; if the image build ever moves the
+ * script, this template will need to update or init-config will
+ * fail with ENOENT on entryPoint and gateway's `dependsOn: SUCCESS`
+ * will never satisfy. A smoke-test assertion in the image's CI
+ * (verifies the file exists at the expected path) is the right
+ * long-term contract; until then, this constant + the comment is
+ * the operational coupling. Round-1 audit on PR #40.
+ */
+const INIT_CONFIG_SCRIPT_PATH = '/usr/local/bin/init-config.sh'
 
 export function renderTaskDefinition(
   input: OpenClawAgentInput,
@@ -161,13 +180,29 @@ export function renderTaskDefinition(
   const name = resourceName(env.prefix, input.agentName)
   const logGroup = `${env.logGroupPrefix}/companion-openclaw-${input.agentName}`
 
-  // Shared env across both containers. init-config reads
-  // OPENCLAW_STATE_DIR to know where to pre-create state subdirs;
-  // gateway reads it at runtime so OpenClaw's mutable-state writes
-  // land on the RW workspace mount instead of the RO config mount.
-  // AGENT_NAME (no OPENCLAW_ prefix) is the env name init-config.sh
-  // expects today; OPENCLAW_AGENT_NAME is kept for backward compat
-  // with anything reading the namespaced form.
+  // Two env blocks: vars common to both containers, and gateway-only
+  // additions. Round-1 audit on PR #40 caught that the prior shared
+  // block placed OPENCLAW_ROLE_DESCRIPTION + LITELLM_API_BASE on
+  // init-config too — same task-def-level blast radius (anyone with
+  // ecs:DescribeTaskDefinition reads the whole revision regardless),
+  // but a confusing surface for future maintainers since init-config.sh
+  // doesn't read either. Splitting makes "what each container actually
+  // needs" legible from the template.
+  //
+  // commonEnv: read by both containers' processes.
+  //   - OPENCLAW_AGENT_NAME / AGENT_NAME — agent identity (init-config.sh
+  //     reads AGENT_NAME today; OPENCLAW_AGENT_NAME kept for the
+  //     namespaced form and gateway-runtime use).
+  //   - OPENCLAW_STATE_DIR — load-bearing on both: init-config uses it
+  //     to know where to mkdir state subdirs; gateway uses it so
+  //     OpenClaw's mutable-state writes land on the RW workspace mount.
+  const commonEnv = [
+    { name: 'OPENCLAW_AGENT_NAME', value: input.agentName },
+    { name: 'AGENT_NAME', value: input.agentName },
+    { name: 'OPENCLAW_STATE_DIR', value: STATE_DIR },
+  ]
+
+  // gatewayOnlyEnv: vars the runtime gateway process consumes.
   //
   // OPENCLAW_ROLE_DESCRIPTION becomes part of the agent's runtime
   // role prompt. Admin-supplied free text written into a task-def
@@ -182,12 +217,9 @@ export function renderTaskDefinition(
   // http:// on LITELLM_API_BASE is intentional — internal-only ALB
   // (private subnets, internal=true, no ACM cert). Don't "fix" to
   // https without coordinating ACM Private CA provisioning.
-  const sharedEnvironment = [
-    { name: 'OPENCLAW_AGENT_NAME', value: input.agentName },
-    { name: 'AGENT_NAME', value: input.agentName },
+  const gatewayOnlyEnv = [
     { name: 'OPENCLAW_ROLE_DESCRIPTION', value: input.roleDescription },
     { name: 'LITELLM_API_BASE', value: `http://${env.litellmAlbDnsName}` },
-    { name: 'OPENCLAW_STATE_DIR', value: STATE_DIR },
   ]
 
   const logConfig = (streamPrefix: string) => ({
@@ -233,13 +265,24 @@ export function renderTaskDefinition(
         name: 'init-config',
         image: input.image,
         essential: false,
-        entryPoint: ['/usr/local/bin/init-config.sh'],
+        entryPoint: [INIT_CONFIG_SCRIPT_PATH],
         // Empty command so any image CMD is fully overridden — the
         // smoke-test pattern. Without this, a future image change
         // that adds a CMD (e.g. extra flags) would silently get
         // appended to init-config.sh and possibly break it.
         command: [],
-        environment: sharedEnvironment,
+        environment: commonEnv,
+        // Note on plugin-runtime-deps: init-config.sh creates this
+        // dir under STATE_DIR, but it lands on the workspace volume
+        // here. The gateway then mounts a SEPARATE plugin-deps
+        // volume at the same path, overlaying (and shadowing) the
+        // workspace-side dir. The mkdir is therefore a no-op for
+        // gateway runtime — it's the plugin-deps volume mount that
+        // actually provides the empty directory OpenClaw expects.
+        // If plugin-deps is ever removed as a separate volume,
+        // workspace state would unexpectedly contain the init-
+        // config-created dir. Round-1 audit on PR #40 flagged this
+        // for documentation; behavior is correct, just non-obvious.
         mountPoints: [
           {
             sourceVolume: 'config',
@@ -267,7 +310,7 @@ export function renderTaskDefinition(
             protocol: 'tcp',
           },
         ],
-        environment: sharedEnvironment,
+        environment: [...commonEnv, ...gatewayOnlyEnv],
         mountPoints: [
           // config mounts read-only — gateway reads openclaw.json
           // (or boots --allow-unconfigured if absent) from this path.
