@@ -182,17 +182,23 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   // Endpoint never 5xx's on a missing default (returns null) — fetch
   // failure here is non-blocking; the operator just sees the empty
   // field with the placeholder example.
+  //
+  // AbortController matches the submit-path pattern. On quick
+  // open→close (accidental click), the in-flight fetch is cancelled
+  // immediately rather than running for the server-side 5s timeout
+  // window before being silently dropped at the client.
   useEffect(() => {
     if (!open) return
-    let cancelled = false
+    const ac = new AbortController()
     void (async () => {
       try {
         const resp = await fetch('/api/fleet/harness-defaults', {
           cache: 'no-store',
+          signal: ac.signal,
         })
         if (!resp.ok) return
         const body = (await resp.json()) as HarnessDefaultsResponse
-        if (cancelled) return
+        if (ac.signal.aborted) return
         const next: Partial<Record<HarnessType, string>> = {}
         for (const h of HARNESS_TYPES) {
           const d = body.defaults[h]?.defaultImage
@@ -200,11 +206,12 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
         }
         setDefaultsByHarness(next)
       } catch {
-        // Silent — the operator can still type the image manually.
+        // AbortError + network/JSON failures all silent — the
+        // operator can still type the image manually.
       }
     })()
     return () => {
-      cancelled = true
+      ac.abort()
     }
   }, [open])
 

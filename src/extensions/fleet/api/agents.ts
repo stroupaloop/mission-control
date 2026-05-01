@@ -63,9 +63,11 @@ import {
  *   deferred to Beat 3c (the scheduled reconciler).
  *
  * Validation:
- *   `agentName` must match `^[a-z][a-z0-9-]{1,30}[a-z0-9]$` (length
- *   3-32, lowercase-letter start, alphanumeric end — no leading or
- *   trailing hyphens). The IAM policy doc for `task_ecs_write`
+ *   `agentName` must match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` (length
+ *   3-32, alphanumeric start AND end — no leading or trailing
+ *   hyphens). Digit-start is permitted; AWS doesn't require
+ *   letter-start for any of the resources MC creates. The IAM policy
+ *   doc for `task_ecs_write`
  *   (ender-stack PR #208) explicitly cites this regex as load-bearing
  *   — `ecs:RegisterTaskDefinition` is granted Resource:"*" because the
  *   AWS verb has no resource-level auth, so this regex is the only
@@ -354,17 +356,20 @@ function getMissingEnv(env: ResolvedEnv): string[] {
 // ever omits the regex from its validateInput, this layer keeps the
 // security boundary intact.
 //
-// Anchoring rules: must start with a lowercase letter, must end with
-// alphanumeric (no leading/trailing hyphens, no double-hyphens at the
-// ends). ELBv2 target-group names and ECS service names enforce these
-// at the AWS layer too, so a name like `-foo` or `foo-` would 409 at
-// CreateTargetGroup with a confusing InvalidParameterException; the
-// tighter regex catches it at the validation step instead.
+// Anchoring rules: must start AND end with alphanumeric (no
+// leading/trailing hyphens, no double-hyphens at the ends).
+// Digit-start is permitted (relaxed in Beat 3b.1) — AWS doesn't
+// require letter-start for any of the resources MC creates.
+// ELBv2 target-group names and ECS service names DO enforce
+// no-leading/trailing-hyphen at the AWS layer, so a name like `-foo`
+// or `foo-` would 409 at CreateTargetGroup with a confusing
+// InvalidParameterException; the regex catches it at the validation
+// step instead.
 //
-// AGENT_NAME_RE + MODEL_TIERS imported from
-// `@/extensions/fleet/templates/constraints` so the type guard,
-// per-harness validateInput, AND the client-side form share the same
-// definitions. constraints.ts is the single source of truth.
+// AGENT_NAME_RE imported from `@/extensions/fleet/templates/constraints`
+// so the type guard, per-harness validateInput, AND the client-side
+// form share the same definition. constraints.ts is the single
+// source of truth.
 
 function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
   if (!body || typeof body !== 'object') return false
