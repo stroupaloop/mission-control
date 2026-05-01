@@ -34,9 +34,7 @@ import {
 import {
   AGENT_NAME_RE,
   HARNESS_TYPES,
-  MODEL_TIERS,
   type HarnessType,
-  type ModelTier,
 } from '@/extensions/fleet/templates/constraints'
 
 /**
@@ -179,7 +177,6 @@ export interface CreateAgentRequest {
   agentName: string
   roleDescription: string
   image: string
-  modelTier: ModelTier
 }
 
 export interface CreateAgentResponse {
@@ -378,9 +375,7 @@ function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
     typeof b.agentName === 'string' &&
     AGENT_NAME_RE.test(b.agentName as string) &&
     typeof b.roleDescription === 'string' &&
-    typeof b.image === 'string' &&
-    typeof b.modelTier === 'string' &&
-    MODEL_TIERS.includes(b.modelTier as ModelTier)
+    typeof b.image === 'string'
   )
 }
 
@@ -429,7 +424,6 @@ export async function POST(request: NextRequest) {
     agentName: body.agentName,
     roleDescription: body.roleDescription,
     image: body.image,
-    modelTier: body.modelTier,
   }
 
   // Per-harness validation. Throws on bad input — caught below as 400.

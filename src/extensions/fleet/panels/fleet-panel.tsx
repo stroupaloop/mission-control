@@ -208,15 +208,18 @@ export function FleetPanel() {
           {/* Toggle is intentionally NOT disabled by `loading`. The
               auto-poll loop + post-create refresh both flip `loading`
               to true; gating the toggle on it would lock the operator
-              out of opening / closing the form whenever the table is
-              fetching. The form itself has its own submitting state
-              that disables its inputs during the in-flight POST. */}
+              out of opening the modal whenever the table is fetching.
+              The modal itself disables its inputs during in-flight
+              POST and blocks dismiss while submitting (Esc + backdrop
+              ignored mid-POST). Single-action button now that the
+              form is a portaled modal — Esc / backdrop / Cancel all
+              close it. */}
           <Button
             variant="outline"
-            onClick={() => setCreateOpen((v) => !v)}
+            onClick={() => setCreateOpen(true)}
             data-testid="toggle-create-agent"
           >
-            {createOpen ? 'Close create form' : 'Create agent'}
+            Create agent
           </Button>
           <Button
             variant="outline"
@@ -228,14 +231,14 @@ export function FleetPanel() {
         </div>
       </div>
 
-      {createOpen && (
-        <CreateAgentForm
-          onCreated={() => {
-            void load()
-          }}
-          onClose={() => setCreateOpen(false)}
-        />
-      )}
+      <CreateAgentForm
+        open={createOpen}
+        onCreated={() => {
+          void load()
+        }}
+        onClose={() => setCreateOpen(false)}
+      />
+
 
       {error ? (
         <div className="rounded border border-destructive/50 bg-destructive/10 p-4">

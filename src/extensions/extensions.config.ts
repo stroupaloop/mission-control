@@ -202,6 +202,7 @@ const fleetExtension: ExtensionManifest = {
     { path: '/fleet/services', methods: ['GET'] },
     { path: '/fleet/services/:name/redeploy', methods: ['POST'] },
     { path: '/fleet/agents', methods: ['POST'] },
+    { path: '/fleet/harness-defaults', methods: ['GET'] },
   ],
   panels: [
     {

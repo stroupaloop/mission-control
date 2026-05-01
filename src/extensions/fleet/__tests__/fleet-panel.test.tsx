@@ -770,96 +770,111 @@ describe('<FleetPanel /> — create-agent toggle', () => {
     )
   }
 
-  it('"Create agent" button opens the form section; "Close create form" closes it', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      mkServicesResp() as unknown as Response,
-    )
+  // URL-routing fetch mock: handles the existing /api/fleet/services
+  // baseline + the form's /api/fleet/harness-defaults fetch on open
+  // + an optional POST response for the create-agent flow. Beat 3b.1
+  // moved from queue-based mocks to URL-routing because the form's
+  // mount-time harness-defaults useEffect made order-dependent
+  // queues fragile.
+  function mockFetchRoutes(opts: {
+    services: () => Response
+    post?: Response
+    defaultImage?: string | null
+  }) {
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : (input as URL | Request).toString()
+      if (url.includes('/api/fleet/services')) {
+        return opts.services() as unknown as Response
+      }
+      if (url.includes('/api/fleet/harness-defaults')) {
+        return new Response(
+          JSON.stringify({
+            defaults: {
+              'companion/openclaw': { defaultImage: opts.defaultImage ?? null },
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ) as unknown as Response
+      }
+      if (url.includes('/api/fleet/agents') && init?.method === 'POST') {
+        if (!opts.post) throw new Error('No POST mock provided')
+        return opts.post
+      }
+      throw new Error(`Unmocked fetch URL: ${url}`)
+    })
+  }
+
+  it('"Create agent" button opens the modal; Cancel closes it', async () => {
+    mockFetchRoutes({ services: () => mkServicesResp() })
     render(<FleetPanel />)
 
-    // Wait for initial fetch to complete so the button is responsive.
     await waitFor(() => {
       expect(
         screen.queryByRole('button', { name: /Loading…/i }),
       ).not.toBeInTheDocument()
     })
 
-    // Form section starts hidden.
-    expect(screen.queryByTestId('create-agent-form')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('create-agent-modal')).not.toBeInTheDocument()
 
     const toggle = screen.getByTestId('toggle-create-agent')
     expect(toggle).toHaveTextContent('Create agent')
 
     fireEvent.click(toggle)
-    expect(screen.getByTestId('create-agent-form')).toBeInTheDocument()
-    expect(toggle).toHaveTextContent('Close create form')
-
-    fireEvent.click(toggle)
-    expect(screen.queryByTestId('create-agent-form')).not.toBeInTheDocument()
+    expect(screen.getByTestId('create-agent-modal')).toBeInTheDocument()
+    // Single-action button: label stays "Create agent" — modal has
+    // its own Esc / backdrop / Cancel close paths.
     expect(toggle).toHaveTextContent('Create agent')
-  })
-
-  it('form Cancel button closes the form section', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      mkServicesResp() as unknown as Response,
-    )
-    render(<FleetPanel />)
-
-    await waitFor(() => {
-      expect(
-        screen.queryByRole('button', { name: /Loading…/i }),
-      ).not.toBeInTheDocument()
-    })
-
-    fireEvent.click(screen.getByTestId('toggle-create-agent'))
-    expect(screen.getByTestId('create-agent-form')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Cancel/i }))
-    expect(screen.queryByTestId('create-agent-form')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('create-agent-modal')).not.toBeInTheDocument()
   })
 
   it('successful create triggers a refresh on the services table (onCreated → load())', async () => {
-    // Three fetches expected, in order:
-    //   1. initial GET /api/fleet/services (mount)
-    //   2. POST /api/fleet/agents (form submit, returns 201)
-    //   3. GET /api/fleet/services (refresh, triggered by onCreated)
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      // 1. initial load
-      .mockResolvedValueOnce(mkServicesResp() as unknown as Response)
-      // 2. POST /api/fleet/agents
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            ok: true,
-            agentName: 'smoke-2',
-            resources: {
-              serviceArn: 'arn:s',
-              taskDefinitionArn: 'arn:t',
-              targetGroupArn: 'arn:tg',
-              listenerRuleArn: 'arn:lr',
-              logGroup: '/ecs/lg',
-              listenerPath: '/agent/smoke-2',
-            },
-            warnings: [],
-          }),
-          { status: 201, headers: { 'content-type': 'application/json' } },
-        ) as unknown as Response,
-      )
-      // 3. refresh after create — returns the new agent in the table
-      .mockResolvedValueOnce(
-        mkServicesResp([
-          {
-            name: 'ender-stack-dev-companion-openclaw-smoke-2',
-            status: 'ACTIVE',
-            desiredCount: 1,
-            runningCount: 0,
-            pendingCount: 1,
-            taskDefinition: 'family:1',
-            launchType: 'FARGATE',
-            activeDeployments: 1,
+    // Expected fetch sequence:
+    //   1. initial GET /api/fleet/services (panel mount)
+    //   2. GET /api/fleet/harness-defaults (form mount-effect on open)
+    //   3. POST /api/fleet/agents (form submit, returns 201)
+    //   4. GET /api/fleet/services (refresh, triggered by onCreated)
+    let servicesCallCount = 0
+    const fetchSpy = mockFetchRoutes({
+      services: () => {
+        servicesCallCount += 1
+        // First call: empty fleet. Second call: shows new agent.
+        return servicesCallCount === 1
+          ? mkServicesResp()
+          : mkServicesResp([
+              {
+                name: 'ender-stack-dev-companion-openclaw-smoke-2',
+                status: 'ACTIVE',
+                desiredCount: 1,
+                runningCount: 0,
+                pendingCount: 1,
+                taskDefinition: 'family:1',
+                launchType: 'FARGATE',
+                activeDeployments: 1,
+              },
+            ])
+      },
+      post: new Response(
+        JSON.stringify({
+          ok: true,
+          agentName: 'smoke-2',
+          resources: {
+            serviceArn: 'arn:s',
+            taskDefinitionArn: 'arn:t',
+            targetGroupArn: 'arn:tg',
+            listenerRuleArn: 'arn:lr',
+            logGroup: '/ecs/lg',
+            listenerPath: '/agent/smoke-2',
           },
-        ]) as unknown as Response,
-      )
+          warnings: [],
+        }),
+        { status: 201, headers: { 'content-type': 'application/json' } },
+      ) as unknown as Response,
+    })
 
     render(<FleetPanel />)
 
@@ -871,8 +886,6 @@ describe('<FleetPanel /> — create-agent toggle', () => {
 
     fireEvent.click(screen.getByTestId('toggle-create-agent'))
 
-    // Fill the minimum-valid form via DOM events (matches the
-    // create-agent-form.test.tsx fill helper).
     fireEvent.change(screen.getByLabelText(/Agent name/i), {
       target: { value: 'smoke-2' },
     })
@@ -883,24 +896,34 @@ describe('<FleetPanel /> — create-agent toggle', () => {
       target: { value: 'integration test' },
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
+    // Toggle button + form submit button both read "Create agent"
+    // now that the toggle is single-action (Beat 3b.1) — use the
+    // form's `type=submit` to disambiguate.
+    const submit = screen
+      .getByTestId('create-agent-form')
+      .querySelector('button[type="submit"]')
+    if (!submit) throw new Error('form submit button not found')
+    fireEvent.click(submit)
 
-    // Wait for success block — confirms 201 was received.
     await screen.findByTestId('create-agent-success')
+    await screen.findByText('ender-stack-dev-companion-openclaw-smoke-2')
 
-    // Then wait for the refresh: the new agent appears in the table.
-    await screen.findByText(
-      'ender-stack-dev-companion-openclaw-smoke-2',
-    )
-
-    // Verify the call sequence — proves onCreated() fired the refresh.
-    const calls = fetchSpy.mock.calls.map((c) => {
+    // Verify the URL+method sequence — proves onCreated() fired the
+    // refresh GET.
+    const urls = fetchSpy.mock.calls.map((c) => {
       const [url, init] = c as [string | URL | Request, RequestInit?]
       const u = typeof url === 'string' ? url : (url as URL).toString()
       return { url: u, method: init?.method ?? 'GET' }
     })
-    expect(calls[0]).toMatchObject({ url: '/api/fleet/services', method: 'GET' })
-    expect(calls[1]).toMatchObject({ url: '/api/fleet/agents', method: 'POST' })
-    expect(calls[2]).toMatchObject({ url: '/api/fleet/services', method: 'GET' })
+    // Two services GETs (initial + post-create refresh).
+    const servicesGets = urls.filter(
+      (u) => u.url === '/api/fleet/services' && u.method === 'GET',
+    )
+    expect(servicesGets.length).toBe(2)
+    // One agents POST.
+    const agentsPosts = urls.filter(
+      (u) => u.url === '/api/fleet/agents' && u.method === 'POST',
+    )
+    expect(agentsPosts.length).toBe(1)
   })
 })

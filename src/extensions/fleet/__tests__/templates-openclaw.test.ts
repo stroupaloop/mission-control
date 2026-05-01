@@ -13,7 +13,6 @@ const fixtureInput: OpenClawAgentInput = {
   agentName: 'hello-world',
   roleDescription: 'Says hello',
   image: 'ghcr.io/stroupaloop/openclaw:sha-abc123',
-  modelTier: 'sonnet-4-6',
 }
 
 const fixtureEnv: OpenClawAgentEnv = {
@@ -58,7 +57,11 @@ describe('renderTaskDefinition', () => {
       name: 'OPENCLAW_AGENT_NAME',
       value: 'hello-world',
     })
-    expect(env).toContainEqual({ name: 'OPENCLAW_MODEL', value: 'sonnet-4-6' })
+    // OPENCLAW_MODEL was dropped in Beat 3b.1 — LiteLLM's smart-router
+    // is the authoritative model-selection layer; per-agent tier
+    // either no-ops or fights routing decisions. Asserting absence
+    // catches accidental re-introduction.
+    expect(env.find((e) => e?.name === 'OPENCLAW_MODEL')).toBeUndefined()
     expect(env).toContainEqual({
       name: 'LITELLM_API_BASE',
       value: 'http://internal-litellm.us-east-1.elb.amazonaws.com',
@@ -226,10 +229,16 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
     )
   })
 
-  it('rejects names starting with a digit (lowercase-letter start required)', () => {
-    expect(() => validate({ ...fixtureInput, agentName: '1abc' })).toThrow(
-      /agentName/,
-    )
+  it('accepts names starting with a digit (e.g. date prefixes like `2026-04-30-bot`)', () => {
+    // Beat 3b.1 relaxed AGENT_NAME_RE from `[a-z][a-z0-9-]{1,30}[a-z0-9]`
+    // to `[a-z0-9][a-z0-9-]{1,30}[a-z0-9]`. AWS doesn't require
+    // letter-start for any of the resources MC creates; the prior
+    // restriction blocked legitimate operator names like dated
+    // builds.
+    expect(() =>
+      validate({ ...fixtureInput, agentName: '2026-04-30-bot' }),
+    ).not.toThrow()
+    expect(() => validate({ ...fixtureInput, agentName: '1abc' })).not.toThrow()
   })
 
   it('accepts names with internal hyphens and digits', () => {

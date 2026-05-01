@@ -1,16 +1,14 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'
 import {
   AGENT_NAME_RE,
   HARNESS_TYPES,
   IMAGE_MAX_BYTES,
-  MODEL_TIERS,
-  MODEL_TIER_DEFAULT,
   ROLE_DESCRIPTION_MAX_BYTES,
   type HarnessType,
-  type ModelTier,
 } from '../templates/constraints'
 // `import type` only — keeps server-only modules (AWS SDK, NextRequest)
 // out of the client bundle. Same pattern fleet-panel.tsx uses for the
@@ -19,27 +17,33 @@ import type {
   CreateAgentResponse,
   CreateAgentErrorResponse,
 } from '../api/agents'
+import type { HarnessDefaultsResponse } from '../api/harness-defaults'
 
 // Phase 2.2 Beat 3b — UI form for POST /api/fleet/agents.
+// Phase 2.2 Beat 3b.1 — converted from inline collapsible to portaled
+// modal; pre-fills `image` from /api/fleet/harness-defaults; dropped
+// the `modelTier` field (smart-router authoritative).
 //
-// Hosted as a collapsible section inside the Fleet panel rather than a
-// new top-level route: panels.config.ts has no nested-routing surface,
-// so a `/fleet/new` route would either need the panel registry to grow
-// nested support OR sit as a sibling top-level panel disconnected from
-// the Fleet table. Inline-toggle keeps the operator's table view in
-// context next to the form.
+// Modal behavior:
+//   - Rendered via React.createPortal into document.body so the modal
+//     sits above the panel hierarchy regardless of z-index ancestors.
+//   - Backdrop click + Esc key dismiss the form.
+//   - Initial focus moves to the first input (agent name) on open;
+//     focus returns to the trigger button on close.
+//   - aria-modal + role="dialog" + aria-labelledby for screen-reader
+//     correctness.
 //
 // Submit path:
 //   POST /api/fleet/agents → on 201: render success summary + warnings,
 //   call onCreated() so the parent refreshes the Fleet table.
-//   On 4xx/5xx: render the SDK error name (already-suppressed message
-//   detail per the handler's response shape) + partialResources if
-//   present.
+//   On 4xx/5xx: render the SDK error name + partialResources if present.
 
 interface Props {
+  /** Whether the modal is currently visible. */
+  open: boolean
   /** Called after a successful 201 so the parent panel can refresh the fleet table. */
   onCreated: () => void
-  /** Called when the operator dismisses the form (cancel or after closing the success view). */
+  /** Called when the operator dismisses the modal (cancel, Esc, backdrop, or "Done" after success). */
   onClose: () => void
 }
 
@@ -57,21 +61,91 @@ const HARNESS_TYPE_DEFAULT: HarnessType = HARNESS_TYPES[0]
 // degraded service would otherwise leave the form stuck "Creating…"
 // with no way for the operator to bail. 30s gives a generous buffer
 // over the realistic happy-path (~3-5s) without leaving the operator
-// waiting on a hanging connection. Mirrors the AbortController pattern
-// fleet-panel.tsx uses for its services-list polling.
+// waiting on a hanging connection.
 const SUBMIT_TIMEOUT_MS = 30_000
 
-export function CreateAgentForm({ onCreated, onClose }: Props) {
+export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   const [harnessType, setHarnessType] = useState<HarnessType>(
     HARNESS_TYPE_DEFAULT,
   )
   const [agentName, setAgentName] = useState('')
   const [image, setImage] = useState('')
   const [roleDescription, setRoleDescription] = useState('')
-  const [modelTier, setModelTier] = useState<ModelTier>(MODEL_TIER_DEFAULT)
   const [state, setState] = useState<FormState>({ kind: 'idle' })
+  // null = not yet fetched OR fetch failed; string = pre-fill ready.
+  // Form treats null as "no default known"; operator types from scratch.
+  const [defaultsByHarness, setDefaultsByHarness] = useState<
+    Partial<Record<HarnessType, string>>
+  >({})
+
+  const firstInputRef = useRef<HTMLInputElement | null>(null)
+  const previousFocusRef = useRef<Element | null>(null)
 
   const submitting = state.kind === 'submitting'
+
+  // On open: capture the trigger element so we can return focus on
+  // close, then move focus to the first input. On close: restore.
+  useEffect(() => {
+    if (!open) return
+    previousFocusRef.current = document.activeElement
+    const t = setTimeout(() => firstInputRef.current?.focus(), 0)
+    return () => {
+      clearTimeout(t)
+      const target = previousFocusRef.current as HTMLElement | null
+      target?.focus?.()
+    }
+  }, [open])
+
+  // Esc to dismiss. Only attached while open. Submit-in-flight blocks
+  // dismiss to avoid losing the in-flight create — operator must wait
+  // for the response (success/error) before closing.
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape' && !submitting) onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose, submitting])
+
+  // Pre-fill `image` from /api/fleet/harness-defaults on first open.
+  // Endpoint never 5xx's on a missing default (returns null) — fetch
+  // failure here is non-blocking; the operator just sees the empty
+  // field with the placeholder example.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const resp = await fetch('/api/fleet/harness-defaults', {
+          cache: 'no-store',
+        })
+        if (!resp.ok) return
+        const body = (await resp.json()) as HarnessDefaultsResponse
+        if (cancelled) return
+        const next: Partial<Record<HarnessType, string>> = {}
+        for (const h of HARNESS_TYPES) {
+          const d = body.defaults[h]?.defaultImage
+          if (typeof d === 'string') next[h] = d
+        }
+        setDefaultsByHarness(next)
+      } catch {
+        // Silent — the operator can still type the image manually.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [open])
+
+  // When defaults arrive (or harness selection changes), pre-fill
+  // `image` IFF the operator hasn't already typed something. Don't
+  // stomp in-progress input.
+  useEffect(() => {
+    if (image !== '') return
+    const d = defaultsByHarness[harnessType]
+    if (d) setImage(d)
+  }, [defaultsByHarness, harnessType, image])
 
   // Local pre-validation before POSTing — catches the obvious failures
   // without a network round-trip. Server-side validation (in
@@ -115,7 +189,6 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
           agentName,
           image,
           roleDescription,
-          modelTier,
         }),
       })
     } catch (err) {
@@ -166,22 +239,119 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
 
   function reset() {
     setAgentName('')
-    setImage('')
+    setImage(defaultsByHarness[HARNESS_TYPE_DEFAULT] ?? '')
     setRoleDescription('')
-    setModelTier(MODEL_TIER_DEFAULT)
     setHarnessType(HARNESS_TYPE_DEFAULT)
     setState({ kind: 'idle' })
   }
 
+  function handleBackdropClick() {
+    if (submitting) return
+    onClose()
+  }
+
+  if (!open) return null
+
+  // Render outside the panel hierarchy — sits above any z-index
+  // ancestor, dimmed backdrop covers the whole viewport.
+  return createPortal(
+    <div
+      role="presentation"
+      onClick={handleBackdropClick}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      data-testid="create-agent-modal-backdrop"
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-agent-title"
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-lg border bg-background shadow-xl"
+        data-testid="create-agent-modal"
+      >
+        <FormBody
+          state={state}
+          submitting={submitting}
+          harnessType={harnessType}
+          setHarnessType={setHarnessType}
+          agentName={agentName}
+          setAgentName={setAgentName}
+          agentNameValid={agentNameValid}
+          image={image}
+          setImage={setImage}
+          imageValid={imageValid}
+          roleDescription={roleDescription}
+          setRoleDescription={setRoleDescription}
+          formValid={formValid}
+          firstInputRef={firstInputRef}
+          onSubmit={handleSubmit}
+          onClose={onClose}
+          onResetForCreateAnother={reset}
+        />
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+interface FormBodyProps {
+  state: FormState
+  submitting: boolean
+  harnessType: HarnessType
+  setHarnessType: (h: HarnessType) => void
+  agentName: string
+  setAgentName: (s: string) => void
+  agentNameValid: boolean
+  image: string
+  setImage: (s: string) => void
+  imageValid: boolean
+  roleDescription: string
+  setRoleDescription: (s: string) => void
+  formValid: boolean
+  firstInputRef: React.MutableRefObject<HTMLInputElement | null>
+  onSubmit: (e: React.FormEvent) => void
+  onClose: () => void
+  onResetForCreateAnother: () => void
+}
+
+function FormBody({
+  state,
+  submitting,
+  harnessType,
+  setHarnessType,
+  agentName,
+  setAgentName,
+  agentNameValid,
+  image,
+  setImage,
+  imageValid,
+  roleDescription,
+  setRoleDescription,
+  formValid,
+  firstInputRef,
+  onSubmit,
+  onClose,
+  onResetForCreateAnother,
+}: FormBodyProps) {
   if (state.kind === 'success') {
     const r = state.response
     return (
       <div
-        className="mb-4 rounded border border-green-500/50 bg-green-500/10 p-4"
+        className="p-6"
         data-testid="create-agent-success"
       >
-        <div className="font-medium text-green-700 mb-2">
-          Agent <code>{r.agentName}</code> created
+        <div className="flex items-center justify-between mb-3">
+          <h2 id="create-agent-title" className="text-lg font-medium text-green-700">
+            Agent <code>{r.agentName}</code> created
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-sm text-muted-foreground hover:text-foreground"
+            aria-label="Close"
+          >
+            ✕
+          </button>
         </div>
         <dl className="text-xs grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 mb-3">
           <dt className="text-muted-foreground">Service</dt>
@@ -219,7 +389,7 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
           </div>
         )}
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={reset}>
+          <Button variant="outline" size="sm" onClick={onResetForCreateAnother}>
             Create another
           </Button>
           <Button variant="outline" size="sm" onClick={onClose}>
@@ -232,12 +402,14 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
 
   return (
     <form
-      onSubmit={handleSubmit}
-      className="mb-4 rounded border p-4 space-y-4"
+      onSubmit={onSubmit}
+      className="p-6 space-y-4"
       data-testid="create-agent-form"
     >
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-medium">Create agent</h2>
+        <h2 id="create-agent-title" className="text-lg font-medium">
+          Create agent
+        </h2>
         <button
           type="button"
           onClick={onClose}
@@ -287,9 +459,7 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
                       use `'serviceArn' in partialResources` so the
                       operator gets a clear "possibly-orphaned
                       service" signal even when the ARN itself is
-                      unknown. Most expensive orphan to leave behind
-                      (running ECS task = ongoing cost + ALB misroute
-                      risk). */}
+                      unknown. */}
                   {'serviceArn' in state.body.partialResources && (
                     <li
                       className="text-amber-700 not-italic"
@@ -347,6 +517,7 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
         </label>
         <input
           id="agentName"
+          ref={firstInputRef}
           type="text"
           value={agentName}
           onChange={(e) => setAgentName(e.target.value)}
@@ -369,9 +540,11 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
               : 'text-muted-foreground'
           }`}
         >
-          Lowercase letters, digits, hyphens. Must start with a letter and end
-          with letter/digit. 3–32 chars. Used in IAM ARN templating — security
-          control, not just a UX validator.
+          Lowercase letters, digits, hyphens. Must start and end with a
+          letter or digit (no leading/trailing hyphens). 3–32 chars.
+          Date prefixes like <code>2026-04-30-bot</code> work. Used in
+          IAM ARN templating — security control, not just a UX
+          validator.
         </p>
       </div>
 
@@ -402,9 +575,12 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
               : 'text-muted-foreground'
           }`}
         >
-          Fully-qualified container ref (registry/path:tag or @sha256:...).
-          Server enforces a registry allowlist (ECR-in-account,
-          ghcr.io/stroupaloop, public.ecr.aws). Max {IMAGE_MAX_BYTES} chars.
+          Pre-filled from the most-recent OpenClaw image on this
+          cluster (override only when you need a specific build).
+          Must be a fully-qualified ref with a non-empty tag or
+          digest. Server enforces a registry allowlist
+          (ECR-in-account, ghcr.io/stroupaloop). Max{' '}
+          {IMAGE_MAX_BYTES} chars.
         </p>
       </div>
 
@@ -431,30 +607,12 @@ export function CreateAgentForm({ onCreated, onClose }: Props) {
           id="roleDescription-hint"
           className="mt-1 text-xs text-muted-foreground"
         >
-          {roleDescription.length}/{ROLE_DESCRIPTION_MAX_BYTES} chars. Becomes
-          the agent&apos;s runtime role prompt; written into an immutable
-          task-def revision visible to anyone with{' '}
-          <code>ecs:DescribeTaskDefinition</code> — treat as permanent + public.
+          {roleDescription.length}/{ROLE_DESCRIPTION_MAX_BYTES} chars.
+          Becomes the agent&apos;s runtime role prompt; written into an
+          immutable task-def revision visible to anyone with{' '}
+          <code>ecs:DescribeTaskDefinition</code> — treat as permanent
+          + public.
         </p>
-      </div>
-
-      <div>
-        <label htmlFor="modelTier" className="block text-sm font-medium mb-1.5">
-          Model tier
-        </label>
-        <select
-          id="modelTier"
-          value={modelTier}
-          onChange={(e) => setModelTier(e.target.value as ModelTier)}
-          disabled={submitting}
-          className="w-full h-10 px-3 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
-        >
-          {MODEL_TIERS.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
       </div>
 
       <div className="flex gap-2 pt-2">
