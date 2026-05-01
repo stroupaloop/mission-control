@@ -46,18 +46,30 @@ interface HarnessDefault {
   /** Pre-fill value for the create-agent form's image field; null when unknown. */
   defaultImage: string | null
   /**
-   * Maximum legal `agentName` length for THIS deployment. Computed
-   * server-side from the actual `{prefix}` so the form's input
-   * `maxLength` is accurate per-deployment (different forks have
-   * different prefixes; `ender-stack-dev` allows 10 chars, a shorter
-   * fork prefix would allow more). Capped server-side regardless;
-   * this just gives the form an honest hint.
+   * Maximum legal `agentName` length for THIS deployment, when the
+   * harness has a per-deployment cap that's tighter than the
+   * AGENT_NAME_RE regex max. Computed server-side from the actual
+   * `{prefix}` so the form's input `maxLength` is accurate
+   * per-deployment.
+   *
+   * Optional because not every harness has this constraint — it's
+   * specifically driven by the AWS ELBv2 target-group-name 32-char
+   * limit, which only applies to ALB-attached harnesses (OpenClaw
+   * companion shape). When omitted, the form falls back to the
+   * regex max (AGENT_NAME_RE upper bound). Future harnesses that
+   * use a different routing primitive (e.g. a Hermes worker
+   * triggered by EventBridge → no ALB → no TG-name limit) should
+   * leave this undefined.
    *
    * For OpenClaw: derived from the AWS target-group-name 32-char
    * limit minus the `{prefix}-agent-` overhead. See
    * `maxAgentNameLengthForPrefix` in templates/openclaw.ts.
+   *
+   * Round-8 audit on PR #39 made this optional to avoid forcing
+   * future-harness implementers to reverse-engineer an OpenClaw-
+   * specific constraint.
    */
-  agentNameMaxLength: number
+  agentNameMaxLength?: number
 }
 
 export interface HarnessDefaultsResponse {
@@ -66,9 +78,13 @@ export interface HarnessDefaultsResponse {
 
 export interface HarnessDefaultsErrorResponse {
   error: string
-  /** Operator-actionable detail (admin-only endpoint). For
-   *  PrefixTooLongForHarness: names the offending prefix so operators
-   *  without log access can self-diagnose. */
+  /** Operator-actionable detail. The endpoint requires `viewer`
+   *  role (any authenticated MC user), so anything reflected in
+   *  `detail` is visible to all viewers — keep it to non-secret
+   *  config (the deployment prefix qualifies; secret values must
+   *  never land here). For PrefixTooLongForHarness: names the
+   *  offending prefix so operators without log access can
+   *  self-diagnose. Round-8 audit clarified the auth scope. */
   detail?: string
 }
 
