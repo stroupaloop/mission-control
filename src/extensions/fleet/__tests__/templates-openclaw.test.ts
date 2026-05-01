@@ -222,7 +222,9 @@ describe('renderTaskDefinition', () => {
   it('points both containers awslogs-group at the per-agent log group with distinct stream prefixes', () => {
     // Same log group for the whole task; different stream prefixes
     // so init-config and gateway logs are easy to filter in the
-    // CloudWatch console.
+    // CloudWatch console. awslogs-region asserted on both — round-2
+    // audit on PR #40 caught that the test consolidation lost the
+    // region check the old single-container test had.
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
     const init = findContainer(taskDef, 'init-config')
     const gateway = findContainer(taskDef, 'gateway')
@@ -231,6 +233,12 @@ describe('renderTaskDefinition', () => {
     )
     expect(gateway?.logConfiguration?.options?.['awslogs-group']).toBe(
       '/ecs/ender-stack-dev/companion-openclaw-hello-bot',
+    )
+    expect(init?.logConfiguration?.options?.['awslogs-region']).toBe(
+      'us-east-1',
+    )
+    expect(gateway?.logConfiguration?.options?.['awslogs-region']).toBe(
+      'us-east-1',
     )
     expect(init?.logConfiguration?.options?.['awslogs-stream-prefix']).toBe(
       'init-config',

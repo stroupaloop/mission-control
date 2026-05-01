@@ -132,11 +132,6 @@ function tagsToElbv2(
 }
 
 /**
- * Renders RegisterTaskDefinition input. The task-def family resolves to
- * `{prefix}-companion-openclaw-{agentName}` and matches the IAM
- * authorization patterns (`task-definition/{prefix}-companion-*:*`).
- */
-/**
  * Mount path constants — used by both the init-config and gateway
  * containers. These match the upstream OpenClaw image's expected
  * layout (verified against the smoke-test task-def in
@@ -173,6 +168,16 @@ const PLUGIN_DEPS_MOUNT_PATH = `${STATE_DIR}/plugin-runtime-deps`
  */
 const INIT_CONFIG_SCRIPT_PATH = '/usr/local/bin/init-config.sh'
 
+/**
+ * Renders RegisterTaskDefinition input. The task-def family resolves to
+ * `{prefix}-companion-openclaw-{agentName}` and matches the IAM
+ * authorization patterns (`task-definition/{prefix}-companion-*:*`).
+ *
+ * Two-container shape: init-config sidecar (essential=false, exits 0
+ * after pre-creating state dirs) + gateway (essential=true, depends
+ * on init-config SUCCESS). Three ephemeral Fargate volumes (config,
+ * workspace, plugin-deps) — see the mount-path constants above.
+ */
 export function renderTaskDefinition(
   input: OpenClawAgentInput,
   env: OpenClawAgentEnv,
