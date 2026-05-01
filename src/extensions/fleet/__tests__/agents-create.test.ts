@@ -240,6 +240,13 @@ describe('POST /api/fleet/agents — env validation', () => {
     expect(json.detail).toContain('target group name')
     expect(json.detail).toContain('agent-name-too-long')
     expect(json.detail).toMatch(/Max agentName length here is \d+/)
+    // Round-10 audit P3: the "no orphaned resources" guarantee is
+    // load-bearing — the whole point of this pre-check. Assert
+    // explicitly so a regression that makes the pre-check fire
+    // AFTER any AWS call would fail loudly here.
+    expect(elbv2SendMock).not.toHaveBeenCalled()
+    expect(ecsSendMock).not.toHaveBeenCalled()
+    expect(logsSendMock).not.toHaveBeenCalled()
   })
 
   it('rejects agentName with invalid characters at the type-guard layer (defense-in-depth)', async () => {

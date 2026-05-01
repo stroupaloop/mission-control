@@ -8,6 +8,10 @@ import {
   type OpenClawAgentEnv,
 } from '../templates/openclaw'
 import { HARNESS_TEMPLATES } from '../templates'
+import {
+  AGENT_NAME_MIN_LENGTH,
+  AGENT_NAME_RE,
+} from '../templates/constraints'
 
 const fixtureInput: OpenClawAgentInput = {
   agentName: 'hello-bot',
@@ -355,5 +359,23 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
     expect(() =>
       validate({ ...fixtureInput, agentName: 'bot-v2-prd' }, 'ender-stack-dev'),
     ).not.toThrow()
+  })
+})
+
+describe('AGENT_NAME_MIN_LENGTH ↔ AGENT_NAME_RE coupling', () => {
+  // Round-10 audit on PR #39 (P2): AGENT_NAME_MIN_LENGTH is a
+  // separate exported constant that the harness-defaults
+  // PrefixTooLongForHarness gate compares against. It must stay
+  // in sync with the regex's effective minimum (currently
+  // `[a-z0-9][a-z0-9-]{1,30}[a-z0-9]` → 3 chars). If the regex
+  // is ever relaxed (e.g. to allow 1-char names) without updating
+  // the constant, the gate would silently allow misconfigs through.
+  // This test makes the coupling machine-checked.
+  it('AGENT_NAME_MIN_LENGTH equals the regex effective minimum (3)', () => {
+    expect(AGENT_NAME_MIN_LENGTH).toBe(3)
+    // 2-char names rejected.
+    expect(AGENT_NAME_RE.test('ab')).toBe(false)
+    // Boundary: AGENT_NAME_MIN_LENGTH-char names accepted.
+    expect(AGENT_NAME_RE.test('abc')).toBe(true)
   })
 })
