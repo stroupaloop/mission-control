@@ -41,6 +41,14 @@ const fixtureEnv: OpenClawAgentEnv = {
 }
 
 describe('renderTaskDefinition', () => {
+  // Helper: containers are at fixed indices today (init-config at 0,
+  // gateway at 1) but querying by name is more robust to ordering
+  // changes. Both are exercised below.
+  const findContainer = (
+    taskDef: ReturnType<typeof renderTaskDefinition>,
+    name: string,
+  ) => taskDef.containerDefinitions?.find((c) => c.name === name)
+
   it('builds the family from prefix + agent name', () => {
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
     expect(taskDef.family).toBe('ender-stack-dev-companion-openclaw-hello-bot')
@@ -52,39 +60,202 @@ describe('renderTaskDefinition', () => {
     expect(taskDef.networkMode).toBe('awsvpc')
   })
 
-  it('passes the per-agent env vars on the gateway container', () => {
+  it('emits init-config sidecar + gateway in that order with dependsOn', () => {
+    // #215: two-container shape (init-config at 0, gateway at 1).
+    // Order is load-bearing for clarity in the AWS console; dependsOn
+    // is the actual gating mechanism. Both asserted.
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
-    const gateway = taskDef.containerDefinitions?.[0]
-    expect(gateway?.name).toBe('gateway')
-    const env = gateway?.environment ?? []
-    expect(env).toContainEqual({
-      name: 'OPENCLAW_AGENT_NAME',
-      value: 'hello-bot',
+    expect(taskDef.containerDefinitions).toHaveLength(2)
+    expect(taskDef.containerDefinitions?.[0]?.name).toBe('init-config')
+    expect(taskDef.containerDefinitions?.[1]?.name).toBe('gateway')
+
+    const gateway = findContainer(taskDef, 'gateway')
+    expect(gateway?.dependsOn).toEqual([
+      { containerName: 'init-config', condition: 'SUCCESS' },
+    ])
+  })
+
+  it('init-config overrides entryPoint to /usr/local/bin/init-config.sh and is non-essential', () => {
+    // Image's default entrypoint starts the gateway. init-config has
+    // to override or it would race with the actual gateway container.
+    // essential=false means task lifetime tracks gateway, not init-
+    // config (init exits 0 on success, which would otherwise tear
+    // down the whole task on essential=true).
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    const init = findContainer(taskDef, 'init-config')
+    expect(init?.essential).toBe(false)
+    expect(init?.entryPoint).toEqual(['/usr/local/bin/init-config.sh'])
+    expect(init?.command).toEqual([])
+  })
+
+  it('passes the common env vars (AGENT_NAME, OPENCLAW_AGENT_NAME, OPENCLAW_STATE_DIR) on both containers', () => {
+    // commonEnv: vars both containers actually consume. init-config
+    // uses OPENCLAW_STATE_DIR + AGENT_NAME for state-dir mkdir;
+    // gateway uses them at runtime.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    for (const containerName of ['init-config', 'gateway']) {
+      const c = findContainer(taskDef, containerName)
+      const env = c?.environment ?? []
+      expect(env).toContainEqual({
+        name: 'OPENCLAW_AGENT_NAME',
+        value: 'hello-bot',
+      })
+      expect(env).toContainEqual({ name: 'AGENT_NAME', value: 'hello-bot' })
+      expect(env).toContainEqual({
+        name: 'OPENCLAW_STATE_DIR',
+        value: '/home/node/.openclaw/workspace/.openclaw',
+      })
+      // OPENCLAW_MODEL was dropped in Beat 3b.1 — asserting absence
+      // catches accidental re-introduction.
+      expect(env.find((e) => e?.name === 'OPENCLAW_MODEL')).toBeUndefined()
+    }
+  })
+
+  it('places gateway-only env vars only on gateway, not on init-config', () => {
+    // Round-1 audit on PR #40: init-config.sh doesn't read
+    // OPENCLAW_ROLE_DESCRIPTION (prompt-injection surface) or
+    // LITELLM_API_BASE. Same task-def-level blast radius (both
+    // visible to ecs:DescribeTaskDefinition regardless), but
+    // splitting clarifies what each container actually needs.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    const init = findContainer(taskDef, 'init-config')
+    const gateway = findContainer(taskDef, 'gateway')
+    const initEnv = init?.environment ?? []
+    const gatewayEnv = gateway?.environment ?? []
+
+    expect(gatewayEnv).toContainEqual({
+      name: 'OPENCLAW_ROLE_DESCRIPTION',
+      value: 'Says hello',
     })
-    // OPENCLAW_MODEL was dropped in Beat 3b.1 — LiteLLM's smart-router
-    // is the authoritative model-selection layer; per-agent tier
-    // either no-ops or fights routing decisions. Asserting absence
-    // catches accidental re-introduction.
-    expect(env.find((e) => e?.name === 'OPENCLAW_MODEL')).toBeUndefined()
-    expect(env).toContainEqual({
+    expect(gatewayEnv).toContainEqual({
       name: 'LITELLM_API_BASE',
       value: 'http://internal-litellm.us-east-1.elb.amazonaws.com',
     })
+
+    expect(
+      initEnv.find((e) => e?.name === 'OPENCLAW_ROLE_DESCRIPTION'),
+    ).toBeUndefined()
+    expect(initEnv.find((e) => e?.name === 'LITELLM_API_BASE')).toBeUndefined()
   })
 
-  it('does not emit a SLACK_WEBHOOK_URL env var (deferred to Phase 2.5 secrets-manager wiring)', () => {
+  it('does not emit a SLACK_WEBHOOK_URL env var (deferred to Phase 2.4 — #247)', () => {
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
-    const env = taskDef.containerDefinitions?.[0]?.environment ?? []
-    expect(env.find((e) => e.name === 'SLACK_WEBHOOK_URL')).toBeUndefined()
+    for (const containerName of ['init-config', 'gateway']) {
+      const env = findContainer(taskDef, containerName)?.environment ?? []
+      expect(env.find((e) => e.name === 'SLACK_WEBHOOK_URL')).toBeUndefined()
+    }
   })
 
-  it('points awslogs-group at the per-agent log group', () => {
+  it('declares three ephemeral Fargate volumes (config, workspace, plugin-deps)', () => {
+    // No efsVolumeConfiguration on any volume ⇒ Fargate ephemeral
+    // overlay. plugin-deps is its own volume (NOT nested under
+    // workspace) so a future workspace-EFS migration doesn't drag
+    // plugin staging onto EFS — see comment in the template.
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
-    const opts = taskDef.containerDefinitions?.[0]?.logConfiguration?.options
-    expect(opts?.['awslogs-group']).toBe(
+    expect(taskDef.volumes).toHaveLength(3)
+    const names = (taskDef.volumes ?? []).map((v) => v.name)
+    expect(names).toEqual(['config', 'workspace', 'plugin-deps'])
+    for (const v of taskDef.volumes ?? []) {
+      expect(v.efsVolumeConfiguration).toBeUndefined()
+      expect(v.host).toBeUndefined()
+    }
+  })
+
+  it('mounts config RO + workspace RW + plugin-deps RW on the gateway', () => {
+    // Read-only config matches the smoke-test contract: gateway
+    // reads openclaw.json (or boots --allow-unconfigured); init-
+    // config is the only writer. workspace + plugin-deps are RW
+    // for OpenClaw's runtime state writes.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    const gateway = findContainer(taskDef, 'gateway')
+    const mounts = gateway?.mountPoints ?? []
+    expect(mounts).toHaveLength(3)
+    expect(mounts).toContainEqual({
+      sourceVolume: 'config',
+      containerPath: '/home/node/.openclaw',
+      readOnly: true,
+    })
+    expect(mounts).toContainEqual({
+      sourceVolume: 'workspace',
+      containerPath: '/home/node/.openclaw/workspace',
+      readOnly: false,
+    })
+    expect(mounts).toContainEqual({
+      sourceVolume: 'plugin-deps',
+      containerPath:
+        '/home/node/.openclaw/workspace/.openclaw/plugin-runtime-deps',
+      readOnly: false,
+    })
+  })
+
+  it('mounts config RW + workspace RW on init-config (no plugin-deps)', () => {
+    // init-config writes openclaw.json removal + workspace state-dir
+    // mkdir. Doesn't touch plugin-deps so the mount is omitted to
+    // keep the surface tight.
+    //
+    // Shadow invariant (see init-config mountPoints comment in
+    // templates/openclaw.ts): init-config's mkdir of
+    // `plugin-runtime-deps` lands on the workspace volume; the
+    // gateway later mounts a SEPARATE `plugin-deps` volume at the
+    // same path, shadowing it. Removing this mount-absence assertion
+    // (e.g. "let init-config also mount plugin-deps so the mkdir
+    // takes effect everywhere") would break that shadow contract
+    // and let workspace state silently accumulate the dir if the
+    // plugin-deps volume were ever removed. Round-3 audit on PR #40.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    const init = findContainer(taskDef, 'init-config')
+    const mounts = init?.mountPoints ?? []
+    expect(mounts).toHaveLength(2)
+    expect(mounts).toContainEqual({
+      sourceVolume: 'config',
+      containerPath: '/home/node/.openclaw',
+      readOnly: false,
+    })
+    expect(mounts).toContainEqual({
+      sourceVolume: 'workspace',
+      containerPath: '/home/node/.openclaw/workspace',
+      readOnly: false,
+    })
+    expect(mounts.find((m) => m.sourceVolume === 'plugin-deps')).toBeUndefined()
+  })
+
+  it('uses 180s health-check startPeriod on the gateway (covers init + cold start)', () => {
+    // Bumped from 20s → 180s in #215. Init-config (~5s) + gateway
+    // cold start (~30-60s) + plugin staging (~30-90s) doesn't fit
+    // in 20s. 180s gives margin without making real failures take
+    // 3+ minutes to surface.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    const gateway = findContainer(taskDef, 'gateway')
+    expect(gateway?.healthCheck?.startPeriod).toBe(180)
+  })
+
+  it('points both containers awslogs-group at the per-agent log group with distinct stream prefixes', () => {
+    // Same log group for the whole task; different stream prefixes
+    // so init-config and gateway logs are easy to filter in the
+    // CloudWatch console. awslogs-region asserted on both — round-2
+    // audit on PR #40 caught that the test consolidation lost the
+    // region check the old single-container test had.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    const init = findContainer(taskDef, 'init-config')
+    const gateway = findContainer(taskDef, 'gateway')
+    expect(init?.logConfiguration?.options?.['awslogs-group']).toBe(
       '/ecs/ender-stack-dev/companion-openclaw-hello-bot',
     )
-    expect(opts?.['awslogs-region']).toBe('us-east-1')
+    expect(gateway?.logConfiguration?.options?.['awslogs-group']).toBe(
+      '/ecs/ender-stack-dev/companion-openclaw-hello-bot',
+    )
+    expect(init?.logConfiguration?.options?.['awslogs-region']).toBe(
+      'us-east-1',
+    )
+    expect(gateway?.logConfiguration?.options?.['awslogs-region']).toBe(
+      'us-east-1',
+    )
+    expect(init?.logConfiguration?.options?.['awslogs-stream-prefix']).toBe(
+      'init-config',
+    )
+    expect(gateway?.logConfiguration?.options?.['awslogs-stream-prefix']).toBe(
+      'gateway',
+    )
   })
 
   it('tags the task-def with Component=agent-harness so Fleet picks it up', () => {
@@ -160,6 +331,39 @@ describe('renderService', () => {
       targetGroupArn: 'arn:tg',
     })
     expect(svc.enableExecuteCommand).toBe(false)
+  })
+
+  it('uses 300s healthCheckGracePeriodSeconds (must be ≥ task startPeriod 180s)', () => {
+    // #215: service grace must cover the task healthCheck startPeriod
+    // (180s) + the first health-check window after it expires.
+    // Setting service grace below task start period would cause ECS
+    // to start replacing tasks before they ever finish booting —
+    // rollout enters a kill-loop. 300s = 180s start + 120s margin.
+    const svc = renderService(fixtureInput, fixtureEnv, {
+      taskDefinitionArn: 'arn:tdf',
+      targetGroupArn: 'arn:tg',
+    })
+    expect(svc.healthCheckGracePeriodSeconds).toBe(300)
+  })
+
+  it('service grace > task startPeriod (machine-checked invariant — round-1 audit)', () => {
+    // The kill-loop invariant: service must give the task more time
+    // to become healthy than the task itself reports as "still
+    // starting." Future tuning of either knob in isolation would
+    // silently break this; this test fires if grace ≤ startPeriod.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    const gateway = taskDef.containerDefinitions?.find(
+      (c) => c.name === 'gateway',
+    )
+    const startPeriod = gateway?.healthCheck?.startPeriod
+    const svc = renderService(fixtureInput, fixtureEnv, {
+      taskDefinitionArn: 'arn:tdf',
+      targetGroupArn: 'arn:tg',
+    })
+    const grace = svc.healthCheckGracePeriodSeconds
+    expect(typeof startPeriod).toBe('number')
+    expect(typeof grace).toBe('number')
+    expect(grace!).toBeGreaterThan(startPeriod!)
   })
 })
 
