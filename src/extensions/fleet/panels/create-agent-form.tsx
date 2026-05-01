@@ -404,12 +404,27 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
 
   function reset() {
     setAgentName('')
-    setImage(defaultsByHarness[HARNESS_TYPE_DEFAULT] ?? '')
+    // "Create another" — preserve the operator's last harness
+    // selection (likely creating multiple agents of the same type)
+    // and pre-fill the image from THAT harness's default, not the
+    // default-default. With a single harness today this is
+    // equivalent to HARNESS_TYPE_DEFAULT, but it's the correct
+    // shape when a second harness lands. Round-9 audit P3.
+    setImage(defaultsByHarness[harnessType] ?? '')
     setRoleDescription('')
-    setHarnessType(HARNESS_TYPE_DEFAULT)
     setState({ kind: 'idle' })
     // "Create another" treats the just-applied default as the
     // canonical starting point; the operator hasn't edited yet.
+    imageEditedRef.current = false
+  }
+
+  function handleHarnessChange(next: HarnessType) {
+    setHarnessType(next)
+    // Switching harness should re-arm the pre-fill effect — the new
+    // harness's default may differ. Clearing the image too so the
+    // pre-fill effect's `image === ''` gate fires. Latent for the
+    // single-harness phase, correct for harness-2. Round-9 audit P3.
+    setImage('')
     imageEditedRef.current = false
   }
 
@@ -447,7 +462,7 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           state={state}
           submitting={submitting}
           harnessType={harnessType}
-          setHarnessType={setHarnessType}
+          setHarnessType={handleHarnessChange}
           agentName={agentName}
           setAgentName={setAgentName}
           agentNameValid={agentNameValid}

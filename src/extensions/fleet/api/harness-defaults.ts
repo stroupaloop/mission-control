@@ -12,7 +12,10 @@ import {
   type HarnessType,
 } from '@/extensions/fleet/templates/constraints'
 import { maxAgentNameLengthForPrefix } from '@/extensions/fleet/templates/openclaw'
-import { resolveFleetPrefix } from '@/extensions/fleet/lib/fleet-prefix'
+import {
+  resolveFleetPrefix,
+  type FleetPrefix,
+} from '@/extensions/fleet/lib/fleet-prefix'
 
 /**
  * GET /api/fleet/harness-defaults — per-harness defaults the
@@ -126,8 +129,9 @@ function withTimeout(): TimeoutHandle {
  * task-def missing the gateway container) — caller treats null as
  * "no default known."
  */
-async function openclawDefaultImage(): Promise<string | null> {
-  const fleet = resolveFleetPrefix()
+async function openclawDefaultImage(
+  fleet: FleetPrefix,
+): Promise<string | null> {
   const cluster = fleet.clusterName
   const serviceName = `${fleet.prefix}-companion-openclaw-smoke-test`
 
@@ -194,7 +198,8 @@ export async function GET(request: NextRequest) {
   // Per-harness lookup. Today only OpenClaw; structured as a record
   // keyed by HARNESS_TYPES so adding Hermes (or any other harness)
   // is a single-line extension.
-  const prefix = resolveFleetPrefix().prefix
+  const fleet = resolveFleetPrefix()
+  const prefix = fleet.prefix
 
   // Defensive: catch the degenerate case where the deployment
   // prefix is so long that no legal agent name fits under the AWS
@@ -225,7 +230,7 @@ export async function GET(request: NextRequest) {
 
   const defaults: Record<HarnessType, HarnessDefault> = {
     'companion/openclaw': {
-      defaultImage: await openclawDefaultImage(),
+      defaultImage: await openclawDefaultImage(fleet),
       agentNameMaxLength: openclawMaxLen,
     },
   }
