@@ -122,6 +122,15 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     setRoleDescription('')
     setHarnessType(HARNESS_TYPE_DEFAULT)
     setImage('')
+    // Also clear the cached defaults so a fresh fetch on next open
+    // is the only source of pre-fill. Otherwise: open → fetch
+    // (cache populates) → close → reopen → close-effect sets
+    // image='' BUT defaultsByHarness still has the old cached
+    // value → pre-fill effect synchronously applies the stale
+    // default → fetch returns fresh value → guard `image !== ''`
+    // blocks the update → operator sees stale image. Round-3
+    // audit P2.
+    setDefaultsByHarness({})
     // Reset the edited flag too so the next open re-pre-fills from
     // defaults (operator's intent from the closed-out session
     // doesn't leak into the next).

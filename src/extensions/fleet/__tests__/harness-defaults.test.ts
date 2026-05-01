@@ -156,6 +156,32 @@ describe('GET /api/fleet/harness-defaults', () => {
     expect(json.defaults['companion/openclaw'].defaultImage).toBeNull()
   })
 
+  it('derives project + env from MC_FLEET_CLUSTER_NAME when only that env var is set (round-3 audit P2)', async () => {
+    // Round-3 audit caught: previous hardcoded 'ender-stack'
+    // fallback diverged from agents.ts, which derives both project
+    // and env from a cluster name when the explicit vars aren't
+    // set. New behavior mirrors agents.ts exactly.
+    delete process.env.MC_FLEET_PROJECT_NAME
+    delete process.env.MC_FLEET_ENVIRONMENT
+    process.env.MC_FLEET_CLUSTER_NAME = 'foo-bar-staging'
+
+    ecsSendMock.mockResolvedValueOnce({ services: [] })
+    const GET = await importHandler()
+    await GET(mkRequest())
+
+    // First call: DescribeServicesCommand. Inspect the service name
+    // it asked for — must be derived as `foo-bar-staging-companion-
+    // openclaw-smoke-test`, not `ender-stack-dev-...` (old hardcode).
+    const firstCall = ecsSendMock.mock.calls[0]?.[0] as {
+      __type: string
+      input: { services?: string[] }
+    }
+    expect(firstCall.__type).toBe('DescribeServicesCommand')
+    expect(firstCall.input.services?.[0]).toBe(
+      'foo-bar-staging-companion-openclaw-smoke-test',
+    )
+  })
+
   it('rejects unauthorized callers via requireRole', async () => {
     const auth = await import('@/lib/auth')
     vi.mocked(auth.requireRole).mockReturnValueOnce({

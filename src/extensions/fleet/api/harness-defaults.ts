@@ -80,9 +80,26 @@ function clusterName(): string {
   return process.env.MC_FLEET_CLUSTER_NAME || 'ender-stack-dev'
 }
 
+/**
+ * Resolve the `{project}-{env}` prefix used for service-name
+ * templating. Mirrors agents.ts's derivation:
+ *   - MC_FLEET_PROJECT_NAME wins if set
+ *   - else fall back to all-but-last segment of MC_FLEET_CLUSTER_NAME
+ *     (default cluster `ender-stack-dev` → project `ender-stack`)
+ *   - same for MC_FLEET_ENVIRONMENT, but tail segment instead
+ *
+ * The previous hardcoded `'ender-stack'` fallback drifted from
+ * agents.ts and would have produced wrong service names for
+ * deployments that set ONLY MC_FLEET_CLUSTER_NAME (without
+ * project/env). Round-3 audit P2.
+ */
 function projectPrefix(): string {
-  const env = process.env.MC_FLEET_ENVIRONMENT || 'dev'
-  const project = process.env.MC_FLEET_PROJECT_NAME || 'ender-stack'
+  const cluster = clusterName()
+  const project =
+    process.env.MC_FLEET_PROJECT_NAME ||
+    cluster.split('-').slice(0, -1).join('-')
+  const env =
+    process.env.MC_FLEET_ENVIRONMENT || cluster.split('-').pop() || 'dev'
   return `${project}-${env}`
 }
 

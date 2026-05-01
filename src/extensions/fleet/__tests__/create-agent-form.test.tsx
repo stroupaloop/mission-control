@@ -429,6 +429,58 @@ describe('<CreateAgentForm />', () => {
     })
   })
 
+  it('refetches and applies fresh default on second open (round-3 audit — no stale cache)', async () => {
+    // Round-3 audit P2: defaultsByHarness was preserved across
+    // open/close, so a smoke-test image bumped between the first
+    // close and the second open would have shown the stale value
+    // (synchronous pre-fill from cache → guard blocks the fresh
+    // fetch's update). Close effect now clears the cache so each
+    // open starts with empty defaults and only the latest fetch
+    // populates them.
+    let callCount = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url =
+        typeof input === 'string' ? input : (input as URL | Request).toString()
+      if (url.includes('/api/fleet/harness-defaults')) {
+        callCount += 1
+        const image =
+          callCount === 1
+            ? 'ghcr.io/stroupaloop/openclaw:sha-OLD'
+            : 'ghcr.io/stroupaloop/openclaw:sha-NEW'
+        return new Response(
+          JSON.stringify({
+            defaults: { 'companion/openclaw': { defaultImage: image } },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ) as unknown as Response
+      }
+      throw new Error(`Unmocked: ${url}`)
+    })
+
+    const { rerender } = render(
+      <CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />,
+    )
+    await waitFor(() =>
+      expect(screen.getByLabelText(/Container image/i)).toHaveValue(
+        'ghcr.io/stroupaloop/openclaw:sha-OLD',
+      ),
+    )
+    // Close.
+    rerender(
+      <CreateAgentForm open={false} onCreated={vi.fn()} onClose={vi.fn()} />,
+    )
+    // Reopen — second fetch returns the new sha; the field MUST show
+    // it, not the cached OLD value.
+    rerender(
+      <CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />,
+    )
+    await waitFor(() =>
+      expect(screen.getByLabelText(/Container image/i)).toHaveValue(
+        'ghcr.io/stroupaloop/openclaw:sha-NEW',
+      ),
+    )
+  })
+
   it('does not re-pre-fill after the operator clears the field (round-2 audit)', async () => {
     // Round-2 audit caught: previous guard fired on every empty-
     // string state, so "Ctrl+A + Delete to retype" snapped the
