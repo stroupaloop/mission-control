@@ -21,6 +21,17 @@ export const HARNESS_TYPES = ['companion/openclaw'] as const
 export type HarnessType = (typeof HARNESS_TYPES)[number]
 
 /**
+ * Minimum allowed agentName length. Encoded structurally in
+ * AGENT_NAME_RE (1 start + 1 middle + 1 end = 3 chars min), but
+ * exported separately so callers comparing against the cap (e.g.
+ * harness-defaults's degenerate-prefix gate) don't have to reverse-
+ * engineer it from the regex literal. Round-4 audit on PR #39
+ * caught the off-by-two when the gate compared against 0 instead of
+ * the regex min.
+ */
+export const AGENT_NAME_MIN_LENGTH = 3
+
+/**
  * agentName must:
  * - start with an alphanumeric (no leading hyphen — ELBv2 + ECS
  *   reject names with leading hyphens).

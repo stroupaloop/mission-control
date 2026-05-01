@@ -190,16 +190,42 @@ describe('GET /api/fleet/harness-defaults', () => {
   })
 
   it('returns 500 PrefixTooLongForHarness when the deployment prefix leaves no room for any legal agent name (round-2 audit on PR #39)', async () => {
-    // Round-2 audit caught the degenerate path: a 26+ char prefix
-    // makes maxAgentNameLengthForPrefix return ≤ 0. The form's
-    // `m > 0` guard would silently fall back to maxLength=32 and
-    // the operator would see every submission rejected with a
+    // Round-2 audit caught the degenerate path: a long prefix
+    // makes maxAgentNameLengthForPrefix return less than the regex
+    // min (3). The form would silently fall back to maxLength=32
+    // and the operator would see every submission rejected with a
     // confusing 400. Surface the misconfig at the endpoint instead
-    // so MC ops sees a clear 500 with the prefix named.
+    // with a clear 500 + the prefix named in detail.
     delete process.env.MC_FLEET_PROJECT_NAME
     delete process.env.MC_FLEET_ENVIRONMENT
     process.env.MC_FLEET_CLUSTER_NAME =
       'this-is-an-extremely-long-cluster-name-staging' // 47 chars
+
+    const GET = await importHandler()
+    const resp = await GET(mkRequest())
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('PrefixTooLongForHarness')
+    // Round-4 audit: detail names the prefix so operators without
+    // log access can self-diagnose.
+    expect(json.detail).toContain('this-is-an-extremely-long')
+    expect(json.detail).toMatch(/at least 3/)
+  })
+
+  it('catches the off-by-two boundary: 23-char prefix → maxLen=2 → 500 (regex min is 3, not 1) — round-4 audit on PR #39', async () => {
+    // Round-4 audit caught: prior threshold was `openclawMaxLen <= 0`,
+    // but AGENT_NAME_RE requires minimum 3 chars. A 23-char prefix
+    // (e.g. `acme-platform-staging-x`) produces maxLen=2 which
+    // passes the old guard, endpoint returns 200 with
+    // `agentNameMaxLength: 2`, form sets maxLength=2 < minLength=3
+    // — every submission rejected. New threshold uses
+    // AGENT_NAME_MIN_LENGTH so the gate fires correctly.
+    delete process.env.MC_FLEET_PROJECT_NAME
+    delete process.env.MC_FLEET_ENVIRONMENT
+    // 23-char prefix (15 + 7 = 22 overhead → maxLen = 32 - 22 = 10).
+    // To trigger the boundary we need exactly 23 chars: project +
+    // env totals 23. e.g. `endpoint-22charname-dev` is 23.
+    process.env.MC_FLEET_CLUSTER_NAME = 'endpoint-22charname-dev' // 23 chars
 
     const GET = await importHandler()
     const resp = await GET(mkRequest())

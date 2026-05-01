@@ -6,7 +6,11 @@ import {
 } from '@aws-sdk/client-ecs'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
-import { HARNESS_TYPES, type HarnessType } from '@/extensions/fleet/templates/constraints'
+import {
+  AGENT_NAME_MIN_LENGTH,
+  HARNESS_TYPES,
+  type HarnessType,
+} from '@/extensions/fleet/templates/constraints'
 import { maxAgentNameLengthForPrefix } from '@/extensions/fleet/templates/openclaw'
 
 /**
@@ -61,6 +65,10 @@ export interface HarnessDefaultsResponse {
 
 export interface HarnessDefaultsErrorResponse {
   error: string
+  /** Operator-actionable detail (admin-only endpoint). For
+   *  PrefixTooLongForHarness: names the offending prefix so operators
+   *  without log access can self-diagnose. */
+  detail?: string
 }
 
 const AWS_REGION_AT_LOAD = process.env.AWS_REGION || 'us-east-1'
@@ -194,22 +202,26 @@ export async function GET(request: NextRequest) {
 
   // Defensive: catch the degenerate case where the deployment
   // prefix is so long that no legal agent name fits under the AWS
-  // 32-char target-group-name limit. The form's `m > 0` guard would
-  // silently fall back to maxLength=32 and the operator would see
-  // every submission rejected with a confusing 400 from the
-  // server-side check. Surface the misconfig at the endpoint
-  // instead so MC ops sees a clear 500 with the prefix named —
-  // they fix it once at the deployment level rather than
-  // diagnosing per-create failures. Round-2 audit on PR #39.
+  // 32-char target-group-name limit. Threshold is `<
+  // AGENT_NAME_MIN_LENGTH` (not `<= 0`) — round-4 audit caught that
+  // a 23-24 char prefix produces maxLen=1 or 2, which passes a
+  // `<= 0` guard but is structurally impossible (regex min is 3).
+  // Form would silently fall back to maxLength=32 and every submit
+  // would 400 with a confusing AGENT_NAME_RE rejection. Surface the
+  // misconfig at the endpoint instead.
   const openclawMaxLen = maxAgentNameLengthForPrefix(prefix)
-  if (openclawMaxLen <= 0) {
+  if (openclawMaxLen < AGENT_NAME_MIN_LENGTH) {
     logger.error(
-      { prefix, openclawMaxLen },
-      '[fleet] harness-defaults: deployment prefix is too long; no legal agent name fits under AWS 32-char target-group-name limit',
+      { prefix, openclawMaxLen, minRequired: AGENT_NAME_MIN_LENGTH },
+      '[fleet] harness-defaults: deployment prefix leaves insufficient room for any legal agent name (regex min < computed max)',
     )
     return NextResponse.json(
       {
         error: 'PrefixTooLongForHarness',
+        // Surface prefix in detail so operators without log access
+        // can self-diagnose. Admin-only endpoint; reflected value
+        // is server config, not user input. Round-4 audit.
+        detail: `prefix "${prefix}" leaves only ${openclawMaxLen} chars for the agent-name segment, but agent names require at least ${AGENT_NAME_MIN_LENGTH}`,
       } satisfies HarnessDefaultsErrorResponse,
       { status: 500 },
     )
