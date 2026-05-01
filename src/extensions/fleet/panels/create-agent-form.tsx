@@ -408,14 +408,21 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
 
 /**
  * Visual marker on field labels that the field is required. Asterisk
- * is the established convention; the `aria-label="required"` keeps
- * screen readers explicit (raw `*` is announced as "asterisk" or
- * sometimes ignored entirely depending on the tool). Inline
- * presentational concern; doesn't warrant its own file.
+ * is the established convention for sighted users. Marked
+ * `aria-hidden="true"` because the canonical screen-reader signal
+ * is the input's native `required` attribute — the asterisk is
+ * presentational supplement, not the semantic source of truth.
+ * (Round-1 audit on PR #39 flagged that aria-label="required" duped
+ * the native required attribute; aria-hidden is the conventional
+ * pattern for purely decorative requirement markers.)
  */
 function RequiredMark() {
   return (
-    <span className="text-destructive ml-0.5" aria-label="required">
+    <span
+      className="text-destructive ml-0.5"
+      aria-hidden="true"
+      data-testid="required-mark"
+    >
       *
     </span>
   )

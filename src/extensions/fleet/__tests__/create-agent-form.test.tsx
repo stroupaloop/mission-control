@@ -566,12 +566,12 @@ describe('<CreateAgentForm />', () => {
     ).not.toBeDisabled()
   })
 
-  it('marks Agent name, Container image, and Role description as required (asterisks visible to operators + screen readers)', () => {
+  it('marks Agent name, Container image, and Role description as required (visual asterisks + native required attr for screen readers)', () => {
     mockFetch({})
     render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     // Modal renders via React.createPortal into document.body, so
     // the rendered container is empty — query the document directly.
-    const marks = document.body.querySelectorAll('[aria-label="required"]')
+    const marks = document.body.querySelectorAll('[data-testid="required-mark"]')
     expect(marks.length).toBe(3)
     const labelTexts = Array.from(marks).map(
       (m) => m.parentElement?.textContent ?? '',
@@ -579,6 +579,17 @@ describe('<CreateAgentForm />', () => {
     expect(labelTexts.some((t) => t.includes('Agent name'))).toBe(true)
     expect(labelTexts.some((t) => t.includes('Container image'))).toBe(true)
     expect(labelTexts.some((t) => t.includes('Role description'))).toBe(true)
+    // Marks are decorative — aria-hidden so screen readers rely on
+    // the native `required` attribute on the inputs (the canonical
+    // semantic signal).
+    Array.from(marks).forEach((m) => {
+      expect(m.getAttribute('aria-hidden')).toBe('true')
+    })
+    // Inputs have the native required attribute that screen readers
+    // surface as "required field" announcements.
+    expect(screen.getByLabelText(/Agent name/i)).toBeRequired()
+    expect(screen.getByLabelText(/Container image/i)).toBeRequired()
+    expect(screen.getByLabelText(/Role description/i)).toBeRequired()
   })
 
   it('accepts an agent name starting with a digit (date prefix like `2026-04-30-bot`)', () => {

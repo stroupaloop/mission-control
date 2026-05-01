@@ -28,6 +28,7 @@ import {
 } from '@/extensions/fleet/templates'
 import {
   TARGET_GROUP_NAME_MAX_LENGTH,
+  maxAgentNameLengthForPrefix,
   targetGroupName,
 } from '@/extensions/fleet/templates/openclaw'
 // Constants live in `templates/constraints.ts` (no AWS SDK imports) so
@@ -450,7 +451,7 @@ export async function POST(request: NextRequest) {
         detail:
           `agentName too long for this deployment: target group name "${tgName}" ` +
           `is ${tgName.length} chars, AWS limit is ${TARGET_GROUP_NAME_MAX_LENGTH}. ` +
-          `Max agentName length here is ${TARGET_GROUP_NAME_MAX_LENGTH - resolved.prefix.length - '-agent-'.length}.`,
+          `Max agentName length here is ${maxAgentNameLengthForPrefix(resolved.prefix)}.`,
       } satisfies CreateAgentErrorResponse,
       { status: 400 },
     )
