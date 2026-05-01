@@ -39,6 +39,7 @@ function mockFetch(opts: {
   post?: Response
   postReject?: Error
   defaultImage?: string | null
+  agentNameMaxLength?: number
 }) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url =
@@ -47,7 +48,10 @@ function mockFetch(opts: {
       return new Response(
         JSON.stringify({
           defaults: {
-            'companion/openclaw': { defaultImage: opts.defaultImage ?? null },
+            'companion/openclaw': {
+              defaultImage: opts.defaultImage ?? null,
+              agentNameMaxLength: opts.agentNameMaxLength ?? 32,
+            },
           },
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -449,7 +453,12 @@ describe('<CreateAgentForm />', () => {
             : 'ghcr.io/stroupaloop/openclaw:sha-NEW'
         return new Response(
           JSON.stringify({
-            defaults: { 'companion/openclaw': { defaultImage: image } },
+            defaults: {
+              'companion/openclaw': {
+                defaultImage: image,
+                agentNameMaxLength: 32,
+              },
+            },
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         ) as unknown as Response
@@ -520,6 +529,56 @@ describe('<CreateAgentForm />', () => {
     expect(screen.getByLabelText(/Container image/i)).toHaveValue(
       'ghcr.io/stroupaloop/openclaw:sha-typed',
     )
+  })
+
+  it('honors agentNameMaxLength from harness-defaults — rejects names longer than the per-deployment cap (round-3b.2)', async () => {
+    // Server returns 10 (the ender-stack-dev cap); names longer than
+    // that fail client validation immediately. Catches the "looks
+    // valid by regex but exceeds AWS target-group-name limit" trap.
+    mockFetch({ agentNameMaxLength: 10 })
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    // Wait for the harness-defaults response so the maxLength is in
+    // state before we attempt the fill.
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Agent name/i)).toHaveAttribute(
+        'maxlength',
+        '10',
+      )
+    })
+    fill({ agentName: 'agent-name-too-long-for-deployment' })
+    expect(
+      screen.getByRole('button', { name: /Create agent/i }),
+    ).toBeDisabled()
+  })
+
+  it('accepts a 10-char agent name when the per-deployment cap is 10', async () => {
+    mockFetch({ agentNameMaxLength: 10 })
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    await waitFor(() =>
+      expect(screen.getByLabelText(/Agent name/i)).toHaveAttribute(
+        'maxlength',
+        '10',
+      ),
+    )
+    fill({ agentName: 'bot-v2-prd' })
+    expect(
+      screen.getByRole('button', { name: /Create agent/i }),
+    ).not.toBeDisabled()
+  })
+
+  it('marks Agent name, Container image, and Role description as required (asterisks visible to operators + screen readers)', () => {
+    mockFetch({})
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    // Modal renders via React.createPortal into document.body, so
+    // the rendered container is empty — query the document directly.
+    const marks = document.body.querySelectorAll('[aria-label="required"]')
+    expect(marks.length).toBe(3)
+    const labelTexts = Array.from(marks).map(
+      (m) => m.parentElement?.textContent ?? '',
+    )
+    expect(labelTexts.some((t) => t.includes('Agent name'))).toBe(true)
+    expect(labelTexts.some((t) => t.includes('Container image'))).toBe(true)
+    expect(labelTexts.some((t) => t.includes('Role description'))).toBe(true)
   })
 
   it('accepts an agent name starting with a digit (date prefix like `2026-04-30-bot`)', () => {

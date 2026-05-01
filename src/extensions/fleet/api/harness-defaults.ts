@@ -7,6 +7,7 @@ import {
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 import { HARNESS_TYPES, type HarnessType } from '@/extensions/fleet/templates/constraints'
+import { maxAgentNameLengthForPrefix } from '@/extensions/fleet/templates/openclaw'
 
 /**
  * GET /api/fleet/harness-defaults — per-harness defaults the
@@ -39,6 +40,19 @@ import { HARNESS_TYPES, type HarnessType } from '@/extensions/fleet/templates/co
 interface HarnessDefault {
   /** Pre-fill value for the create-agent form's image field; null when unknown. */
   defaultImage: string | null
+  /**
+   * Maximum legal `agentName` length for THIS deployment. Computed
+   * server-side from the actual `{prefix}` so the form's input
+   * `maxLength` is accurate per-deployment (different forks have
+   * different prefixes; `ender-stack-dev` allows 10 chars, a shorter
+   * fork prefix would allow more). Capped server-side regardless;
+   * this just gives the form an honest hint.
+   *
+   * For OpenClaw: derived from the AWS target-group-name 32-char
+   * limit minus the `{prefix}-agent-` overhead. See
+   * `maxAgentNameLengthForPrefix` in templates/openclaw.ts.
+   */
+  agentNameMaxLength: number
 }
 
 export interface HarnessDefaultsResponse {
@@ -176,9 +190,11 @@ export async function GET(request: NextRequest) {
   // Per-harness lookup. Today only OpenClaw; structured as a record
   // keyed by HARNESS_TYPES so adding Hermes (or any other harness)
   // is a single-line extension.
+  const prefix = projectPrefix()
   const defaults: Record<HarnessType, HarnessDefault> = {
     'companion/openclaw': {
       defaultImage: await openclawDefaultImage(),
+      agentNameMaxLength: maxAgentNameLengthForPrefix(prefix),
     },
   }
 

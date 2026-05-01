@@ -10,7 +10,7 @@ import {
 import { HARNESS_TEMPLATES } from '../templates'
 
 const fixtureInput: OpenClawAgentInput = {
-  agentName: 'hello-world',
+  agentName: 'hello-bot',
   roleDescription: 'Says hello',
   image: 'ghcr.io/stroupaloop/openclaw:sha-abc123',
 }
@@ -39,7 +39,7 @@ const fixtureEnv: OpenClawAgentEnv = {
 describe('renderTaskDefinition', () => {
   it('builds the family from prefix + agent name', () => {
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
-    expect(taskDef.family).toBe('ender-stack-dev-companion-openclaw-hello-world')
+    expect(taskDef.family).toBe('ender-stack-dev-companion-openclaw-hello-bot')
   })
 
   it('sets Fargate-compatible launch type and awsvpc network', () => {
@@ -55,7 +55,7 @@ describe('renderTaskDefinition', () => {
     const env = gateway?.environment ?? []
     expect(env).toContainEqual({
       name: 'OPENCLAW_AGENT_NAME',
-      value: 'hello-world',
+      value: 'hello-bot',
     })
     // OPENCLAW_MODEL was dropped in Beat 3b.1 — LiteLLM's smart-router
     // is the authoritative model-selection layer; per-agent tier
@@ -78,7 +78,7 @@ describe('renderTaskDefinition', () => {
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
     const opts = taskDef.containerDefinitions?.[0]?.logConfiguration?.options
     expect(opts?.['awslogs-group']).toBe(
-      '/ecs/ender-stack-dev/companion-openclaw-hello-world',
+      '/ecs/ender-stack-dev/companion-openclaw-hello-bot',
     )
     expect(opts?.['awslogs-region']).toBe('us-east-1')
   })
@@ -88,7 +88,7 @@ describe('renderTaskDefinition', () => {
     const tags = taskDef.tags ?? []
     expect(tags).toContainEqual({ key: 'Component', value: 'agent-harness' })
     expect(tags).toContainEqual({ key: 'Harness', value: 'companion/openclaw' })
-    expect(tags).toContainEqual({ key: 'AgentName', value: 'hello-world' })
+    expect(tags).toContainEqual({ key: 'AgentName', value: 'hello-bot' })
   })
 
   it('uses the IAM-aligned task + exec role ARNs', () => {
@@ -101,7 +101,7 @@ describe('renderTaskDefinition', () => {
 describe('renderTargetGroup', () => {
   it('uses the prefix-agent-{name} pattern (singular agent vs plural agents on the LB)', () => {
     const tg = renderTargetGroup(fixtureInput, fixtureEnv)
-    expect(tg.Name).toBe('ender-stack-dev-agent-hello-world')
+    expect(tg.Name).toBe('ender-stack-dev-agent-hello-bot')
   })
 
   it('uses /healthz on port 18789 (matches OpenClaw gateway)', () => {
@@ -122,10 +122,10 @@ describe('renderService', () => {
     const svc = renderService(fixtureInput, fixtureEnv, {
       taskDefinitionArn: 'arn:aws:ecs:us-east-1:398152419239:task-definition/x:1',
       targetGroupArn:
-        'arn:aws:elasticloadbalancing:us-east-1:398152419239:targetgroup/ender-stack-dev-agent-hello-world/abc',
+        'arn:aws:elasticloadbalancing:us-east-1:398152419239:targetgroup/ender-stack-dev-agent-hello-bot/abc',
     })
     expect(svc.serviceName).toBe(
-      'ender-stack-dev-companion-openclaw-hello-world',
+      'ender-stack-dev-companion-openclaw-hello-bot',
     )
   })
 
@@ -168,8 +168,8 @@ describe('renderListenerRule', () => {
     // Two patterns: exact-name root + subtree. Prevents `/agent/bot-test/api`
     // from matching a `/agent/bot*` glob and silently routing to `bot`.
     expect(rule.pathPatterns).toEqual([
-      '/agent/hello-world',
-      '/agent/hello-world/*',
+      '/agent/hello-bot',
+      '/agent/hello-bot/*',
     ])
     expect(rule.targetGroupArn).toBe('arn:tg')
     expect(rule.priority).toBe(1234)

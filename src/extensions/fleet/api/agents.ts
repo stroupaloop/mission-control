@@ -26,6 +26,10 @@ import {
   type OpenClawAgentInput,
   type OpenClawAgentEnv,
 } from '@/extensions/fleet/templates'
+import {
+  TARGET_GROUP_NAME_MAX_LENGTH,
+  targetGroupName,
+} from '@/extensions/fleet/templates/openclaw'
 // Constants live in `templates/constraints.ts` (no AWS SDK imports) so
 // the client-side form, the per-harness validateInput, AND the
 // harness-agnostic type guard below all share the same regex /
@@ -429,6 +433,27 @@ export async function POST(request: NextRequest) {
     agentName: body.agentName,
     roleDescription: body.roleDescription,
     image: body.image,
+  }
+
+  // Combined-name length pre-check: the AWS target-group-name 32-char
+  // hard limit is reachable for legal agent names under our prefix
+  // (e.g. `ender-stack-dev` + `-agent-` + a 12-char agent name = 35
+  // chars, which AWS rejects with a ValidationError AFTER task-def +
+  // log-group are created — orphaning real billed resources). Failing
+  // fast here turns that 502-after-partial-creates into a clean 400
+  // with no AWS calls made.
+  const tgName = targetGroupName(resolved.prefix, input.agentName)
+  if (tgName.length > TARGET_GROUP_NAME_MAX_LENGTH) {
+    return NextResponse.json(
+      {
+        error: 'ValidationError',
+        detail:
+          `agentName too long for this deployment: target group name "${tgName}" ` +
+          `is ${tgName.length} chars, AWS limit is ${TARGET_GROUP_NAME_MAX_LENGTH}. ` +
+          `Max agentName length here is ${TARGET_GROUP_NAME_MAX_LENGTH - resolved.prefix.length - '-agent-'.length}.`,
+      } satisfies CreateAgentErrorResponse,
+      { status: 400 },
+    )
   }
 
   // Per-harness validation. Throws on bad input — caught below as 400.

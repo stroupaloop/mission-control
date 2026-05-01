@@ -74,11 +74,18 @@ describe('GET /api/fleet/harness-defaults', () => {
     const resp = await GET(mkRequest())
     expect(resp.status).toBe(200)
     const json = (await resp.json()) as {
-      defaults: Record<string, { defaultImage: string | null }>
+      defaults: Record<
+        string,
+        { defaultImage: string | null; agentNameMaxLength: number }
+      >
     }
     expect(json.defaults['companion/openclaw'].defaultImage).toBe(
       '1.dkr.ecr.us-east-1.amazonaws.com/ender-stack/companion-openclaw:1dcff0d',
     )
+    // For prefix `ender-stack-dev`: 32 (TG max) - 15 (prefix) - 7
+    // ('-agent-') = 10. Server-computed so the form's maxLength
+    // attribute is accurate per-deployment.
+    expect(json.defaults['companion/openclaw'].agentNameMaxLength).toBe(10)
   })
 
   it('returns null defaultImage when the smoke-test service does not exist (fresh cluster)', async () => {

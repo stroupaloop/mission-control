@@ -77,6 +77,13 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   const [defaultsByHarness, setDefaultsByHarness] = useState<
     Partial<Record<HarnessType, string>>
   >({})
+  // Per-harness maxLength for agentName, computed server-side from
+  // the deployment prefix so the form's input attribute is accurate
+  // (default 32 = the regex max; the dynamic value is tighter when
+  // the prefix forces it). Updated by the harness-defaults fetch.
+  const [maxAgentNameByHarness, setMaxAgentNameByHarness] = useState<
+    Partial<Record<HarnessType, number>>
+  >({})
 
   const firstInputRef = useRef<HTMLInputElement | null>(null)
   const previousFocusRef = useRef<Element | null>(null)
@@ -122,6 +129,7 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     setRoleDescription('')
     setHarnessType(HARNESS_TYPE_DEFAULT)
     setImage('')
+    setMaxAgentNameByHarness({})
     // Also clear the cached defaults so a fresh fetch on next open
     // is the only source of pre-fill. Otherwise: open → fetch
     // (cache populates) → close → reopen → close-effect sets
@@ -199,12 +207,16 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
         if (!resp.ok) return
         const body = (await resp.json()) as HarnessDefaultsResponse
         if (ac.signal.aborted) return
-        const next: Partial<Record<HarnessType, string>> = {}
+        const nextImages: Partial<Record<HarnessType, string>> = {}
+        const nextMaxLengths: Partial<Record<HarnessType, number>> = {}
         for (const h of HARNESS_TYPES) {
           const d = body.defaults[h]?.defaultImage
-          if (typeof d === 'string') next[h] = d
+          if (typeof d === 'string') nextImages[h] = d
+          const m = body.defaults[h]?.agentNameMaxLength
+          if (typeof m === 'number' && m > 0) nextMaxLengths[h] = m
         }
-        setDefaultsByHarness(next)
+        setDefaultsByHarness(nextImages)
+        setMaxAgentNameByHarness(nextMaxLengths)
       } catch {
         // AbortError + network/JSON failures all silent — the
         // operator can still type the image manually.
@@ -228,10 +240,21 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
 
   // Local pre-validation before POSTing — catches the obvious failures
   // without a network round-trip. Server-side validation (in
-  // templates/index.ts validateOpenClawInput + agents.ts type guard) is
-  // still the authoritative gate; this layer is UX-only. Keep the rules
-  // in lockstep with constraints.ts.
-  const agentNameValid = AGENT_NAME_RE.test(agentName)
+  // templates/index.ts validateOpenClawInput + agents.ts type guard +
+  // the prefix-aware target-group-name length cap) is still the
+  // authoritative gate; this layer is UX-only. Keep the rules in
+  // lockstep with constraints.ts.
+  //
+  // `agentNameMaxForHarness` is the per-deployment cap from the
+  // harness-defaults endpoint (computed from the actual prefix so a
+  // shorter fork prefix gets a longer cap). Defaults to 32 (the regex
+  // upper bound) when the endpoint hasn't responded yet; the server
+  // is the authoritative gate either way.
+  const agentNameMaxForHarness =
+    maxAgentNameByHarness[harnessType] ?? 32
+  const agentNameValid =
+    AGENT_NAME_RE.test(agentName) &&
+    agentName.length <= agentNameMaxForHarness
   // image must contain a separator AND have something after it.
   // `img:` (empty tag) passes a naive `includes(':')` check but
   // ECS rejects it as InvalidParameterException at registration —
@@ -365,6 +388,7 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           agentName={agentName}
           setAgentName={setAgentName}
           agentNameValid={agentNameValid}
+          agentNameMaxForHarness={agentNameMaxForHarness}
           image={image}
           onImageChange={handleImageChange}
           imageValid={imageValid}
@@ -382,6 +406,21 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   )
 }
 
+/**
+ * Visual marker on field labels that the field is required. Asterisk
+ * is the established convention; the `aria-label="required"` keeps
+ * screen readers explicit (raw `*` is announced as "asterisk" or
+ * sometimes ignored entirely depending on the tool). Inline
+ * presentational concern; doesn't warrant its own file.
+ */
+function RequiredMark() {
+  return (
+    <span className="text-destructive ml-0.5" aria-label="required">
+      *
+    </span>
+  )
+}
+
 interface FormBodyProps {
   state: FormState
   submitting: boolean
@@ -390,6 +429,7 @@ interface FormBodyProps {
   agentName: string
   setAgentName: (s: string) => void
   agentNameValid: boolean
+  agentNameMaxForHarness: number
   image: string
   onImageChange: (s: string) => void
   imageValid: boolean
@@ -410,6 +450,7 @@ function FormBody({
   agentName,
   setAgentName,
   agentNameValid,
+  agentNameMaxForHarness,
   image,
   onImageChange,
   imageValid,
@@ -601,7 +642,7 @@ function FormBody({
 
       <div>
         <label htmlFor="agentName" className="block text-sm font-medium mb-1.5">
-          Agent name
+          Agent name <RequiredMark />
         </label>
         <input
           id="agentName"
@@ -612,7 +653,7 @@ function FormBody({
           disabled={submitting}
           required
           minLength={3}
-          maxLength={32}
+          maxLength={agentNameMaxForHarness}
           autoCapitalize="off"
           autoCorrect="off"
           autoComplete="off"
@@ -629,16 +670,20 @@ function FormBody({
           }`}
         >
           Lowercase letters, digits, hyphens. Must start and end with a
-          letter or digit (no leading/trailing hyphens). 3–32 chars.
-          Date prefixes like <code>2026-04-30-bot</code> work. Used in
-          IAM ARN templating — security control, not just a UX
+          letter or digit (no leading/trailing hyphens). 3–
+          {agentNameMaxForHarness} chars (this deployment&apos;s cap is
+          tighter than the regex upper bound because the AWS
+          target-group name <code>{`{prefix}-agent-{name}`}</code> is
+          capped at 32 chars). Date prefixes like{' '}
+          <code>2026-04-30</code> work as long as the total fits. Used
+          in IAM ARN templating — security control, not just a UX
           validator.
         </p>
       </div>
 
       <div>
         <label htmlFor="image" className="block text-sm font-medium mb-1.5">
-          Container image
+          Container image <RequiredMark />
         </label>
         <input
           id="image"
@@ -677,7 +722,7 @@ function FormBody({
           htmlFor="roleDescription"
           className="block text-sm font-medium mb-1.5"
         >
-          Role description
+          Role description <RequiredMark />
         </label>
         <textarea
           id="roleDescription"
