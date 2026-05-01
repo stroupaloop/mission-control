@@ -20,29 +20,21 @@
 export const HARNESS_TYPES = ['companion/openclaw'] as const
 export type HarnessType = (typeof HARNESS_TYPES)[number]
 
-export const MODEL_TIERS = ['opus-4-7', 'sonnet-4-6', 'haiku-4-5'] as const
-export type ModelTier = (typeof MODEL_TIERS)[number]
-
-/**
- * Default tier the create-agent form selects on initial render and on
- * "Create another" reset. Sonnet 4.6 is the cost-balance default —
- * Opus 4.7 is for capability-heavy agents and Haiku 4.5 for
- * latency-sensitive / cheap fan-out. Exported (rather than redeclared
- * in the form) so the form stays aligned when the default changes
- * here.
- */
-export const MODEL_TIER_DEFAULT: ModelTier = 'sonnet-4-6'
-
 /**
  * agentName must:
- * - start with a lowercase letter (AWS resource-name rules + simpler
- *   IAM ARN templating).
+ * - start with an alphanumeric (no leading hyphen — ELBv2 + ECS
+ *   reject names with leading hyphens).
  * - contain only [a-z0-9-] in the middle.
- * - end with an alphanumeric (no trailing hyphens — ELBv2 + ECS reject
- *   names that end in `-`).
- * - be 3-32 chars total (the {1,30} middle window plus the start and
- *   end anchors). Combined-name caps (`{prefix}-agent-{name}` ≤ 32 for
+ * - end with an alphanumeric (no trailing hyphens — same reason).
+ * - be 3-32 chars total (the {1,30} middle window plus start + end
+ *   anchors). Combined-name caps (`{prefix}-agent-{name}` ≤ 32 for
  *   target groups) are enforced separately by validateOpenClawInput.
+ *
+ * Digit-start is permitted: AWS doesn't require letter-start for ECS
+ * service names, ECS task-def families, or ELBv2 target group names
+ * (verified against the AWS Service Authorization Reference). Names
+ * like `2026-04-30-bot` (date prefix) are valid and useful for
+ * operators tracking creation dates.
  *
  * This regex is the load-bearing security control on
  * `ecs:RegisterTaskDefinition` (granted Resource:"*" with no
@@ -50,7 +42,7 @@ export const MODEL_TIER_DEFAULT: ModelTier = 'sonnet-4-6'
  * task-def with an arbitrary family name like `litellm` because the
  * regex constrains the `agentName` slot in the templated family.
  */
-export const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/
+export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/
 
 /**
  * Caps mirror the rationale that drove dropping slackWebhookUrl —

@@ -49,7 +49,8 @@ import type { CreateTargetGroupCommandInput } from '@aws-sdk/client-elastic-load
 /**
  * Validated form input for an OpenClaw create-agent request.
  *
- * agentName regex `^[a-z0-9-]{3,32}$` is enforced server-side at the
+ * agentName regex `AGENT_NAME_RE` (constraints.ts —
+ * `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$`) is enforced server-side at the
  * handler boundary BEFORE this template is rendered. The IAM policy doc
  * for `task_ecs_write` (ender-stack PR #208) explicitly cites this regex
  * as a load-bearing security control: ecs:RegisterTaskDefinition is
@@ -58,14 +59,23 @@ import type { CreateTargetGroupCommandInput } from '@aws-sdk/client-elastic-load
  * task-def families is THIS regex. Treat it accordingly.
  */
 export interface OpenClawAgentInput {
-  /** Unique identifier (`^[a-z0-9-]{3,32}$`). Becomes the suffix on every per-agent ARN. */
+  /** Unique identifier (`AGENT_NAME_RE` from constraints.ts). Becomes the suffix on every per-agent ARN. */
   agentName: string
   /** Operator-facing role description, surfaced in MC's agent detail panel. */
   roleDescription: string
   /** Container image (full ECR or GHCR URI with digest or tag). */
   image: string
-  /** Model tier passed to the agent runtime as `OPENCLAW_MODEL`. */
-  modelTier: 'opus-4-7' | 'sonnet-4-6' | 'haiku-4-5'
+  // Note: modelTier (and the OPENCLAW_MODEL env var) was removed in
+  // Beat 3b.1. LiteLLM's smart-router is the authoritative model-
+  // selection layer — the agent calls LITELLM_API_BASE and the router
+  // picks the optimal model per request. A pinned model tier on the
+  // agent task-def would either be ignored (smart-router still routes)
+  // or actively conflict (agent forces a model that smart-router
+  // would have routed elsewhere for cost/latency). Either way, dead
+  // surface. If a future use case needs per-agent model HINTS, add a
+  // structured preference field rather than a single tier — the
+  // present "tier" framing was already at the wrong abstraction
+  // level vs. how the routing layer thinks about model selection.
   // Note: slackWebhookUrl removed in this template version. A Slack
   // webhook is a bearer token; storing it as a plaintext env var on a
   // task-def revision means anyone with `ecs:DescribeTaskDefinition`
@@ -183,7 +193,10 @@ export function renderTaskDefinition(
           // Phase 2.x hardening follow-up if/when that model expands
           // to non-admin operator roles.
           { name: 'OPENCLAW_ROLE_DESCRIPTION', value: input.roleDescription },
-          { name: 'OPENCLAW_MODEL', value: input.modelTier },
+          // OPENCLAW_MODEL removed in Beat 3b.1 — see the
+          // OpenClawAgentInput interface above for rationale (LiteLLM
+          // smart-router is authoritative; per-agent tier was either
+          // ignored or actively conflicted with routing decisions).
           // http:// is intentional — the LiteLLM ALB is internal-only
           // (private subnets, internal=true) with no ACM cert. Same
           // disposition as every other VPC-internal service in the
@@ -321,7 +334,8 @@ export function renderService(
  * so `bot-test` traffic could silently land on `bot`'s target group).
  * Anchoring with `/{name}` (exact) and `/{name}/*` (subtree) makes the
  * patterns mutually exclusive across distinct agent names. The
- * agentName regex `^[a-z0-9-]{3,32}$` permits hyphenated names that
+ * agentName regex `AGENT_NAME_RE` (constraints.ts —
+ * `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$`) permits hyphenated names that
  * would trigger this overlap, so the anchoring is required.
  *
  * Priority is computed by the handler from a hash of the agent name;

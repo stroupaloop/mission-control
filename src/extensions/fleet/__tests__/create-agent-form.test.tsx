@@ -25,9 +25,46 @@ function fill(inputs: Partial<typeof validInputs> = {}) {
   })
 }
 
+/**
+ * Beat 3b.1 — the form now fetches `/api/fleet/harness-defaults` on
+ * open in a useEffect. Tests need to route fetches by URL rather
+ * than queueing single responses, otherwise the harness-defaults
+ * fetch consumes the test's intended POST mock.
+ *
+ * Pass `post` for the agents response (optional — leave undefined for
+ * tests that don't submit). Pass `defaultImage` to set what
+ * harness-defaults returns (default null = "no pre-fill").
+ */
+function mockFetch(opts: {
+  post?: Response
+  postReject?: Error
+  defaultImage?: string | null
+}) {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url =
+      typeof input === 'string' ? input : (input as URL | Request).toString()
+    if (url.includes('/api/fleet/harness-defaults')) {
+      return new Response(
+        JSON.stringify({
+          defaults: {
+            'companion/openclaw': { defaultImage: opts.defaultImage ?? null },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ) as unknown as Response
+    }
+    if (url.includes('/api/fleet/agents') && init?.method === 'POST') {
+      if (opts.postReject) throw opts.postReject
+      if (!opts.post) throw new Error('No POST mock provided')
+      return opts.post
+    }
+    throw new Error(`Unmocked fetch URL: ${url}`)
+  })
+}
+
 describe('<CreateAgentForm />', () => {
   it('disables Create until all fields are valid', () => {
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     const submit = screen.getByRole('button', { name: /Create agent/i })
     expect(submit).toBeDisabled()
     fill()
@@ -35,7 +72,7 @@ describe('<CreateAgentForm />', () => {
   })
 
   it('rejects an agent name with a leading hyphen at the client layer', () => {
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     fill({ agentName: '-bad' })
     expect(
       screen.getByRole('button', { name: /Create agent/i }),
@@ -43,7 +80,7 @@ describe('<CreateAgentForm />', () => {
   })
 
   it('rejects an agent name with a trailing hyphen at the client layer', () => {
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     fill({ agentName: 'bad-' })
     expect(
       screen.getByRole('button', { name: /Create agent/i }),
@@ -51,7 +88,7 @@ describe('<CreateAgentForm />', () => {
   })
 
   it('rejects an image without a tag separator at the client layer', () => {
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     fill({ image: 'ghcr.io/stroupaloop/openclaw' })
     expect(
       screen.getByRole('button', { name: /Create agent/i }),
@@ -62,7 +99,7 @@ describe('<CreateAgentForm />', () => {
     // Round-8 audit: `image.includes(':')` would have accepted `img:`,
     // which then 502s at AWS-side InvalidParameterException. Catching
     // it client-side gives immediate operator feedback.
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     fill({ image: 'ghcr.io/stroupaloop/openclaw:' })
     expect(
       screen.getByRole('button', { name: /Create agent/i }),
@@ -70,7 +107,7 @@ describe('<CreateAgentForm />', () => {
   })
 
   it('rejects a whitespace-only role description at the client layer', () => {
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     fill({ roleDescription: '    ' })
     expect(
       screen.getByRole('button', { name: /Create agent/i }),
@@ -78,8 +115,8 @@ describe('<CreateAgentForm />', () => {
   })
 
   it('POSTs the expected JSON body and surfaces success state with warnings', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(
+    const fetchMock = mockFetch({
+      post: new Response(
         JSON.stringify({
           ok: true,
           agentName: 'smoke-2',
@@ -103,10 +140,10 @@ describe('<CreateAgentForm />', () => {
         }),
         { status: 201, headers: { 'content-type': 'application/json' } },
       ) as unknown as Response,
-    )
+    })
 
     const onCreated = vi.fn()
-    render(<CreateAgentForm onCreated={onCreated} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={onCreated} onClose={vi.fn()} />)
     fill()
     fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
 
@@ -117,19 +154,23 @@ describe('<CreateAgentForm />', () => {
 
     // POST body shape — handler treats agentName regex as a security
     // control; double-check the form actually emits the user's input.
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/fleet/agents',
-      expect.objectContaining({ method: 'POST' }),
+    // Form fetches /api/fleet/harness-defaults first (mount useEffect)
+    // then POSTs to /api/fleet/agents — find the POST call by URL.
+    const postCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        typeof url === 'string' &&
+        url === '/api/fleet/agents' &&
+        init?.method === 'POST',
     )
+    expect(postCall).toBeDefined()
     const body = JSON.parse(
-      (fetchMock.mock.calls[0]?.[1]?.body as string) ?? '{}',
+      (postCall?.[1]?.body as string) ?? '{}',
     ) as Record<string, unknown>
     expect(body).toEqual({
       harnessType: 'companion/openclaw',
       agentName: 'smoke-2',
       image: 'ghcr.io/stroupaloop/openclaw:sha-abc1234',
       roleDescription: 'Phase 2.2 vertical-slice smoke test',
-      modelTier: 'sonnet-4-6',
     })
 
     // Warning code surfaced verbatim — Beat 3a uses stable codes
@@ -141,8 +182,8 @@ describe('<CreateAgentForm />', () => {
   })
 
   it('renders an error block (with status + SDK error name) on a 502', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(
+    mockFetch({
+      post: new Response(
         JSON.stringify({
           error: 'ServerException',
           partialResources: {
@@ -153,10 +194,10 @@ describe('<CreateAgentForm />', () => {
         }),
         { status: 502, headers: { 'content-type': 'application/json' } },
       ) as unknown as Response,
-    )
+    })
 
     const onCreated = vi.fn()
-    render(<CreateAgentForm onCreated={onCreated} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={onCreated} onClose={vi.fn()} />)
     fill()
     fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
 
@@ -179,8 +220,8 @@ describe('<CreateAgentForm />', () => {
     // returns no ARN — see agents-create.test.ts. The form must
     // render guidance to the operator since a running ECS service
     // with no known ARN is the most expensive orphan to leave behind.
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(
+    mockFetch({
+      post: new Response(
         JSON.stringify({
           error: 'Error',
           partialResources: {
@@ -196,9 +237,9 @@ describe('<CreateAgentForm />', () => {
         }),
         { status: 502, headers: { 'content-type': 'application/json' } },
       ) as unknown as Response,
-    )
+    })
 
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     fill()
     fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
 
@@ -221,14 +262,14 @@ describe('<CreateAgentForm />', () => {
     // would have surfaced as "0 — SyntaxError" instead of the actual
     // "502 — ResponseParseError". Operator misdiagnoses a real
     // failure mode if the status doesn't survive the JSON parse.
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response('<html><body>502 Bad Gateway</body></html>', {
+    mockFetch({
+      post: new Response('<html><body>502 Bad Gateway</body></html>', {
         status: 502,
         headers: { 'content-type': 'text/html' },
       }) as unknown as Response,
-    )
+    })
 
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     fill()
     fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
 
@@ -249,11 +290,11 @@ describe('<CreateAgentForm />', () => {
     // "Creating…" indefinitely. AbortController fires SubmitTimeout
     // (not generic NetworkError) so operators distinguish hard
     // timeouts from transient network glitches.
-    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(
-      Object.assign(new Error('aborted'), { name: 'AbortError' }),
-    )
+    mockFetch({
+      postReject: Object.assign(new Error('aborted'), { name: 'AbortError' }),
+    })
 
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     fill()
     fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
 
@@ -266,11 +307,11 @@ describe('<CreateAgentForm />', () => {
   })
 
   it('renders an error block with a "0 — NetworkError" code on fetch reject', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(
-      Object.assign(new Error('boom'), { name: 'TypeError' }),
-    )
+    mockFetch({
+      postReject: Object.assign(new Error('boom'), { name: 'TypeError' }),
+    })
 
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     fill()
     fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
 
@@ -285,14 +326,14 @@ describe('<CreateAgentForm />', () => {
 
   it('calls onClose when the operator cancels', () => {
     const onClose = vi.fn()
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={onClose} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={onClose} />)
     fireEvent.click(screen.getByRole('button', { name: /Cancel/i }))
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
   it('"Create another" resets the form to the idle state with empty fields', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(
+    mockFetch({
+      post: new Response(
         JSON.stringify({
           ok: true,
           agentName: 'smoke-2',
@@ -308,9 +349,9 @@ describe('<CreateAgentForm />', () => {
         }),
         { status: 201, headers: { 'content-type': 'application/json' } },
       ) as unknown as Response,
-    )
+    })
 
-    render(<CreateAgentForm onCreated={vi.fn()} onClose={vi.fn()} />)
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     fill()
     fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
 
@@ -330,5 +371,165 @@ describe('<CreateAgentForm />', () => {
     expect(
       screen.getByRole('button', { name: /Create agent/i }),
     ).toBeDisabled()
+  })
+
+  // ── Beat 3b.1: modal behavior + image pre-fill + digit-start regex ──
+
+  it('does not render anything when `open` is false', () => {
+    mockFetch({})
+    const { container } = render(
+      <CreateAgentForm open={false} onCreated={vi.fn()} onClose={vi.fn()} />,
+    )
+    expect(container.firstChild).toBeNull()
+    expect(screen.queryByTestId('create-agent-modal')).not.toBeInTheDocument()
+  })
+
+  it('renders as a portaled modal with backdrop when `open` is true', () => {
+    mockFetch({})
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    expect(screen.getByTestId('create-agent-modal')).toBeInTheDocument()
+    expect(
+      screen.getByTestId('create-agent-modal-backdrop'),
+    ).toBeInTheDocument()
+    // role="dialog" + aria-modal for assistive tech.
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+  })
+
+  it('Esc key calls onClose', () => {
+    mockFetch({})
+    const onClose = vi.fn()
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={onClose} />)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('backdrop click calls onClose; click on the dialog body does not', () => {
+    mockFetch({})
+    const onClose = vi.fn()
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={onClose} />)
+    // Click on the dialog body (e.stopPropagation prevents bubbling)
+    fireEvent.click(screen.getByTestId('create-agent-modal'))
+    expect(onClose).not.toHaveBeenCalled()
+    // Click on the backdrop closes
+    fireEvent.click(screen.getByTestId('create-agent-modal-backdrop'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('pre-fills the image field from /api/fleet/harness-defaults on open', async () => {
+    mockFetch({
+      defaultImage:
+        '398152419239.dkr.ecr.us-east-1.amazonaws.com/ender-stack/companion-openclaw:1dcff0d',
+    })
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Container image/i)).toHaveValue(
+        '398152419239.dkr.ecr.us-east-1.amazonaws.com/ender-stack/companion-openclaw:1dcff0d',
+      )
+    })
+  })
+
+  it('refetches and applies fresh default on second open (round-3 audit — no stale cache)', async () => {
+    // Round-3 audit P2: defaultsByHarness was preserved across
+    // open/close, so a smoke-test image bumped between the first
+    // close and the second open would have shown the stale value
+    // (synchronous pre-fill from cache → guard blocks the fresh
+    // fetch's update). Close effect now clears the cache so each
+    // open starts with empty defaults and only the latest fetch
+    // populates them.
+    let callCount = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url =
+        typeof input === 'string' ? input : (input as URL | Request).toString()
+      if (url.includes('/api/fleet/harness-defaults')) {
+        callCount += 1
+        const image =
+          callCount === 1
+            ? 'ghcr.io/stroupaloop/openclaw:sha-OLD'
+            : 'ghcr.io/stroupaloop/openclaw:sha-NEW'
+        return new Response(
+          JSON.stringify({
+            defaults: { 'companion/openclaw': { defaultImage: image } },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ) as unknown as Response
+      }
+      throw new Error(`Unmocked: ${url}`)
+    })
+
+    const { rerender } = render(
+      <CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />,
+    )
+    await waitFor(() =>
+      expect(screen.getByLabelText(/Container image/i)).toHaveValue(
+        'ghcr.io/stroupaloop/openclaw:sha-OLD',
+      ),
+    )
+    // Close.
+    rerender(
+      <CreateAgentForm open={false} onCreated={vi.fn()} onClose={vi.fn()} />,
+    )
+    // Reopen — second fetch returns the new sha; the field MUST show
+    // it, not the cached OLD value.
+    rerender(
+      <CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />,
+    )
+    await waitFor(() =>
+      expect(screen.getByLabelText(/Container image/i)).toHaveValue(
+        'ghcr.io/stroupaloop/openclaw:sha-NEW',
+      ),
+    )
+  })
+
+  it('does not re-pre-fill after the operator clears the field (round-2 audit)', async () => {
+    // Round-2 audit caught: previous guard fired on every empty-
+    // string state, so "Ctrl+A + Delete to retype" snapped the
+    // pre-filled value back. New guard tracks user-edit intent via
+    // a ref. Once the operator changes the field (even to ''), the
+    // pre-fill effect must NOT re-fire for the rest of the open
+    // session.
+    mockFetch({
+      defaultImage: 'ghcr.io/stroupaloop/openclaw:sha-default',
+    })
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    // Wait for the default to land.
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Container image/i)).toHaveValue(
+        'ghcr.io/stroupaloop/openclaw:sha-default',
+      )
+    })
+    // Operator clears the field — onChange fires with empty string.
+    fireEvent.change(screen.getByLabelText(/Container image/i), {
+      target: { value: '' },
+    })
+    // Field stays empty; the pre-fill effect does NOT re-fire.
+    await new Promise((r) => setTimeout(r, 30))
+    expect(screen.getByLabelText(/Container image/i)).toHaveValue('')
+  })
+
+  it('does not stomp operator-typed image with the fetched default', async () => {
+    // Simulate the operator typing before defaults arrive — the
+    // useEffect that pre-fills only fires when `image === ''`.
+    mockFetch({ defaultImage: 'ghcr.io/stroupaloop/openclaw:sha-default' })
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText(/Container image/i), {
+      target: { value: 'ghcr.io/stroupaloop/openclaw:sha-typed' },
+    })
+    // Even after the defaults fetch resolves, operator's value stays.
+    await new Promise((r) => setTimeout(r, 30))
+    expect(screen.getByLabelText(/Container image/i)).toHaveValue(
+      'ghcr.io/stroupaloop/openclaw:sha-typed',
+    )
+  })
+
+  it('accepts an agent name starting with a digit (date prefix like `2026-04-30-bot`)', () => {
+    // Beat 3b.1 relaxed AGENT_NAME_RE — leading digits are valid AWS
+    // resource names. The previous restriction blocked dated builds.
+    mockFetch({})
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    fill({ agentName: '2026-04-30-bot' })
+    expect(
+      screen.getByRole('button', { name: /Create agent/i }),
+    ).not.toBeDisabled()
   })
 })

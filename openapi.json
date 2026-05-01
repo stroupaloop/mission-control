@@ -12668,6 +12668,75 @@
         }
       }
     },
+    "/api/fleet/harness-defaults": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Per-harness defaults the create-agent form pre-fills",
+        "description": "Returns default values the create-agent form uses for first-render pre-fill. Today only `defaultImage` (the OpenClaw smoke-test service's currently-deployed image) — looked up at request time from ECS so the default tracks newer images without redeploys. Returns `defaultImage: null` on any lookup failure (service missing, AWS error, gateway container missing); never 5xx's on missing defaults so the form can render with a placeholder fallback.",
+        "operationId": "getFleetHarnessDefaults",
+        "responses": {
+          "200": {
+            "description": "Per-harness defaults map",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "defaults"
+                  ],
+                  "properties": {
+                    "defaults": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "required": [
+                          "defaultImage"
+                        ],
+                        "properties": {
+                          "defaultImage": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Pre-fill value for the create-agent form's image field; null when no default is known."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "description": "Server-side configuration mismatch (e.g. HARNESS_TYPES contains a harness not present in the lookup map). Body returns only `error` (no detail).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/fleet/services/{name}/redeploy": {
       "post": {
         "tags": [

@@ -94,7 +94,6 @@ const validBody = () => ({
   agentName: 'hello-world',
   roleDescription: 'Says hello',
   image: 'ghcr.io/stroupaloop/openclaw:sha-abc123',
-  modelTier: 'sonnet-4-6',
 })
 
 const mkRequest = (body: unknown) =>
