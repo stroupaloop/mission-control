@@ -12,6 +12,7 @@ import {
   type HarnessType,
 } from '@/extensions/fleet/templates/constraints'
 import { maxAgentNameLengthForPrefix } from '@/extensions/fleet/templates/openclaw'
+import { resolveFleetPrefix } from '@/extensions/fleet/lib/fleet-prefix'
 
 /**
  * GET /api/fleet/harness-defaults — per-harness defaults the
@@ -98,37 +99,10 @@ function withTimeout(): TimeoutHandle {
   return { signal: ac.signal, clear: () => clearTimeout(id) }
 }
 
-function clusterName(): string {
-  return process.env.MC_FLEET_CLUSTER_NAME || 'ender-stack-dev'
-}
-
-/**
- * Resolve the `{project}-{env}` prefix used for service-name
- * templating. Mirrors agents.ts's derivation:
- *   - MC_FLEET_PROJECT_NAME wins if set
- *   - else fall back to all-but-last segment of MC_FLEET_CLUSTER_NAME
- *     (default cluster `ender-stack-dev` → project `ender-stack`)
- *   - same for MC_FLEET_ENVIRONMENT, but tail segment instead
- *
- * The previous hardcoded `'ender-stack'` fallback drifted from
- * agents.ts and would have produced wrong service names for
- * deployments that set ONLY MC_FLEET_CLUSTER_NAME (without
- * project/env). Round-3 audit P2.
- *
- * KEEP IN SYNC with `resolveEnv()` in api/agents.ts. The form's
- * client-side caps (driven by this endpoint) must match the
- * server's enforced caps (driven by agents.ts). If agents.ts ever
- * gains a new fallback or env var, update both files together.
- */
-function projectPrefix(): string {
-  const cluster = clusterName()
-  const project =
-    process.env.MC_FLEET_PROJECT_NAME ||
-    cluster.split('-').slice(0, -1).join('-')
-  const env =
-    process.env.MC_FLEET_ENVIRONMENT || cluster.split('-').pop() || 'dev'
-  return `${project}-${env}`
-}
+// Cluster + project/env/prefix derivation shared with agents.ts via
+// `lib/fleet-prefix.ts`. Round-7 audit on PR #39 caught the prior
+// duplicate logic as a drift risk — extracted so future fallback
+// additions land in one place.
 
 /**
  * Lookup the OpenClaw smoke-test service's currently-deployed image.
@@ -137,8 +111,9 @@ function projectPrefix(): string {
  * "no default known."
  */
 async function openclawDefaultImage(): Promise<string | null> {
-  const cluster = clusterName()
-  const serviceName = `${projectPrefix()}-companion-openclaw-smoke-test`
+  const fleet = resolveFleetPrefix()
+  const cluster = fleet.clusterName
+  const serviceName = `${fleet.prefix}-companion-openclaw-smoke-test`
 
   let taskDefArn: string | undefined
   const t1 = withTimeout()
@@ -203,7 +178,7 @@ export async function GET(request: NextRequest) {
   // Per-harness lookup. Today only OpenClaw; structured as a record
   // keyed by HARNESS_TYPES so adding Hermes (or any other harness)
   // is a single-line extension.
-  const prefix = projectPrefix()
+  const prefix = resolveFleetPrefix().prefix
 
   // Defensive: catch the degenerate case where the deployment
   // prefix is so long that no legal agent name fits under the AWS

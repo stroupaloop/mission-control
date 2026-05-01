@@ -41,6 +41,14 @@ export const AGENT_NAME_MIN_LENGTH = 3
  *   anchors). Combined-name caps (`{prefix}-agent-{name}` ≤ 32 for
  *   target groups) are enforced separately by validateOpenClawInput.
  *
+ * Note: the 32-char upper bound here is aspirational for any
+ * non-empty deployment prefix. With OpenClaw's `{prefix}-agent-`
+ * overhead (prefix + 7 chars), no real deployment can use the full
+ * 32. The AWS target-group-name limit (TARGET_GROUP_NAME_MAX_LENGTH
+ * in templates/openclaw.ts) is the operative cap; the regex's `{1,30}`
+ * literal would need a manual update if AWS ever raises the TG-name
+ * limit. Round-7 audit on PR #39 flagged the implicit coupling.
+ *
  * Digit-start is permitted: AWS doesn't require letter-start for ECS
  * service names, ECS task-def families, or ELBv2 target group names
  * (verified against the AWS Service Authorization Reference). Names

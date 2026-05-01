@@ -93,6 +93,13 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   // upgraded this from "post-merge follow-up" to "should fix before
   // merge" — operator trap.
   const [defaultsError, setDefaultsError] = useState<string | null>(null)
+  // When the deployment is misconfigured such that NO legal agent
+  // name is creatable (PrefixTooLongForHarness), every submit will
+  // 400 server-side. Disable submit entirely + change banner copy
+  // from "may still go through" hedge to a definitive "cannot
+  // create agents until X" message. Round-7 audit caught the
+  // misleading hedge + the still-enabled Create button.
+  const [defaultsErrorBlocksSubmit, setDefaultsErrorBlocksSubmit] = useState(false)
 
   const firstInputRef = useRef<HTMLInputElement | null>(null)
   const previousFocusRef = useRef<Element | null>(null)
@@ -140,6 +147,7 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     setImage('')
     setMaxAgentNameByHarness({})
     setDefaultsError(null)
+    setDefaultsErrorBlocksSubmit(false)
     // Also clear the cached defaults so a fresh fetch on next open
     // is the only source of pre-fill. Otherwise: open → fetch
     // (cache populates) → close → reopen → close-effect sets
@@ -237,6 +245,15 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           }
           if (ac.signal.aborted) return
           setDefaultsError(detail ? `${code}: ${detail}` : code)
+          // PrefixTooLongForHarness means NO legal agent name fits
+          // under the AWS 32-char cap given this prefix — every
+          // submit will 400. Block submit definitively. Other 5xx
+          // codes (e.g. transient AWS API failures upstream of the
+          // ECS lookup) leave submit enabled — the operator can
+          // still type a name that the server-side gate accepts.
+          if (code === 'PrefixTooLongForHarness') {
+            setDefaultsErrorBlocksSubmit(true)
+          }
           return
         }
         const body = (await resp.json()) as HarnessDefaultsResponse
@@ -311,7 +328,11 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   const roleDescriptionValid =
     roleDescription.trim().length > 0 &&
     roleDescription.length <= ROLE_DESCRIPTION_MAX_BYTES
-  const formValid = agentNameValid && imageValid && roleDescriptionValid
+  const formValid =
+    agentNameValid &&
+    imageValid &&
+    roleDescriptionValid &&
+    !defaultsErrorBlocksSubmit
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -442,6 +463,7 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           onClose={onClose}
           onResetForCreateAnother={reset}
           defaultsError={defaultsError}
+          defaultsErrorBlocksSubmit={defaultsErrorBlocksSubmit}
         />
       </div>
     </div>,
@@ -497,6 +519,10 @@ interface FormBodyProps {
    *  PrefixTooLongForHarness) rather than a working-looking form
    *  that fails every submit. */
   defaultsError: string | null
+  /** True when the defaults error means NO legal agent name is
+   *  creatable (today: PrefixTooLongForHarness). Disables submit
+   *  + uses a definitive banner copy. */
+  defaultsErrorBlocksSubmit: boolean
 }
 
 function FormBody({
@@ -519,6 +545,7 @@ function FormBody({
   onClose,
   onResetForCreateAnother,
   defaultsError,
+  defaultsErrorBlocksSubmit,
 }: FormBodyProps) {
   if (state.kind === 'success') {
     const r = state.response
@@ -611,20 +638,44 @@ function FormBody({
       {defaultsError && (
         <div
           role="alert"
-          className="rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm"
+          className={
+            defaultsErrorBlocksSubmit
+              ? 'rounded border border-destructive/50 bg-destructive/10 p-3 text-sm'
+              : 'rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm'
+          }
           data-testid="create-agent-defaults-error"
         >
-          <div className="font-medium text-amber-700 mb-1">
-            Form pre-fill unavailable
+          <div
+            className={
+              defaultsErrorBlocksSubmit
+                ? 'font-medium text-destructive mb-1'
+                : 'font-medium text-amber-700 mb-1'
+            }
+          >
+            {defaultsErrorBlocksSubmit
+              ? 'Cannot create agents — deployment misconfigured'
+              : 'Form pre-fill unavailable'}
           </div>
           <div className="text-xs">
             <code>{defaultsError}</code>
           </div>
           <div className="text-xs mt-1 text-muted-foreground">
-            The deployment&apos;s harness defaults endpoint failed.
-            Submissions may still go through, but per-deployment
-            constraints (e.g. agent name length cap) won&apos;t be
-            enforced client-side. Check MC logs for details.
+            {defaultsErrorBlocksSubmit ? (
+              <>
+                The deployment prefix leaves no room for any legal
+                agent name under the AWS 32-char target-group-name
+                limit. Submit is disabled until the prefix is fixed.
+                Check MC logs for the offending value.
+              </>
+            ) : (
+              <>
+                The deployment&apos;s harness defaults endpoint
+                failed. Per-deployment constraints (e.g. agent name
+                length cap) won&apos;t be enforced client-side, but
+                the server-side gate still applies — submissions
+                will be validated there. Check MC logs for details.
+              </>
+            )}
           </div>
         </div>
       )}
