@@ -9,6 +9,7 @@ import { logger } from '@/lib/logger'
 import {
   AGENT_NAME_MIN_LENGTH,
   HARNESS_TYPES,
+  PREFIX_TOO_LONG_ERROR,
   type HarnessType,
 } from '@/extensions/fleet/templates/constraints'
 import { maxAgentNameLengthForPrefix } from '@/extensions/fleet/templates/openclaw'
@@ -218,7 +219,7 @@ export async function GET(request: NextRequest) {
     )
     return NextResponse.json(
       {
-        error: 'PrefixTooLongForHarness',
+        error: PREFIX_TOO_LONG_ERROR,
         // Surface prefix in detail so operators without log access
         // can self-diagnose. Admin-only endpoint; reflected value
         // is server config, not user input. Round-4 audit.

@@ -8,6 +8,7 @@ import {
   AGENT_NAME_RE,
   HARNESS_TYPES,
   IMAGE_MAX_BYTES,
+  PREFIX_TOO_LONG_ERROR,
   ROLE_DESCRIPTION_MAX_BYTES,
   type HarnessType,
 } from '../templates/constraints'
@@ -251,7 +252,7 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           // codes (e.g. transient AWS API failures upstream of the
           // ECS lookup) leave submit enabled — the operator can
           // still type a name that the server-side gate accepts.
-          if (code === 'PrefixTooLongForHarness') {
+          if (code === PREFIX_TOO_LONG_ERROR) {
             setDefaultsErrorBlocksSubmit(true)
           }
           return

@@ -71,3 +71,17 @@ export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/
  */
 export const ROLE_DESCRIPTION_MAX_BYTES = 1024
 export const IMAGE_MAX_BYTES = 512
+
+/**
+ * Wire-protocol error code for the harness-defaults endpoint when
+ * the deployment prefix is so long that no legal agent name fits.
+ * Exported as a shared constant so the server (`api/harness-defaults.ts`)
+ * and client (`panels/create-agent-form.tsx`) reference the same
+ * literal — a server-side rename without updating the client would
+ * silently un-block the form-submit gate that this code triggers.
+ *
+ * Tests intentionally assert the literal string to protect against
+ * accidental rename of the wire shape — they do NOT import this
+ * constant. Round-11 audit on PR #39.
+ */
+export const PREFIX_TOO_LONG_ERROR = 'PrefixTooLongForHarness'
