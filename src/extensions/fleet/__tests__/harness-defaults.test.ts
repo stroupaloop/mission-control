@@ -222,9 +222,10 @@ describe('GET /api/fleet/harness-defaults', () => {
     // AGENT_NAME_MIN_LENGTH so the gate fires correctly.
     delete process.env.MC_FLEET_PROJECT_NAME
     delete process.env.MC_FLEET_ENVIRONMENT
-    // 23-char prefix (15 + 7 = 22 overhead → maxLen = 32 - 22 = 10).
-    // To trigger the boundary we need exactly 23 chars: project +
-    // env totals 23. e.g. `endpoint-22charname-dev` is 23.
+    // For a 23-char prefix: 23 + 7 ('-agent-') = 30 overhead →
+    // maxLen = 32 - 30 = 2. That's < AGENT_NAME_MIN_LENGTH (3),
+    // so the gate must fire. Pre-fix gate (`<= 0`) let this
+    // through with maxLen=2 → form set maxLength=2 < minLength=3.
     process.env.MC_FLEET_CLUSTER_NAME = 'endpoint-22charname-dev' // 23 chars
 
     const GET = await importHandler()

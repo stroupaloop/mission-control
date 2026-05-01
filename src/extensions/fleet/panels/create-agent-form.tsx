@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'
 import {
+  AGENT_NAME_MIN_LENGTH,
   AGENT_NAME_RE,
   HARNESS_TYPES,
   IMAGE_MAX_BYTES,
@@ -213,7 +214,15 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           const d = body.defaults[h]?.defaultImage
           if (typeof d === 'string') nextImages[h] = d
           const m = body.defaults[h]?.agentNameMaxLength
-          if (typeof m === 'number' && m > 0) nextMaxLengths[h] = m
+          // Belt-and-suspenders: require maxLength >= the regex
+          // minimum, not just > 0. Server's PrefixTooLongForHarness
+          // 500 is the primary gate (caught before this point), but
+          // if a future server bug ever returned a positive but
+          // sub-minimum value, the form would set maxLength <
+          // minLength and trap operators in an unsubmittable state.
+          if (typeof m === 'number' && m >= AGENT_NAME_MIN_LENGTH) {
+            nextMaxLengths[h] = m
+          }
         }
         setDefaultsByHarness(nextImages)
         setMaxAgentNameByHarness(nextMaxLengths)
