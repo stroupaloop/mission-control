@@ -207,12 +207,10 @@ export interface CreateAgentResponse {
 // Stable warning codes. Keep the list small and code-named so the UI
 // can render specific guidance per code without parsing message text.
 //
-// `WARNING_RUNTIME_CONFIG_GAP` was removed when #215 closed (PR #40
-// shipped the init-config sidecar + ephemeral volumes that the
-// warning advertised as "until #215 lands"). The `warnings` array
-// shape is preserved on the response so future warnings can land
-// without a contract change — clients render the array generically
-// and the array is currently empty for every successful create.
+// The `warnings` array shape is preserved on the response so future
+// warnings can land without a contract change — clients render the
+// array generically. The array is currently empty for every
+// successful create (no live warnings).
 
 export interface CreateAgentErrorResponse {
   error: string

@@ -145,9 +145,8 @@ function tagsToElbv2(
  *
  * STATE_DIR and PLUGIN_DEPS_MOUNT_PATH are derived from
  * WORKSPACE_MOUNT_PATH rather than re-declared as independent
- * literals — round-1 audit on PR #40 caught the drift risk if
- * someone changed one without the others (image layout change,
- * Terraform refactor, etc.). Single edit point per path component.
+ * literals so an image-layout change can't drift one path against
+ * the others. Single edit point per path component.
  */
 const CONFIG_MOUNT_PATH = '/home/node/.openclaw'
 const WORKSPACE_MOUNT_PATH = `${CONFIG_MOUNT_PATH}/workspace`
@@ -172,13 +171,11 @@ export function renderTaskDefinition(
   const logGroup = `${env.logGroupPrefix}/companion-openclaw-${input.agentName}`
 
   // Two env blocks: vars common to both containers, and gateway-only
-  // additions. Round-1 audit on PR #40 caught that the prior shared
-  // block placed OPENCLAW_ROLE_DESCRIPTION + LITELLM_API_BASE on
-  // init-config too — same task-def-level blast radius (anyone with
-  // ecs:DescribeTaskDefinition reads the whole revision regardless),
-  // but a confusing surface for future maintainers since init-config.sh
-  // doesn't read either. Splitting makes "what each container actually
-  // needs" legible from the template.
+  // additions. Splitting makes "what each container actually
+  // consumes" legible from the template — init-config doesn't read
+  // OPENCLAW_ROLE_DESCRIPTION or LITELLM_API_BASE, so they're not
+  // injected there. (Same task-def-level blast radius regardless,
+  // since `ecs:DescribeTaskDefinition` returns the whole revision.)
   //
   // commonEnv: read by both containers' processes.
   //   - OPENCLAW_AGENT_NAME / AGENT_NAME — agent identity (init-config.sh
@@ -289,24 +286,25 @@ export function renderTaskDefinition(
         command: [
           [
             // Pre-create state subdirs OpenClaw expects but doesn't
-            // recursively mkdir at runtime. Note:
-            // ${STATE_DIR}/plugin-runtime-deps is the plugin-deps
-            // volume mount point — the directory exists as soon as
-            // ECS mounts the volume, so the mkdir on it is a no-op
-            // (kept in the list for readability + symmetry with the
-            // other state subdirs). Round-1 audit on PR #41.
+            // recursively mkdir at runtime. The plugin-runtime-deps
+            // entry is a no-op — ECS has already mounted the
+            // plugin-deps volume at that path so the directory
+            // exists; kept in the list for readability and symmetry.
             `mkdir -p ${STATE_DIR}/plugin-runtime-deps ${STATE_DIR}/agents ${STATE_DIR}/canvas`,
             // Belt-and-suspenders cleanup; ephemeral volumes are
             // empty per task launch so this is normally a no-op
             // but mirrors the bundled script's intent.
             `rm -f ${CONFIG_MOUNT_PATH}/openclaw.json`,
-            // Hand the volume roots to the node user so the gateway
-            // can write. `chown -R` on Linux does NOT stop at mount
-            // boundaries, so recursing on the workspace mount also
-            // covers the plugin-deps volume mounted underneath at
-            // ${PLUGIN_DEPS_MOUNT_PATH}. Single target is sufficient.
-            // Config stays root-owned: gateway mounts it RO, doesn't
-            // need write perms.
+            // Hand the workspace volume to the node user so the
+            // gateway can write. `chown -R` on Linux does NOT stop
+            // at mount boundaries, and plugin-deps is mounted in
+            // this container under workspace at
+            // ${PLUGIN_DEPS_MOUNT_PATH} (see mountPoints below — the
+            // recursion only covers it because plugin-deps is
+            // mounted here; without that mount the path would be a
+            // bare directory on workspace, not the plugin-deps
+            // volume). Config stays root-owned: gateway mounts it
+            // RO, doesn't need write perms.
             //
             // `id -u node` resolves the node user's UID at runtime
             // from the image itself rather than hardcoding 1000.
@@ -314,7 +312,6 @@ export function renderTaskDefinition(
             // user's UID, this becomes a loud `id: 'node': no such
             // user` failure at the init-config step instead of a
             // silent wrong-ownership boot loop on the gateway.
-            // Round-1 audit on PR #41.
             `chown -R "$(id -u node):$(id -g node)" ${WORKSPACE_MOUNT_PATH}`,
             `echo '[init-config] ephemeral perms set — gateway boot cleared'`,
           ].join(' && '),

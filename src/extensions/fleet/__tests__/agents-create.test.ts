@@ -404,11 +404,11 @@ describe('POST /api/fleet/agents — happy path', () => {
     expect(resp.status).toBe(201)
   })
 
-  it('returns an empty warnings array on 201 (post-#215 — no stale runtime-config-gap)', async () => {
-    // #215 closed in PR #40 (init-config sidecar + ephemeral volumes
-    // landed in the task-def template). The pre-#215 warning code
-    // 'runtime-config-gap' is removed; the `warnings` field shape is
-    // preserved so the contract is stable for future warnings.
+  it('returns an empty warnings array on 201', async () => {
+    // The `warnings` field shape is preserved on 201 responses so
+    // the response contract is stable for future warnings, but the
+    // array is empty for current successful creates — no stale
+    // gateway-config-gap warning.
     happyPathMocks()
     const POST = await importHandler()
     const resp = await POST(mkRequest(validBody()))

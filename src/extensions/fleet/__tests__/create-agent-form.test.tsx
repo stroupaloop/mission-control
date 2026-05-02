@@ -121,10 +121,10 @@ describe('<CreateAgentForm />', () => {
   it('POSTs the expected JSON body and surfaces success state with warnings', async () => {
     // Fixture uses a fictional warning code (`fixture-warning`) so this
     // test exercises the warnings-array rendering contract independent
-    // of any specific real warning. The pre-#215 'runtime-config-gap'
-    // warning was removed when init-config landed (PR #40); using a
-    // fictional code here keeps the test honest about what it covers
-    // (rendering, not any specific real warning).
+    // of any specific real warning. The handler currently emits an
+    // empty warnings array; using a fictional code here keeps the test
+    // honest about what it covers — rendering, not any specific
+    // real warning that may come and go over time.
     const fetchMock = mockFetch({
       post: new Response(
         JSON.stringify({
