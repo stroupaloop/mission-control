@@ -9,6 +9,7 @@ import type {
   FleetServicesErrorResponse as ErrorResponse,
 } from '../api/services'
 import { CreateAgentForm } from './create-agent-form'
+import { DeleteAgentForm } from './delete-agent-form'
 
 // ---------- Component ----------
 
@@ -45,6 +46,12 @@ export function FleetPanel() {
   // table via load() and stays open showing the success summary; the
   // operator dismisses with "Done" or "Create another."
   const [createOpen, setCreateOpen] = useState(false)
+  // Beat 4c — agent currently selected for deletion. `null` = modal
+  // closed. The modal is single-instance (one delete at a time);
+  // selecting "Delete" on a second row while a first delete is open
+  // would replace the selection. In practice operators don't multi-
+  // select; UI affordance simple.
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   // Tracks when `data` was last successfully fetched (Date.now()).
   // Drives the staleness indicator that appears when error+data are
   // both present — operators need to know the table is from before
@@ -340,19 +347,50 @@ export function FleetPanel() {
                         <td className="p-2">{svc.launchType ?? '—'}</td>
                         <td className="p-2 text-right">{svc.activeDeployments}</td>
                         <td className="p-2 text-right">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => void redeploy(svc.name)}
-                            disabled={redeployDisabled}
-                            data-testid={`redeploy-${svc.name}`}
-                          >
-                            {rs.kind === 'pending'
-                              ? 'Triggering…'
-                              : svc.activeDeployments > 0
-                                ? 'Rolling…'
-                                : 'Redeploy'}
-                          </Button>
+                          <div className="flex justify-end gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void redeploy(svc.name)}
+                              disabled={redeployDisabled}
+                              data-testid={`redeploy-${svc.name}`}
+                            >
+                              {rs.kind === 'pending'
+                                ? 'Triggering…'
+                                : svc.activeDeployments > 0
+                                  ? 'Rolling…'
+                                  : 'Redeploy'}
+                            </Button>
+                            {/*
+                              Delete button — Beat 4c. Disabled while
+                              redeploy is in flight or rolling on the
+                              same row to prevent compounding state
+                              changes; the backend doesn't enforce
+                              mutex, so this is the UX-level guard.
+                              Agent name is parsed out of the service
+                              name (`{prefix}-companion-openclaw-{name}`)
+                              by the modal, not derived here, so this
+                              button just stashes the FULL service name
+                              and lets the modal route /api/fleet/agents/
+                              {agentName-portion}.
+                            */}
+                            {agentNameFromService(svc.name) !== null ? (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() =>
+                                  setDeleteTarget(
+                                    agentNameFromService(svc.name),
+                                  )
+                                }
+                                disabled={redeployDisabled}
+                                data-testid={`delete-${svc.name}`}
+                                className="text-destructive hover:bg-destructive/10"
+                              >
+                                Delete
+                              </Button>
+                            ) : null}
+                          </div>
                           {rs.kind === 'error' ? (
                             <div
                               className="text-xs text-destructive mt-1"
@@ -371,8 +409,38 @@ export function FleetPanel() {
           )}
         </div>
       ) : null}
+      <DeleteAgentForm
+        agentName={deleteTarget}
+        onDeleted={() => {
+          setDeleteTarget(null)
+          void load({ silent: false })
+        }}
+        onClose={() => setDeleteTarget(null)}
+      />
     </div>
   )
+}
+
+/**
+ * Extract the agent-name suffix from a service name shaped like
+ * `{prefix}-companion-openclaw-{agentName}`. Returns null when the
+ * service isn't an MC-managed agent (the Delete button stays hidden
+ * for those rows — defense in depth on the server-side
+ * Component=agent-harness + ManagedBy=mission-control tag check).
+ *
+ * The fleet-services API returns ALL services in the cluster
+ * (including the smoke-test, MC itself, LiteLLM, etc.); we only want
+ * the Delete button next to MC-created agents. Tag-based filtering
+ * isn't exposed on the services-list response today, so we fall back
+ * to the naming convention. The smoke-test (`*-companion-openclaw-
+ * smoke-test`) WOULD pass this regex too, but the server's two-tag
+ * check (Component=agent-harness AND ManagedBy=mission-control)
+ * refuses the delete with a 404. Belt-and-suspenders: the button is
+ * harmless even if shown for the smoke-test.
+ */
+function agentNameFromService(serviceName: string): string | null {
+  const m = serviceName.match(/-companion-openclaw-([a-z0-9][a-z0-9-]*[a-z0-9])$/)
+  return m ? m[1] : null
 }
 
 // Self-ticking timer rendered next to the cluster summary when both error
