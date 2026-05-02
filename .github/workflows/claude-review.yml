@@ -38,7 +38,7 @@ jobs:
       github.repository == 'stroupaloop/mission-control' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 40  # bounds blast radius if a --max-turns 120 session stalls
+    timeout-minutes: 60  # bounds blast radius if a --max-turns 120 session stalls
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
