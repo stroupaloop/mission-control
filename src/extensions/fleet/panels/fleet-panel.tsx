@@ -416,8 +416,14 @@ export function FleetPanel() {
       ) : null}
       <DeleteAgentForm
         agentName={deleteTarget}
+        // onDeleted fires AFTER a successful 200 — refresh the
+        // fleet table so the deleted row drops out, but DO NOT
+        // close the modal here. The modal renders its own
+        // success summary (resource ARNs + idempotency notes)
+        // and the operator dismisses via "Done" (which calls
+        // onClose). Closing here would race the success summary
+        // off-screen before the operator could read it.
         onDeleted={() => {
-          setDeleteTarget(null)
           void load({ silent: false })
         }}
         onClose={() => setDeleteTarget(null)}
