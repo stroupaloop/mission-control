@@ -250,13 +250,44 @@ describe('renderTaskDefinition', () => {
   })
 
   it('uses 180s health-check startPeriod on the gateway (covers init + cold start)', () => {
-    // Bumped from 20s → 180s in #215. Init-config (~5s) + gateway
-    // cold start (~30-60s) + plugin staging (~30-90s) doesn't fit
-    // in 20s. 180s gives margin without making real failures take
-    // 3+ minutes to surface.
+    // Init-config (~5s) + gateway cold start (~30-60s) + plugin
+    // staging (~30-90s) doesn't fit in the prior 20s. 180s gives
+    // margin without making real failures take 3+ minutes to surface.
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
     const gateway = findContainer(taskDef, 'gateway')
     expect(gateway?.healthCheck?.startPeriod).toBe(180)
+  })
+
+  it('container health check is node-fetch on 127.0.0.1 (mirrors smoke-test; not wget --spider)', () => {
+    // Live-validated bug: the prior `wget --spider` form issued HEAD
+    // requests, which OpenClaw's /healthz doesn't honor (only GET).
+    // Every container health-check probe failed → ECS marked the
+    // gateway unhealthy after retries → task replaced → boot loop.
+    // node is guaranteed in the image; fetch defaults to GET; the
+    // smoke-test has been running this exact pattern healthily.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    const gateway = findContainer(taskDef, 'gateway')
+    const cmd = gateway?.healthCheck?.command ?? []
+    expect(cmd[0]).toBe('CMD')
+    expect(cmd[1]).toBe('node')
+    expect(cmd[2]).toBe('-e')
+    // The script body uses `fetch()` (GET by default) against
+    // 127.0.0.1:18789/healthz and exits 0 on r.ok, 1 otherwise.
+    const script = cmd[3] ?? ''
+    expect(script).toContain("fetch('http://127.0.0.1:18789/healthz')")
+    expect(script).toContain('r.ok?0:1')
+    // Defense-in-depth: catch a regression that puts wget back.
+    expect(cmd.join(' ')).not.toContain('wget')
+    expect(cmd.join(' ')).not.toContain('--spider')
+  })
+
+  it('container health check uses 5 retries (matches smoke-test)', () => {
+    // 5 × 30s = 2.5 min of failed checks before ECS pulls the task —
+    // gives the gateway room to recover from a transient stall
+    // (e.g. plugin-load event-loop spike) without task replacement.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
+    const gateway = findContainer(taskDef, 'gateway')
+    expect(gateway?.healthCheck?.retries).toBe(5)
   })
 
   it('points both containers awslogs-group at the per-agent log group with distinct stream prefixes', () => {

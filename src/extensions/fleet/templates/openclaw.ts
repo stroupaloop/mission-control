@@ -396,20 +396,39 @@ export function renderTaskDefinition(
             readOnly: false,
           },
         ],
+        // Mirror the smoke-test's known-working container health check
+        // (terraform/modules/companion/openclaw/main.tf): node-based
+        // fetch instead of wget. Two reasons the prior `wget --spider`
+        // form failed against a freshly-booted MC-created agent:
+        //   1. `--spider` issues a HEAD request; OpenClaw's /healthz
+        //      only honors GET, so every probe got a 404/405 and
+        //      ECS marked the gateway unhealthy after retries → task
+        //      replaced → boot loop.
+        //   2. `wget` may not be on the upstream image's PATH for the
+        //      runtime user (Alpine base provides BusyBox wget, but
+        //      relying on that across base-image bumps is brittle).
+        // node is guaranteed present (the image's whole reason for
+        // existing) and the smoke-test has been running this exact
+        // pattern in dev without health-check kill-loops.
         healthCheck: {
           command: [
-            'CMD-SHELL',
-            `wget --quiet --tries=1 --spider http://localhost:${CONTAINER_PORT}${HEALTHCHECK_PATH} || exit 1`,
+            'CMD',
+            'node',
+            '-e',
+            `fetch('http://127.0.0.1:${CONTAINER_PORT}${HEALTHCHECK_PATH}').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))`,
           ],
           interval: 30,
           timeout: 5,
-          retries: 3,
-          // Bumped from 20 → 180s (#215). Init-config script (~5s) +
-          // gateway cold-start (~30-60s) + plugin staging (~30-90s
-          // on a cold mount) adds materially on top of the bare
-          // gateway-only boot the prior 20s targeted. 180s gives
-          // margin without making real failures take 3+ minutes to
-          // surface as unhealthy.
+          // 5 retries (vs prior 3) matches smoke-test. Each retry is
+          // 30s, so up to 2.5 min of failed checks before ECS pulls
+          // the task — gives the gateway room to recover from a
+          // transient hiccup (e.g. event-loop stall under plugin
+          // load) without losing the task.
+          retries: 5,
+          // 180s startPeriod covers init-config (~5s) + gateway cold
+          // start (~30-60s) + plugin staging (~30-90s) on a cold
+          // ephemeral mount. Margin without making real failures
+          // take 3+ minutes to surface.
           startPeriod: 180,
         },
         logConfiguration: logConfig('gateway'),
