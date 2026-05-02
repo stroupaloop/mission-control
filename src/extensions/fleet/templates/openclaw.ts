@@ -410,12 +410,27 @@ export function renderTaskDefinition(
         // node is guaranteed present (the image's whole reason for
         // existing) and the smoke-test has been running this exact
         // pattern in dev without health-check kill-loops.
+        //
+        // Requires Node 18+ for the global `fetch` and
+        // `AbortSignal.timeout`. The OpenClaw upstream image has
+        // shipped on Node 20+ since 2026.x; if a future base-image
+        // rollback drops below Node 18 this probe fails with
+        // `ReferenceError: fetch is not defined` at runtime (not at
+        // task-def registration), which surfaces in the gateway log
+        // stream as a series of failed probes.
+        //
+        // `AbortSignal.timeout(4000)` aborts the fetch ~1s before
+        // ECS would SIGKILL the probe at the `timeout: 5` boundary.
+        // Without it, a hung loopback connection produces a
+        // SIGKILL-shaped exit (137) instead of a clean exit(1) —
+        // both count as health-check failures, but the abort
+        // produces cleaner failure semantics for triage.
         healthCheck: {
           command: [
             'CMD',
             'node',
             '-e',
-            `fetch('http://127.0.0.1:${CONTAINER_PORT}${HEALTHCHECK_PATH}').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))`,
+            `fetch('http://127.0.0.1:${CONTAINER_PORT}${HEALTHCHECK_PATH}', { signal: AbortSignal.timeout(4000) }).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))`,
           ],
           interval: 30,
           timeout: 5,

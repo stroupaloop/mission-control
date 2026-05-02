@@ -273,8 +273,11 @@ describe('renderTaskDefinition', () => {
     expect(cmd[2]).toBe('-e')
     // The script body uses `fetch()` (GET by default) against
     // 127.0.0.1:18789/healthz and exits 0 on r.ok, 1 otherwise.
+    // AbortSignal.timeout(4000) bounds a hung loopback connection
+    // ~1s before ECS would SIGKILL at the `timeout: 5` boundary.
     const script = cmd[3] ?? ''
-    expect(script).toContain("fetch('http://127.0.0.1:18789/healthz')")
+    expect(script).toContain("fetch('http://127.0.0.1:18789/healthz'")
+    expect(script).toContain('AbortSignal.timeout(4000)')
     expect(script).toContain('r.ok?0:1')
     // Defense-in-depth: catch a regression that puts wget back.
     expect(cmd.join(' ')).not.toContain('wget')
