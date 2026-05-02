@@ -145,28 +145,13 @@ function tagsToElbv2(
  *
  * STATE_DIR and PLUGIN_DEPS_MOUNT_PATH are derived from
  * WORKSPACE_MOUNT_PATH rather than re-declared as independent
- * literals — round-1 audit on PR #40 caught the drift risk if
- * someone changed one without the others (image layout change,
- * Terraform refactor, etc.). Single edit point per path component.
+ * literals so an image-layout change can't drift one path against
+ * the others. Single edit point per path component.
  */
 const CONFIG_MOUNT_PATH = '/home/node/.openclaw'
 const WORKSPACE_MOUNT_PATH = `${CONFIG_MOUNT_PATH}/workspace`
 const STATE_DIR = `${WORKSPACE_MOUNT_PATH}/.openclaw`
 const PLUGIN_DEPS_MOUNT_PATH = `${STATE_DIR}/plugin-runtime-deps`
-
-/**
- * Path to the init-config script baked into the companion-openclaw
- * image at build time (see
- * ender-stack/services/companion/openclaw/Dockerfile). The image
- * COPY step pins this location; if the image build ever moves the
- * script, this template will need to update or init-config will
- * fail with ENOENT on entryPoint and gateway's `dependsOn: SUCCESS`
- * will never satisfy. A smoke-test assertion in the image's CI
- * (verifies the file exists at the expected path) is the right
- * long-term contract; until then, this constant + the comment is
- * the operational coupling. Round-1 audit on PR #40.
- */
-const INIT_CONFIG_SCRIPT_PATH = '/usr/local/bin/init-config.sh'
 
 /**
  * Renders RegisterTaskDefinition input. The task-def family resolves to
@@ -186,13 +171,11 @@ export function renderTaskDefinition(
   const logGroup = `${env.logGroupPrefix}/companion-openclaw-${input.agentName}`
 
   // Two env blocks: vars common to both containers, and gateway-only
-  // additions. Round-1 audit on PR #40 caught that the prior shared
-  // block placed OPENCLAW_ROLE_DESCRIPTION + LITELLM_API_BASE on
-  // init-config too — same task-def-level blast radius (anyone with
-  // ecs:DescribeTaskDefinition reads the whole revision regardless),
-  // but a confusing surface for future maintainers since init-config.sh
-  // doesn't read either. Splitting makes "what each container actually
-  // needs" legible from the template.
+  // additions. Splitting makes "what each container actually
+  // consumes" legible from the template — init-config doesn't read
+  // OPENCLAW_ROLE_DESCRIPTION or LITELLM_API_BASE, so they're not
+  // injected there. (Same task-def-level blast radius regardless,
+  // since `ecs:DescribeTaskDefinition` returns the whole revision.)
   //
   // commonEnv: read by both containers' processes.
   //   - OPENCLAW_AGENT_NAME / AGENT_NAME — agent identity (init-config.sh
@@ -255,39 +238,97 @@ export function renderTaskDefinition(
     // onto EFS.
     volumes: [{ name: 'config' }, { name: 'workspace' }, { name: 'plugin-deps' }],
     containerDefinitions: [
-      // init-config sidecar — runs the same image but overrides
-      // entryPoint to invoke the bundled init-config.sh. The script:
-      //  - removes any stale openclaw.json at the config mount root
-      //    (Phase-1 boots --allow-unconfigured per the image's
-      //    entrypoint.sh)
-      //  - pre-creates OPENCLAW_STATE_DIR + state subdirs
-      //    (plugin-runtime-deps, agents, canvas) so OpenClaw's
-      //    non-recursive mkdir at startup doesn't ENOENT against an
-      //    empty workspace mount
-      // Gateway's `dependsOn` ensures it doesn't start until init-
-      // config exits 0; failure here aborts the task launch cleanly.
+      // init-config sidecar — does the minimum filesystem prep needed
+      // for the gateway to boot cleanly on Fargate ephemeral storage:
+      //   1. mkdir -p OPENCLAW_STATE_DIR + the upstream-required
+      //      state subdirs (plugin-runtime-deps, agents, canvas) so
+      //      OpenClaw's non-recursive mkdir at startup doesn't ENOENT
+      //   2. chown the workspace + plugin-deps volume roots to
+      //      uid 1000 (node user) so the gateway can write
+      //
+      // **Why inline (not the bundled `/usr/local/bin/init-config.sh`)**:
+      // Fargate ephemeral volumes mount with root ownership (no
+      // equivalent of EFS access points' `posixUser` setting). The
+      // bundled script is designed for the smoke-test's EFS-backed
+      // path where access-point posixUser=1000 forces correct
+      // ownership at mount time, and the script then runs as the
+      // image's default `node` user (uid 1000). On ephemeral, that
+      // same script's `mkdir` would fail "Permission denied" because
+      // the workspace mount root is owned by root.
+      //
+      // To make ephemeral work, init-config runs as **root**
+      // (`user: '0'`) with an inline command that does the mkdir +
+      // chown chain, then exits 0. The gateway container still runs
+      // as the image default (node, uid 1000) and inherits writable
+      // dirs.
+      //
+      // The smoke-test (Terraform-bootstrapped) keeps using the
+      // bundled init-config.sh + EFS access points — both paths
+      // remain healthy. The two paths diverge here intentionally.
+      //
+      // TODO: converge with the bundled init-config.sh in
+      // ender-stack/services/companion/openclaw/init/. The likely
+      // path is updating that script to detect ephemeral-vs-EFS
+      // (e.g. by checking ownership of the mount root) and run
+      // the chown step when needed, then both this template and
+      // the smoke-test task-def can call the same script.
+      //
+      // Gateway's `dependsOn: SUCCESS` ensures it doesn't start
+      // until this sidecar exits 0. mkdir + chown failures abort
+      // the task launch cleanly with the failure visible in the
+      // init-config CloudWatch stream.
       {
         name: 'init-config',
         image: input.image,
         essential: false,
-        entryPoint: [INIT_CONFIG_SCRIPT_PATH],
-        // Empty command so any image CMD is fully overridden — the
-        // smoke-test pattern. Without this, a future image change
-        // that adds a CMD (e.g. extra flags) would silently get
-        // appended to init-config.sh and possibly break it.
-        command: [],
+        // Run as root so chown/mkdir work against the ephemeral
+        // volume roots (which mount as root-owned by default). The
+        // gateway container still runs as the image's default
+        // `node` user — `user` is per-container in ECS task-defs.
+        user: '0',
+        entryPoint: ['/bin/sh', '-c'],
+        command: [
+          [
+            // Pre-create state subdirs OpenClaw expects but doesn't
+            // recursively mkdir at runtime. The plugin-runtime-deps
+            // entry is a no-op — ECS has already mounted the
+            // plugin-deps volume at that path so the directory
+            // exists; kept in the list for readability and symmetry.
+            `mkdir -p ${STATE_DIR}/plugin-runtime-deps ${STATE_DIR}/agents ${STATE_DIR}/canvas`,
+            // Belt-and-suspenders cleanup; ephemeral volumes are
+            // empty per task launch so this is normally a no-op
+            // but mirrors the bundled script's intent.
+            `rm -f ${CONFIG_MOUNT_PATH}/openclaw.json`,
+            // Hand the workspace volume to the node user so the
+            // gateway can write. `chown -R` on Linux does NOT stop
+            // at mount boundaries, and plugin-deps is mounted in
+            // this container under workspace at
+            // ${PLUGIN_DEPS_MOUNT_PATH} (see mountPoints below — the
+            // recursion only covers it because plugin-deps is
+            // mounted here; without that mount the path would be a
+            // bare directory on workspace, not the plugin-deps
+            // volume). Config is intentionally omitted: gateway
+            // mounts it RO and never writes to it. If a future
+            // path needs the gateway to write openclaw.json from
+            // its own runtime (rather than from this sidecar),
+            // add `chown CONFIG_MOUNT_PATH` here.
+            //
+            // `id -u node` resolves the node user's UID at runtime
+            // from the image itself rather than hardcoding 1000.
+            // If a future upstream base-image bump changes the node
+            // user's UID, this becomes a loud `id: 'node': no such
+            // user` failure at the init-config step instead of a
+            // silent wrong-ownership boot loop on the gateway.
+            `chown -R "$(id -u node):$(id -g node)" ${WORKSPACE_MOUNT_PATH}`,
+            `echo '[init-config] ephemeral perms set — gateway boot cleared'`,
+          ].join(' && '),
+        ],
         environment: commonEnv,
-        // Note on plugin-runtime-deps: init-config.sh creates this
-        // dir under STATE_DIR, but it lands on the workspace volume
-        // here. The gateway then mounts a SEPARATE plugin-deps
-        // volume at the same path, overlaying (and shadowing) the
-        // workspace-side dir. The mkdir is therefore a no-op for
-        // gateway runtime — it's the plugin-deps volume mount that
-        // actually provides the empty directory OpenClaw expects.
-        // If plugin-deps is ever removed as a separate volume,
-        // workspace state would unexpectedly contain the init-
-        // config-created dir. Round-1 audit on PR #40 flagged this
-        // for documentation; behavior is correct, just non-obvious.
+        // All three volumes mount on init-config (vs gateway's
+        // config-RO + workspace-RW + plugin-deps-RW). init-config
+        // needs write+ownership control of all three for the chown
+        // step. plugin-deps was previously omitted here because the
+        // bundled script didn't need it; the inline command does.
         mountPoints: [
           {
             sourceVolume: 'config',
@@ -297,6 +338,16 @@ export function renderTaskDefinition(
           {
             sourceVolume: 'workspace',
             containerPath: WORKSPACE_MOUNT_PATH,
+            readOnly: false,
+          },
+          {
+            // plugin-deps mounted here so the chown -R above
+            // traverses into it. The mkdir on
+            // ${STATE_DIR}/plugin-runtime-deps is a no-op (the
+            // mount point already exists) — the mount's purpose
+            // is the chown reach, not the mkdir.
+            sourceVolume: 'plugin-deps',
+            containerPath: PLUGIN_DEPS_MOUNT_PATH,
             readOnly: false,
           },
         ],
