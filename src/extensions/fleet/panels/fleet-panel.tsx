@@ -319,6 +319,12 @@ export function FleetPanel() {
                 <tbody>
                   {data.services.map((svc) => {
                     const rs = redeployStates[svc.name] ?? { kind: 'idle' }
+                    // Extract the agent-name suffix once per row.
+                    // Null = service isn't an MC-managed agent
+                    // shape (e.g. mission-control itself, litellm,
+                    // the smoke-test on the legacy ALB), so the
+                    // Delete affordance is hidden.
+                    const agentNameForDelete = agentNameFromService(svc.name)
                     // Disable Redeploy if (a) the POST is in flight,
                     // OR (b) ECS already shows an active rollout in
                     // progress (activeDeployments > 0). Avoids double-
@@ -362,26 +368,25 @@ export function FleetPanel() {
                                   : 'Redeploy'}
                             </Button>
                             {/*
-                              Delete button — Beat 4c. Disabled while
-                              redeploy is in flight or rolling on the
-                              same row to prevent compounding state
-                              changes; the backend doesn't enforce
-                              mutex, so this is the UX-level guard.
-                              Agent name is parsed out of the service
-                              name (`{prefix}-companion-openclaw-{name}`)
-                              by the modal, not derived here, so this
-                              button just stashes the FULL service name
-                              and lets the modal route /api/fleet/agents/
-                              {agentName-portion}.
+                              Delete button — Beat 4c. The agent
+                              name is extracted from the service
+                              name once above (agentNameForDelete);
+                              the modal receives the parsed name
+                              directly and routes to
+                              /api/fleet/agents/{name}. Disabled
+                              while redeploy is in-flight or rolling
+                              on the same row — the backend doesn't
+                              enforce mutex, so this is the UX-level
+                              guard against compounding state
+                              changes. Hidden entirely for non-agent
+                              rows.
                             */}
-                            {agentNameFromService(svc.name) !== null ? (
+                            {agentNameForDelete !== null ? (
                               <Button
                                 variant="outline"
                                 size="sm"
                                 onClick={() =>
-                                  setDeleteTarget(
-                                    agentNameFromService(svc.name),
-                                  )
+                                  setDeleteTarget(agentNameForDelete)
                                 }
                                 disabled={redeployDisabled}
                                 data-testid={`delete-${svc.name}`}

@@ -172,7 +172,7 @@ const happyPathMocks = () => {
     })
     // 3. DescribeListeners
     .mockResolvedValueOnce({
-      Listeners: [{ ListenerArn: LISTENER_ARN }],
+      Listeners: [{ ListenerArn: LISTENER_ARN, Protocol: 'HTTP' }],
     })
     // 3. DescribeRules
     .mockResolvedValueOnce({
@@ -437,6 +437,92 @@ describe('DELETE /api/fleet/agents/:name — idempotency', () => {
   })
 })
 
+describe('DELETE /api/fleet/agents/:name — sibling-family safety', () => {
+  it('does NOT deregister task-defs from sibling families that share the prefix (e.g. delete `bot` must not touch `bot-test`)', async () => {
+    // ListTaskDefinitions familyPrefix is a PREFIX match, not exact —
+    // `familyPrefix=bot` returns revisions for `bot`, `bot-test`,
+    // `bot-2026`, etc. The handler filters returned ARNs back to the
+    // EXACT family before deregistering. Without this filter, deleting
+    // a short-named agent would silently deregister another agent's
+    // task-defs.
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({}) // UpdateService
+      // ListTaskDefinitions returns ARNs for BOTH the target family
+      // (`...-hello-bot`) and a sibling family (`...-hello-bot-test`).
+      .mockResolvedValueOnce({
+        taskDefinitionArns: [
+          TASK_DEF_ARN_1, // ender-stack-dev-companion-openclaw-hello-bot:1
+          // Sibling: same prefix + `-test` suffix
+          'arn:aws:ecs:us-east-1:398152419239:task-definition/ender-stack-dev-companion-openclaw-hello-bot-test:1',
+          TASK_DEF_ARN_2, // ender-stack-dev-companion-openclaw-hello-bot:2
+        ],
+      })
+      .mockResolvedValueOnce({}) // DeregisterTaskDefinition (only for matching family)
+      .mockResolvedValueOnce({}) // DeregisterTaskDefinition (only for matching family)
+      .mockResolvedValueOnce({}) // DeleteService
+
+    elbv2SendMock
+      .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
+      .mockResolvedValueOnce({
+        Listeners: [{ ListenerArn: LISTENER_ARN, Protocol: 'HTTP' }],
+      })
+      .mockResolvedValueOnce({
+        Rules: [
+          {
+            RuleArn: RULE_ARN,
+            Conditions: [
+              { Field: 'path-pattern', Values: [`/agent/${AGENT}`] },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ TargetGroups: [{ TargetGroupArn: TG_ARN }] })
+      .mockResolvedValueOnce({})
+
+    logsSendMock.mockResolvedValueOnce({})
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      deletedResources: { taskDefinitionRevisions?: string[] }
+    }
+    // Exactly the 2 ARNs for the target family — sibling NOT deregistered
+    expect(json.deletedResources.taskDefinitionRevisions).toEqual([
+      TASK_DEF_ARN_1,
+      TASK_DEF_ARN_2,
+    ])
+    expect(
+      json.deletedResources.taskDefinitionRevisions?.find((arn) =>
+        arn.includes('hello-bot-test'),
+      ),
+    ).toBeUndefined()
+    // DeregisterTaskDefinition was called exactly TWICE — once per
+    // matching ARN. Sibling skipped; counted by inspecting the mock
+    // call list rather than relying on call count (which mixes
+    // describe + delete).
+    const deregCalls = ecsSendMock.mock.calls.filter(
+      (c) =>
+        (c[0] as { __type: string }).__type ===
+        'DeregisterTaskDefinitionCommand',
+    )
+    expect(deregCalls).toHaveLength(2)
+  })
+})
+
 describe('DELETE /api/fleet/agents/:name — refusal paths', () => {
   it('refuses non-MC-managed agent with 404 (smoke-test protection)', async () => {
     // Smoke-test has Component=agent-harness but ManagedBy=terraform —
@@ -491,22 +577,64 @@ describe('DELETE /api/fleet/agents/:name — refusal paths', () => {
     expect(json.error).toBe('ServiceNotFoundException')
   })
 
-  it('returns 404 when service exists but is INACTIVE', async () => {
-    ecsSendMock.mockResolvedValueOnce({
-      services: [
-        {
-          serviceArn: SERVICE_ARN,
-          status: 'INACTIVE',
-          tags: [
-            { key: 'Component', value: 'agent-harness' },
-            { key: 'ManagedBy', value: 'mission-control' },
-          ],
-        },
-      ],
-    })
+  it('continues teardown when service is already INACTIVE (idempotent retry path)', async () => {
+    // Round-1 audit on PR #43 caught a stuck-state: a prior DELETE
+    // that succeeded at DeleteService but failed downstream (e.g.
+    // DeleteLogGroup before the IAM grant in PR #262 applied) leaves
+    // the service INACTIVE while listener rule / TG / log group
+    // still exist. 404'ing on retry would strand those resources.
+    // INACTIVE is now treated as "ECS portion already done, finish
+    // the rest" — handler returns 200 with a warning instead.
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'INACTIVE',
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      // Note: no UpdateService / DeleteService mocks because the
+      // INACTIVE branch skips both.
+      .mockResolvedValueOnce({ taskDefinitionArns: [] }) // ListTaskDefinitions
+
+    elbv2SendMock
+      .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
+      .mockResolvedValueOnce({
+        Listeners: [{ ListenerArn: LISTENER_ARN, Protocol: 'HTTP' }],
+      })
+      .mockResolvedValueOnce({
+        Rules: [
+          {
+            RuleArn: RULE_ARN,
+            Conditions: [
+              { Field: 'path-pattern', Values: [`/agent/${AGENT}`] },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({}) // DeleteRule
+      .mockResolvedValueOnce({ TargetGroups: [{ TargetGroupArn: TG_ARN }] })
+      .mockResolvedValueOnce({}) // DeleteTargetGroup
+
+    logsSendMock.mockResolvedValueOnce({})
+
     const DELETE = await importHandler()
     const resp = await DELETE(mkRequest(), mkParams())
-    expect(resp.status).toBe(404)
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      deletedResources: { serviceArn?: string; listenerRuleArn?: string }
+      warnings: Array<{ code: string }>
+    }
+    // Service was already gone — not in deletedResources
+    expect(json.deletedResources.serviceArn).toBeUndefined()
+    // But everything downstream was cleaned up
+    expect(json.deletedResources.listenerRuleArn).toBe(RULE_ARN)
+    expect(json.warnings.map((w) => w.code)).toContain('service-already-deleted')
   })
 })
 
@@ -569,7 +697,9 @@ describe('DELETE /api/fleet/agents/:name — partial failure', () => {
     })
     elbv2SendMock
       .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
-      .mockResolvedValueOnce({ Listeners: [{ ListenerArn: LISTENER_ARN }] })
+      .mockResolvedValueOnce({
+        Listeners: [{ ListenerArn: LISTENER_ARN, Protocol: 'HTTP' }],
+      })
       .mockResolvedValueOnce({
         Rules: [
           {

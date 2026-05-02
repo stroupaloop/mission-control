@@ -12989,6 +12989,161 @@
         }
       }
     },
+    "/api/fleet/agents/{name}": {
+      "delete": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Tear down an MC-managed agent (Fleet delete-agent)",
+        "description": "Phase 2.2 Beat 4c. Companion to POST /api/fleet/agents. Tears down every AWS resource the create handler provisioned: ECS service (force=true after drain), listener rule on shared ALB, target group, CloudWatch log group, all task-def revisions. Auth: admin role required (same tier as create — permanent destruction). Two-tag guard: refuses unless target carries Component=agent-harness AND ManagedBy=mission-control (protects Terraform-owned smoke-test from this endpoint). Each step is idempotent on resource-not-found — re-running on a half-cleaned agent finishes the job, with idempotency notes surfaced in `warnings[]`. Error responses return only the SDK error name; `failedResources` enumerates what the operator must clean up manually after a partial 502.",
+        "operationId": "deleteFleetAgent",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Agent name (matches AGENT_NAME_RE: ^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$). Same regex POST uses; load-bearing security control because IAM grants on delete verbs are scoped to ARN patterns derived from this regex.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent deleted successfully. `deletedResources` lists actual successful deletes; `warnings` enumerates idempotency cases where a resource was already gone.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "agentName",
+                    "deletedResources",
+                    "warnings"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [true]
+                    },
+                    "agentName": {
+                      "type": "string"
+                    },
+                    "deletedResources": {
+                      "type": "object",
+                      "properties": {
+                        "serviceArn": {
+                          "type": "string"
+                        },
+                        "listenerRuleArn": {
+                          "type": "string"
+                        },
+                        "targetGroupArn": {
+                          "type": "string"
+                        },
+                        "logGroup": {
+                          "type": "string"
+                        },
+                        "taskDefinitionRevisions": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["code", "message"],
+                        "properties": {
+                          "code": {
+                            "type": "string"
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "agentName fails AGENT_NAME_RE — refused at the security boundary before any AWS call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Service missing OR exists but is not a two-tag MC-managed agent. Same response shape for both — refusing to confirm existence of non-harness services to a caller asking about them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Partial failure during teardown. `deletedResources` lists what got cleaned up before the failure; `failedResources` lists what the operator must remove manually. Operator can also re-run DELETE — each step is idempotent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "deletedResources": {
+                      "type": "object"
+                    },
+                    "failedResources": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/security-audit": {
       "get": {
         "tags": [

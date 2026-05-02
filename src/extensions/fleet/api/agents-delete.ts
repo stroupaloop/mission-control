@@ -73,12 +73,14 @@ import { resolveFleetPrefix } from '@/extensions/fleet/lib/fleet-prefix'
  *      stops any still-shutting-down task that would otherwise
  *      hold up the next step
  *   9. DeleteLogGroup — name is fully derived from prefix + agentName.
- *      Deliberately last: while ECS is killing the final container,
- *      the awslogs driver is still flushing its tail buffer to the
- *      log group. Deleting the log group earlier would silently drop
- *      the last few seconds of container output. Putting DeleteLogGroup
- *      after DeleteService gives the driver the maximum chance to
- *      flush before the destination is gone.
+ *      Deliberately ordered after DeleteService for log-flush
+ *      reasons: while ECS is terminating the final container, the
+ *      awslogs driver may still be flushing its tail buffer. The
+ *      ordering doesn't give a real drain window (force=true makes
+ *      the kill immediate), but the latency of the DeleteService API
+ *      call ahead of DeleteLogGroup is still strictly better than
+ *      the reverse — a few hundred ms is enough to flush a small
+ *      tail buffer in practice.
  *
  * Error response shape:
  *   - **AWS-SDK errors (non-idempotent failures)**: only the SDK
@@ -224,10 +226,8 @@ export async function DELETE(
       }),
     )
     const target = describe.services?.[0]
-    if (!target || target.status === 'INACTIVE') {
-      // ServiceNotFound OR already-INACTIVE (a previous DELETE already
-      // ran AWS-side but other resources remain). Same 404 response
-      // shape — operator can retry to finish the cleanup.
+    if (!target) {
+      // Service entirely absent — initial not-found. 404.
       return NextResponse.json(
         {
           error: 'ServiceNotFoundException',
@@ -242,6 +242,14 @@ export async function DELETE(
     // happy-path response means "actually deleted" not "found in
     // describe."
     discoveredServiceArn = target.serviceArn
+    // INACTIVE handling: a prior DELETE that succeeded at
+    // DeleteService but failed on a downstream step (e.g. the
+    // log-group cleanup before the IAM grant in PR #262 applied)
+    // leaves the ECS service INACTIVE while listener rules / TGs /
+    // log groups still exist. 404'ing on retry would strand those
+    // resources. Instead, treat INACTIVE as "ECS portion already
+    // done" and continue the rest of the teardown idempotently.
+    const serviceAlreadyDeleted = target.status === 'INACTIVE'
     if (!isAgentHarness(target)) {
       logger.warn(
         {
@@ -272,13 +280,20 @@ export async function DELETE(
     // ================================================================
     // Step 2: UpdateService desiredCount=0 — drain
     // ================================================================
-    await ecsClient.send(
-      new UpdateServiceCommand({
-        cluster: clusterName,
-        service: serviceName,
-        desiredCount: 0,
-      }),
-    )
+    if (!serviceAlreadyDeleted) {
+      await ecsClient.send(
+        new UpdateServiceCommand({
+          cluster: clusterName,
+          service: serviceName,
+          desiredCount: 0,
+        }),
+      )
+    } else {
+      warnings.push({
+        code: 'service-already-deleted',
+        message: `Service ${serviceName} was already INACTIVE — skipped drain + delete; continuing with downstream resources`,
+      })
+    }
 
     // ================================================================
     // Step 3 + 4: Resolve listener rule ARN + DeleteRule
@@ -337,6 +352,13 @@ export async function DELETE(
     // ================================================================
     // Step 7: Deregister all ACTIVE task-def revisions
     // ================================================================
+    // `familyPrefix` is a PREFIX match, not an exact family name —
+    // querying for `bot` would return revisions for both `bot` and
+    // `bot-test`. Filter the returned ARNs back to the EXACT family
+    // before deregistering, otherwise a delete on a short-named agent
+    // could deregister another agent's task-defs. The ARN format is
+    // `arn:...:task-definition/{family}:{revision}`, so split on `/`
+    // and strip the trailing `:{revision}` to extract the family.
     const deregistered: string[] = []
     let tdMarker: string | undefined
     do {
@@ -348,6 +370,8 @@ export async function DELETE(
         }),
       )
       for (const arn of page.taskDefinitionArns ?? []) {
+        const familyOfArn = arn.split('/').pop()?.replace(/:\d+$/, '')
+        if (familyOfArn !== taskDefFamily) continue
         try {
           await ecsClient.send(
             new DeregisterTaskDefinitionCommand({ taskDefinition: arn }),
@@ -373,23 +397,25 @@ export async function DELETE(
     // ================================================================
     // Step 8: DeleteService force=true
     // ================================================================
-    try {
-      await ecsClient.send(
-        new DeleteServiceCommand({
-          cluster: clusterName,
-          service: serviceName,
-          force: true,
-        }),
-      )
-      deleted.serviceArn = discoveredServiceArn
-    } catch (err) {
-      if (isErrorOfType(err, [...NOT_FOUND_NAMES.service])) {
-        warnings.push({
-          code: 'service-already-deleted',
-          message: `Service ${serviceName} was already gone`,
-        })
-      } else {
-        throw err
+    if (!serviceAlreadyDeleted) {
+      try {
+        await ecsClient.send(
+          new DeleteServiceCommand({
+            cluster: clusterName,
+            service: serviceName,
+            force: true,
+          }),
+        )
+        deleted.serviceArn = discoveredServiceArn
+      } catch (err) {
+        if (isErrorOfType(err, [...NOT_FOUND_NAMES.service])) {
+          warnings.push({
+            code: 'service-already-deleted',
+            message: `Service ${serviceName} was already gone`,
+          })
+        } else {
+          throw err
+        }
       }
     }
 
@@ -492,7 +518,14 @@ async function findListenerRuleArn(
   const listenersResp = await elbv2Client.send(
     new DescribeListenersCommand({ LoadBalancerArn: lb.LoadBalancerArn }),
   )
-  const listener = listenersResp.Listeners?.[0]
+  // Mirror the CREATE handler's listener selection (agents.ts) — pick
+  // the HTTP listener explicitly. When an HTTPS:443 listener is added
+  // to the shared ALB (post-ACM-Private-CA), Listeners[0] would
+  // sometimes return the HTTPS listener (AWS doesn't guarantee
+  // ordering by port), causing DELETE to scan the wrong listener,
+  // miss the rule, and silently leave the HTTP rule as a dangling
+  // resource. Filter must stay in sync with the CREATE handler.
+  const listener = listenersResp.Listeners?.find((l) => l.Protocol === 'HTTP')
   if (!listener?.ListenerArn) return null
 
   const targetPath = `/agent/${agentName}`
