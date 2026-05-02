@@ -264,10 +264,14 @@ export function renderTaskDefinition(
       //
       // The smoke-test (Terraform-bootstrapped) keeps using the
       // bundled init-config.sh + EFS access points — both paths
-      // remain healthy. The two paths diverge here intentionally;
-      // converging them is a separate follow-up (probably: update
-      // the bundled script to detect ephemeral vs EFS and chown
-      // when needed, then both paths can use it).
+      // remain healthy. The two paths diverge here intentionally.
+      //
+      // TODO: converge with the bundled init-config.sh in
+      // ender-stack/services/companion/openclaw/init/. The likely
+      // path is updating that script to detect ephemeral-vs-EFS
+      // (e.g. by checking ownership of the mount root) and run
+      // the chown step when needed, then both this template and
+      // the smoke-test task-def can call the same script.
       //
       // Gateway's `dependsOn: SUCCESS` ensures it doesn't start
       // until this sidecar exits 0. mkdir + chown failures abort
@@ -303,8 +307,11 @@ export function renderTaskDefinition(
             // recursion only covers it because plugin-deps is
             // mounted here; without that mount the path would be a
             // bare directory on workspace, not the plugin-deps
-            // volume). Config stays root-owned: gateway mounts it
-            // RO, doesn't need write perms.
+            // volume). Config is intentionally omitted: gateway
+            // mounts it RO and never writes to it. If a future
+            // path needs the gateway to write openclaw.json from
+            // its own runtime (rather than from this sidecar),
+            // add `chown CONFIG_MOUNT_PATH` here.
             //
             // `id -u node` resolves the node user's UID at runtime
             // from the image itself rather than hardcoding 1000.
@@ -334,6 +341,11 @@ export function renderTaskDefinition(
             readOnly: false,
           },
           {
+            // plugin-deps mounted here so the chown -R above
+            // traverses into it. The mkdir on
+            // ${STATE_DIR}/plugin-runtime-deps is a no-op (the
+            // mount point already exists) — the mount's purpose
+            // is the chown reach, not the mkdir.
             sourceVolume: 'plugin-deps',
             containerPath: PLUGIN_DEPS_MOUNT_PATH,
             readOnly: false,
