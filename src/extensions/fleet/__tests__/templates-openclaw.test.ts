@@ -96,9 +96,15 @@ describe('renderTaskDefinition', () => {
     const script = init?.command?.[0] ?? ''
     // Spot-check the load-bearing operations are present.
     expect(script).toContain('mkdir -p')
-    expect(script).toContain('chown -R 1000:1000')
+    // Chown asserts the FULL substring including the workspace target
+    // path — round-1 audit on PR #41 caught that two independent
+    // `toContain` assertions on `chown -R 1000:1000` and the path
+    // separately wouldn't catch a script that put the chown at a
+    // wrong path and the right path elsewhere. `id -u node` instead
+    // of hardcoded 1000 so the test stays correct under any future
+    // upstream UID change.
     expect(script).toContain(
-      '/home/node/.openclaw/workspace/.openclaw/plugin-runtime-deps',
+      'chown -R "$(id -u node):$(id -g node)" /home/node/.openclaw/workspace',
     )
     expect(script).toContain(
       '/home/node/.openclaw/workspace/.openclaw/agents',

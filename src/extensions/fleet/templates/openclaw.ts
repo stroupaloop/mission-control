@@ -289,18 +289,33 @@ export function renderTaskDefinition(
         command: [
           [
             // Pre-create state subdirs OpenClaw expects but doesn't
-            // recursively mkdir at runtime.
+            // recursively mkdir at runtime. Note:
+            // ${STATE_DIR}/plugin-runtime-deps is the plugin-deps
+            // volume mount point — the directory exists as soon as
+            // ECS mounts the volume, so the mkdir on it is a no-op
+            // (kept in the list for readability + symmetry with the
+            // other state subdirs). Round-1 audit on PR #41.
             `mkdir -p ${STATE_DIR}/plugin-runtime-deps ${STATE_DIR}/agents ${STATE_DIR}/canvas`,
             // Belt-and-suspenders cleanup; ephemeral volumes are
             // empty per task launch so this is normally a no-op
             // but mirrors the bundled script's intent.
             `rm -f ${CONFIG_MOUNT_PATH}/openclaw.json`,
-            // Hand the volume roots to node so the gateway can write.
-            // Three targets: workspace (covers state-dir + nested
-            // plugin-runtime-deps overlay) and plugin-deps (the
-            // overlay's own root). Config stays root-owned: gateway
-            // mounts it RO, doesn't need write perms.
-            `chown -R 1000:1000 ${WORKSPACE_MOUNT_PATH} ${PLUGIN_DEPS_MOUNT_PATH}`,
+            // Hand the volume roots to the node user so the gateway
+            // can write. `chown -R` on Linux does NOT stop at mount
+            // boundaries, so recursing on the workspace mount also
+            // covers the plugin-deps volume mounted underneath at
+            // ${PLUGIN_DEPS_MOUNT_PATH}. Single target is sufficient.
+            // Config stays root-owned: gateway mounts it RO, doesn't
+            // need write perms.
+            //
+            // `id -u node` resolves the node user's UID at runtime
+            // from the image itself rather than hardcoding 1000.
+            // If a future upstream base-image bump changes the node
+            // user's UID, this becomes a loud `id: 'node': no such
+            // user` failure at the init-config step instead of a
+            // silent wrong-ownership boot loop on the gateway.
+            // Round-1 audit on PR #41.
+            `chown -R "$(id -u node):$(id -g node)" ${WORKSPACE_MOUNT_PATH}`,
             `echo '[init-config] ephemeral perms set — gateway boot cleared'`,
           ].join(' && '),
         ],
