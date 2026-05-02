@@ -404,7 +404,11 @@ describe('POST /api/fleet/agents — happy path', () => {
     expect(resp.status).toBe(201)
   })
 
-  it('surfaces a runtime-config-gap warning on 201 referencing the open ender-stack issue', async () => {
+  it('returns an empty warnings array on 201 (post-#215 — no stale runtime-config-gap)', async () => {
+    // #215 closed in PR #40 (init-config sidecar + ephemeral volumes
+    // landed in the task-def template). The pre-#215 warning code
+    // 'runtime-config-gap' is removed; the `warnings` field shape is
+    // preserved so the contract is stable for future warnings.
     happyPathMocks()
     const POST = await importHandler()
     const resp = await POST(mkRequest(validBody()))
@@ -413,12 +417,11 @@ describe('POST /api/fleet/agents — happy path', () => {
       warnings: Array<{ code: string; message: string }>
     }
     expect(Array.isArray(json.warnings)).toBe(true)
+    expect(json.warnings).toEqual([])
+    // Defense-in-depth: catch a future code path that re-emits the
+    // stale warning.
     const codes = json.warnings.map((w) => w.code)
-    expect(codes).toContain('runtime-config-gap')
-    const msg = json.warnings.find(
-      (w) => w.code === 'runtime-config-gap',
-    )?.message
-    expect(msg).toMatch(/ender-stack#215/i)
+    expect(codes).not.toContain('runtime-config-gap')
   })
 
   it('CreateRule routes /agent/{name} and /agent/{name}/* to the new TG', async () => {

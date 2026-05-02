@@ -75,17 +75,38 @@ describe('renderTaskDefinition', () => {
     ])
   })
 
-  it('init-config overrides entryPoint to /usr/local/bin/init-config.sh and is non-essential', () => {
-    // Image's default entrypoint starts the gateway. init-config has
-    // to override or it would race with the actual gateway container.
+  it('init-config runs as root with an inline shell that mkdirs + chowns ephemeral volumes', () => {
+    // Fargate ephemeral volumes mount root-owned (no equivalent of
+    // EFS access points' posixUser). The bundled init-config.sh
+    // assumes uid 1000 ownership (smoke-test path); on ephemeral
+    // its mkdir would Permission Denied. So MC runs init-config as
+    // root with an inline command that mkdirs the state subdirs +
+    // chowns workspace/plugin-deps to uid 1000 so the gateway
+    // (running as the image's default node user) can write.
+    //
     // essential=false means task lifetime tracks gateway, not init-
     // config (init exits 0 on success, which would otherwise tear
     // down the whole task on essential=true).
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
     const init = findContainer(taskDef, 'init-config')
     expect(init?.essential).toBe(false)
-    expect(init?.entryPoint).toEqual(['/usr/local/bin/init-config.sh'])
-    expect(init?.command).toEqual([])
+    expect(init?.user).toBe('0')
+    expect(init?.entryPoint).toEqual(['/bin/sh', '-c'])
+    expect(init?.command).toHaveLength(1)
+    const script = init?.command?.[0] ?? ''
+    // Spot-check the load-bearing operations are present.
+    expect(script).toContain('mkdir -p')
+    expect(script).toContain('chown -R 1000:1000')
+    expect(script).toContain(
+      '/home/node/.openclaw/workspace/.openclaw/plugin-runtime-deps',
+    )
+    expect(script).toContain(
+      '/home/node/.openclaw/workspace/.openclaw/agents',
+    )
+    expect(script).toContain(
+      '/home/node/.openclaw/workspace/.openclaw/canvas',
+    )
+    expect(script).toContain('rm -f /home/node/.openclaw/openclaw.json')
   })
 
   it('passes the common env vars (AGENT_NAME, OPENCLAW_AGENT_NAME, OPENCLAW_STATE_DIR) on both containers', () => {
@@ -188,24 +209,22 @@ describe('renderTaskDefinition', () => {
     })
   })
 
-  it('mounts config RW + workspace RW on init-config (no plugin-deps)', () => {
-    // init-config writes openclaw.json removal + workspace state-dir
-    // mkdir. Doesn't touch plugin-deps so the mount is omitted to
-    // keep the surface tight.
+  it('mounts all three volumes RW on init-config (config + workspace + plugin-deps)', () => {
+    // init-config needs write access to all three volume roots to
+    // chown them to uid 1000. The previous shape (config + workspace
+    // only) was incompatible with Fargate ephemeral storage —
+    // plugin-deps would mount root-owned and the gateway running as
+    // node couldn't write to it. The chown step requires the volume
+    // to be visible inside this container.
     //
-    // Shadow invariant (see init-config mountPoints comment in
-    // templates/openclaw.ts): init-config's mkdir of
-    // `plugin-runtime-deps` lands on the workspace volume; the
-    // gateway later mounts a SEPARATE `plugin-deps` volume at the
-    // same path, shadowing it. Removing this mount-absence assertion
-    // (e.g. "let init-config also mount plugin-deps so the mkdir
-    // takes effect everywhere") would break that shadow contract
-    // and let workspace state silently accumulate the dir if the
-    // plugin-deps volume were ever removed. Round-3 audit on PR #40.
+    // Diverges from the smoke-test pattern (which only mounts
+    // config + workspace on its init-config because EFS access
+    // points handle ownership at mount time). Documented in the
+    // template comment above the init-config block.
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
     const init = findContainer(taskDef, 'init-config')
     const mounts = init?.mountPoints ?? []
-    expect(mounts).toHaveLength(2)
+    expect(mounts).toHaveLength(3)
     expect(mounts).toContainEqual({
       sourceVolume: 'config',
       containerPath: '/home/node/.openclaw',
@@ -216,7 +235,12 @@ describe('renderTaskDefinition', () => {
       containerPath: '/home/node/.openclaw/workspace',
       readOnly: false,
     })
-    expect(mounts.find((m) => m.sourceVolume === 'plugin-deps')).toBeUndefined()
+    expect(mounts).toContainEqual({
+      sourceVolume: 'plugin-deps',
+      containerPath:
+        '/home/node/.openclaw/workspace/.openclaw/plugin-runtime-deps',
+      readOnly: false,
+    })
   })
 
   it('uses 180s health-check startPeriod on the gateway (covers init + cold start)', () => {

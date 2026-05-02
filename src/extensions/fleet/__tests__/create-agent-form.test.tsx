@@ -119,6 +119,12 @@ describe('<CreateAgentForm />', () => {
   })
 
   it('POSTs the expected JSON body and surfaces success state with warnings', async () => {
+    // Fixture uses a fictional warning code (`fixture-warning`) so this
+    // test exercises the warnings-array rendering contract independent
+    // of any specific real warning. The pre-#215 'runtime-config-gap'
+    // warning was removed when init-config landed (PR #40); using a
+    // fictional code here keeps the test honest about what it covers
+    // (rendering, not any specific real warning).
     const fetchMock = mockFetch({
       post: new Response(
         JSON.stringify({
@@ -136,9 +142,9 @@ describe('<CreateAgentForm />', () => {
           },
           warnings: [
             {
-              code: 'runtime-config-gap',
+              code: 'fixture-warning',
               message:
-                'Agent task will fail health checks until ender-stack#215 closes…',
+                'Fictional warning used by this test fixture — proves the warnings array renders.',
             },
           ],
         }),
@@ -181,7 +187,7 @@ describe('<CreateAgentForm />', () => {
     // specifically so the UI can render specific guidance without
     // parsing message text.
     expect(screen.getByTestId('create-agent-warnings')).toHaveTextContent(
-      'runtime-config-gap',
+      'fixture-warning',
     )
   })
 

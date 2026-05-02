@@ -207,22 +207,12 @@ export interface CreateAgentResponse {
 // Stable warning codes. Keep the list small and code-named so the UI
 // can render specific guidance per code without parsing message text.
 //
-// TODO(ender-stack#215): when #215 closes (gateway runtime config
-// wiring lands), drop WARNING_RUNTIME_CONFIG_GAP from the success
-// response below — leaving it in would surface stale noise on every
-// successful create. Audit cycle on PR #37 flagged this as "should
-// track" because the warning is unconditionally emitted today with no
-// version/feature gate. When dropping: remove this constant, the
-// `warnings: [WARNING_RUNTIME_CONFIG_GAP]` reference in the 201
-// response, and the test that asserts the code is present.
-const WARNING_RUNTIME_CONFIG_GAP = {
-  code: 'runtime-config-gap',
-  message:
-    'Agent task will fail health checks until ender-stack#215 closes ' +
-    '(init-config sidecar + EFS, or upstream env-var-only config mode). ' +
-    'AWS resources were created successfully; the gateway container will ' +
-    'loop on missing /home/node/.openclaw/openclaw.json until #215 lands.',
-} as const
+// `WARNING_RUNTIME_CONFIG_GAP` was removed when #215 closed (PR #40
+// shipped the init-config sidecar + ephemeral volumes that the
+// warning advertised as "until #215 lands"). The `warnings` array
+// shape is preserved on the response so future warnings can land
+// without a contract change — clients render the array generically
+// and the array is currently empty for every successful create.
 
 export interface CreateAgentErrorResponse {
   error: string
@@ -704,7 +694,7 @@ export async function POST(request: NextRequest) {
           logGroup: logGroupName,
           listenerPath,
         },
-        warnings: [WARNING_RUNTIME_CONFIG_GAP],
+        warnings: [],
       } satisfies CreateAgentResponse,
       { status: 201, headers: { 'Cache-Control': 'no-store' } },
     )
