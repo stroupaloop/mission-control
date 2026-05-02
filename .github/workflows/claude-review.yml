@@ -38,7 +38,7 @@ jobs:
       github.repository == 'stroupaloop/mission-control' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 35  # bounds blast radius if a --max-turns 60 session stalls
+    timeout-minutes: 40  # bounds blast radius if a --max-turns 120 session stalls
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -50,7 +50,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: |
             --model claude-sonnet-4-6
-            --max-turns 60
+            --max-turns 120
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
