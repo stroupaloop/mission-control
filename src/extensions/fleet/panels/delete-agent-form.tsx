@@ -172,7 +172,13 @@ export function DeleteAgentForm({ agentName, onDeleted, onClose }: Props) {
               type="text"
               value={confirmText}
               onChange={(e) => setConfirmText(e.target.value)}
-              className="w-full px-3 py-2 border rounded-md text-sm font-mono mb-4"
+              // Mirror create-agent-form's input styling (line ~806)
+              // so the field is theme-aware. Without explicit
+              // bg-secondary + text/border tokens, the input renders
+              // with the browser default (white background, dark
+              // text) which is illegible on a dark theme — caught in
+              // first dev validation.
+              className="w-full h-10 px-3 rounded-lg bg-secondary border border-border text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50 mb-4"
               data-testid="delete-agent-confirm-input"
               disabled={state.kind === 'submitting'}
               autoComplete="off"
