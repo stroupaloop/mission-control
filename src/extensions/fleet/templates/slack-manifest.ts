@@ -63,13 +63,18 @@ export interface SlackAppManifest {
   }
   settings: {
     event_subscriptions: {
-      // Socket Mode bypasses request_url; both fields omitted
-      // when socket_mode_enabled is true.
+      // `request_url?: never` is the compile-time guard against
+      // accidentally re-introducing public ingress dependency. The
+      // serialization-level test (in slack-manifest.test.ts) catches
+      // the same regression at runtime; the type-level constraint
+      // catches it at PR-time so reviewers see the conflict in the
+      // diff. Round-3 audit on PR #47.
       bot_events: string[]
+      request_url?: never
     }
     interactivity: {
       is_enabled: boolean
-      // request_url omitted under Socket Mode
+      request_url?: never
     }
     org_deploy_enabled: boolean
     socket_mode_enabled: boolean

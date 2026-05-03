@@ -2,12 +2,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import {
   ECSClient,
   DescribeServicesCommand,
-  type Service,
 } from '@aws-sdk/client-ecs'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 import { AGENT_NAME_RE } from '@/extensions/fleet/templates/constraints'
 import { resolveFleetPrefix } from '@/extensions/fleet/lib/fleet-prefix'
+import { isAgentHarness } from '@/extensions/fleet/lib/ecs-guards'
 import {
   renderSlackManifest,
   type SlackAppManifest,
@@ -38,22 +38,6 @@ import {
 
 const AWS_REGION_AT_LOAD = process.env.AWS_REGION || 'us-east-1'
 const ecsClient = new ECSClient({ region: AWS_REGION_AT_LOAD })
-
-const HARNESS_TAG_KEY = 'Component'
-const HARNESS_TAG_VALUE = 'agent-harness'
-const MANAGED_BY_KEY = 'ManagedBy'
-const MANAGED_BY_VALUE = 'mission-control'
-
-function isAgentHarness(service: Service): boolean {
-  const tags = service.tags ?? []
-  const isHarness = tags.some(
-    (t) => t.key === HARNESS_TAG_KEY && t.value === HARNESS_TAG_VALUE,
-  )
-  const isMcManaged = tags.some(
-    (t) => t.key === MANAGED_BY_KEY && t.value === MANAGED_BY_VALUE,
-  )
-  return isHarness && isMcManaged
-}
 
 export interface SlackManifestResponse {
   ok: true
