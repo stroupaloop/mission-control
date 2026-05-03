@@ -58,10 +58,31 @@ export function FleetPanel() {
   // Stores the full FleetServiceSummary (so the panel can render
   // identity fields without re-fetching) plus the parsed agent
   // name (for the Slack manifest endpoint). `null` = panel closed.
+  //
+  // Staleness contract: this is a SNAPSHOT taken at click-time.
+  // The fleet table polls every 5s during active rollouts; if an
+  // agent transitions ACTIVE → DRAINING → INACTIVE while the
+  // panel is open, the Identity section will keep showing the
+  // click-time snapshot. Acceptable for Beat 5c.1's read-only
+  // scope; the manifest is the actionable content and it's
+  // independently fetched. Round-6 audit (Greptile P1) flagged
+  // adding a staleness indicator — tracked as ender-stack#282
+  // for Beat 5c.2 / 5c.3.
   const [detailTarget, setDetailTarget] = useState<{
     agent: FleetServiceSummary
     agentName: string
   } | null>(null)
+
+  // Stable onClose handlers for child modals/panels. Inline arrows
+  // would create a new function reference on every parent render,
+  // which (combined with the children's `onClose`-in-deps useEffects)
+  // re-attaches keydown listeners on every fleet-table refresh tick.
+  // Round-6 audit on PR #50 (Greptile P2 + Claude's pre-existing-
+  // pattern note) called this out for AgentDetailPanel; same fix
+  // applied to DeleteAgentForm + CreateAgentForm for consistency.
+  const closeCreateForm = useCallback(() => setCreateOpen(false), [])
+  const closeDeleteTarget = useCallback(() => setDeleteTarget(null), [])
+  const closeDetailTarget = useCallback(() => setDetailTarget(null), [])
   // Tracks when `data` was last successfully fetched (Date.now()).
   // Drives the staleness indicator that appears when error+data are
   // both present — operators need to know the table is from before
@@ -253,7 +274,7 @@ export function FleetPanel() {
         onCreated={() => {
           void load()
         }}
-        onClose={() => setCreateOpen(false)}
+        onClose={closeCreateForm}
       />
 
 
@@ -469,12 +490,12 @@ export function FleetPanel() {
         onDeleted={() => {
           void load({ silent: false })
         }}
-        onClose={() => setDeleteTarget(null)}
+        onClose={closeDeleteTarget}
       />
       <AgentDetailPanel
         agent={detailTarget?.agent ?? null}
         agentName={detailTarget?.agentName ?? null}
-        onClose={() => setDetailTarget(null)}
+        onClose={closeDetailTarget}
       />
     </div>
   )

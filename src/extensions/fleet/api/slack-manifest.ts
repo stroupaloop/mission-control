@@ -157,10 +157,12 @@ export async function GET(
         ok: true,
         agentName,
         manifest,
-        // Spread to drop the readonly modifier on the const-asserted
-        // tuple — the response interface declares `instructions:
-        // string[]` (mutable) so it can carry future per-deployment
-        // overrides without changing the wire shape.
+        // Spread the const-asserted tuple into a fresh array.
+        // Both the source (`SLACK_HANDSHAKE_INSTRUCTIONS as const`)
+        // and the response field (`readonly string[]`, narrowed in
+        // PR #50 round-5) are immutable; the spread just shapes
+        // the value to match the response type without aliasing
+        // the const tuple back into a wider array reference.
         instructions: [...SLACK_HANDSHAKE_INSTRUCTIONS],
       } satisfies SlackManifestResponse,
       { status: 200, headers: { 'Cache-Control': 'no-store' } },

@@ -115,8 +115,14 @@ export function SlackManifestDisplay({ agentName }: Props) {
     setState({ kind: 'loading' })
     void (async () => {
       try {
+        // encodeURIComponent is defense-in-depth — agentName is
+        // already constrained to [a-z0-9-] by agentNameFromService
+        // (no URL-special characters possible) and the server
+        // re-validates with AGENT_NAME_RE. But explicit encoding
+        // makes the path-injection safety self-evident at the
+        // call site (round-6 audit on PR #50).
         const resp = await fetch(
-          `/api/fleet/agents/${agentName}/slack/manifest`,
+          `/api/fleet/agents/${encodeURIComponent(agentName)}/slack/manifest`,
           { signal: controller.signal },
         )
         clearTimeout(timeout)
@@ -297,8 +303,13 @@ export function SlackManifestDisplay({ agentName }: Props) {
 // doesn't linkify the dot. Path/query characters that legitimately
 // appear in URLs (`/`, `=`, `&`, `#`, `~`, `@`, `+`, `%`, `_`, `-`)
 // are kept.
-const URL_SPLIT_RE = /(https?:\/\/[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+[A-Za-z0-9_~/#@$&'()*+=%-])/g
-const URL_TEST_RE = /^https?:\/\/[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+[A-Za-z0-9_~/#@$&'()*+=%-]$/
+// Round-6 audit on PR #50: hyphen moved to FIRST position in each
+// character class so it's unambiguously a literal (not a stray
+// range like `%-` to a future reader). This is a security-load-
+// bearing function — hrefs flow through here — so readability
+// matters.
+const URL_SPLIT_RE = /(https?:\/\/[-A-Za-z0-9._~:/?#@!$&'()*+,;=%]+[-A-Za-z0-9_~/#@$&'()*+=%])/g
+const URL_TEST_RE = /^https?:\/\/[-A-Za-z0-9._~:/?#@!$&'()*+,;=%]+[-A-Za-z0-9_~/#@$&'()*+=%]$/
 function linkifyUrls(text: string): ReactNode {
   const parts = text.split(URL_SPLIT_RE)
   return parts.map((part, i) =>
