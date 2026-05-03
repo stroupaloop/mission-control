@@ -67,7 +67,15 @@ const GRANTED_ACTIONS = new Set([
   'ecs:TagResource',
   'ecs:UntagResource',
 
-  // task_ecs_write — IAM passrole for ECS task launch
+  // task_ecs_write — IAM passrole for ECS task launch.
+  //
+  // NOTE: this entry is documentation-only. `iam:PassRole` is an
+  // implicit policy permission ECS uses when assuming task roles at
+  // launch — it has NO corresponding `*Command` constructor in the
+  // AWS SDK. The scanner can never flag it as missing (no import
+  // would ever generate `iam:PassRole`), so this list entry exists
+  // for human readers consulting the canonical action list, not for
+  // the script's enforcement loop.
   'iam:PassRole',
 
   // task_ecs_write — ELBv2 listener/rule/TG management on shared agents ALB
@@ -116,6 +124,11 @@ function findHandlerFiles(dir, out = []) {
       if (entry.name === '__tests__') continue
       findHandlerFiles(full, out)
     } else if (entry.isFile() && /\.tsx?$/.test(entry.name)) {
+      // Skip *.test.ts / *.spec.ts files placed directly in the
+      // handler directory (round-1 audit on PR #46 — Greptile
+      // caught that __tests__ skip alone misses these). Test files
+      // mock the SDK; their `Command` references aren't runtime.
+      if (/\.(test|spec)\.tsx?$/.test(entry.name)) continue
       out.push(full)
     }
   }
@@ -147,10 +160,17 @@ function extractCommandsFromFile(source) {
     const iamPrefix = SDK_TO_IAM_PREFIX[pkg]
     if (!iamPrefix) continue
     // Split by comma; each fragment may have `type Foo` or just `Foo`
-    // or trailing comments.
+    // or trailing comments. Type-only fragments (`type FooCommand`)
+    // are SKIPPED entirely — they're TS type imports that elide at
+    // compile time, not runtime SDK calls. Counting them produced
+    // false positives flagged by round-1 audit on PR #46 (Greptile
+    // P2). Same applies to `import type { ... }` blocks, but those
+    // are excluded at the import-regex level (the regex requires
+    // whitespace+`{` immediately after `import`, not `import type`).
     for (const raw of importsBody.split(',')) {
-      const fragment = raw.trim().replace(/^type\s+/, '')
+      const fragment = raw.trim()
       if (!fragment) continue
+      if (/^type\s+/.test(fragment)) continue
       // Drop trailing single-line comments and renames like `as X`.
       const name = fragment.split(/\s|\/\//)[0]
       if (/Command$/.test(name)) {
@@ -171,12 +191,34 @@ function commandToAction(commandName, iamPrefix) {
 // Main
 // ---------------------------------------------------------------------------
 
+// HANDLER_DIR is intentionally narrow — only the Next.js route handlers
+// under src/extensions/fleet/api/ are scanned. SDK calls outside this
+// directory (utility helpers in lib/, template renderers, etc.) are
+// NOT scanned. Today, no fleet code outside api/ makes runtime AWS
+// calls, but if that changes (e.g. a shared `lib/aws-clients.ts` that
+// wraps SDK calls), broaden HANDLER_DIR or add the lib directory as a
+// second walk root. Round-1 audit on PR #46 flagged the implicit
+// scope.
 const HANDLER_DIR = 'src/extensions/fleet/api'
 
 function main() {
   const root = process.cwd()
   const handlerDir = path.join(root, HANDLER_DIR)
   const files = findHandlerFiles(handlerDir)
+
+  // Zero-file guard — if the handler directory is renamed, the
+  // process is run from the wrong CWD, or a rebase deletes api/, the
+  // pre-fix script would print "0 files scanned" and exit 0 (silent
+  // CI green on a real regression). Round-1 audit on PR #46 flagged
+  // it; this exits 1 explicitly so the failure mode is loud.
+  if (files.length === 0) {
+    console.error(`❌ IAM coverage check found ZERO handler files under ${HANDLER_DIR}`)
+    console.error('   This is almost certainly a misconfiguration:')
+    console.error(`   - Wrong CWD? (currently: ${root})`)
+    console.error(`   - Directory renamed or deleted?`)
+    console.error('   Refusing to exit 0 on an empty scan.')
+    process.exit(1)
+  }
 
   const violations = []
   const allActions = new Set()
