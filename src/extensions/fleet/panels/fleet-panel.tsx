@@ -355,7 +355,7 @@ export function FleetPanel() {
                     // shape (e.g. mission-control itself, litellm,
                     // the smoke-test on the legacy ALB), so the
                     // Delete affordance is hidden.
-                    const agentNameForDelete = agentNameFromService(svc.name)
+                    const parsedAgentName = agentNameFromService(svc.name)
                     // Disable Redeploy if (a) the POST is in flight,
                     // OR (b) ECS already shows an active rollout in
                     // progress (activeDeployments > 0). Avoids double-
@@ -370,7 +370,7 @@ export function FleetPanel() {
                           {/*
                             Beat 5c.1: the agent-name cell is a
                             clickable button when the row is an
-                            MC-managed agent (agentNameForDelete
+                            MC-managed agent (parsedAgentName
                             non-null). Opens the detail panel
                             with identity fields + Slack manifest.
                             Non-agent rows (litellm, mission-
@@ -382,13 +382,13 @@ export function FleetPanel() {
                             on parsed agent name, not the raw
                             service name.
                           */}
-                          {agentNameForDelete !== null ? (
+                          {parsedAgentName !== null ? (
                             <button
                               type="button"
                               onClick={() =>
                                 setDetailTarget({
                                   agent: svc,
-                                  agentName: agentNameForDelete,
+                                  agentName: parsedAgentName,
                                 })
                               }
                               className="text-left hover:underline focus:outline-none focus:ring-2 focus:ring-primary/50 rounded"
@@ -434,7 +434,7 @@ export function FleetPanel() {
                             {/*
                               Delete button — Beat 4c. The agent
                               name is extracted from the service
-                              name once above (agentNameForDelete);
+                              name once above (parsedAgentName);
                               the modal receives the parsed name
                               directly and routes to
                               /api/fleet/agents/{name}. Disabled
@@ -445,12 +445,12 @@ export function FleetPanel() {
                               changes. Hidden entirely for non-agent
                               rows.
                             */}
-                            {agentNameForDelete !== null ? (
+                            {parsedAgentName !== null ? (
                               <Button
                                 variant="outline"
                                 size="sm"
                                 onClick={() =>
-                                  setDeleteTarget(agentNameForDelete)
+                                  setDeleteTarget(parsedAgentName)
                                 }
                                 disabled={redeployDisabled}
                                 data-testid={`delete-${svc.name}`}
