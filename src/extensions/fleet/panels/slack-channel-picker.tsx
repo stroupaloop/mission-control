@@ -6,10 +6,6 @@ import type {
   SlackChannelsResponse,
   SlackChannelsErrorResponse,
 } from '../api/slack-channels'
-import type {
-  SlackCredentialsResponse,
-  SlackCredentialsErrorResponse,
-} from '../api/slack-credentials'
 
 // Phase 2.4 Beat 5c.2 — Slack channel picker.
 //
@@ -84,7 +80,7 @@ type SaveState =
   | {
       kind: 'error'
       status: number
-      body: SlackCredentialsErrorResponse
+      body: SlackChannelsErrorResponse
     }
 
 export function SlackChannelPicker({ agentName, reloadKey }: Props) {
@@ -94,10 +90,18 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
   const [retryKey, setRetryKey] = useState(0)
   const fetchAbortRef = useRef<AbortController | null>(null)
   const saveAbortRef = useRef<AbortController | null>(null)
+  // Round-2 audit on PR #51: unmount guard for handleSave's catch
+  // block. Pre-fix, the catch called setSaveState unconditionally,
+  // which fires on an unmounted component when the unmount-cleanup
+  // effect aborts the controller. React 18+ swallows it silently
+  // but the inconsistency with the credentials-form's mountedRef
+  // pattern was real.
+  const mountedRef = useRef(true)
 
   // Cleanup on unmount.
   useEffect(() => {
     return () => {
+      mountedRef.current = false
       fetchAbortRef.current?.abort()
       saveAbortRef.current?.abort()
     }
@@ -240,19 +244,21 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
         },
       )
       clearTimeout(timeout)
+      if (!mountedRef.current) return
       if (resp.ok) {
         setSaveState({ kind: 'saved' })
         return
       }
-      let body: SlackCredentialsErrorResponse
+      let body: SlackChannelsErrorResponse
       try {
-        body = (await resp.json()) as SlackCredentialsErrorResponse
+        body = (await resp.json()) as SlackChannelsErrorResponse
       } catch {
         body = { error: `HTTP ${resp.status}` }
       }
       setSaveState({ kind: 'error', status: resp.status, body })
     } catch (err) {
       clearTimeout(timeout)
+      if (!mountedRef.current) return
       if (controller.signal.aborted) {
         setSaveState({
           kind: 'error',
