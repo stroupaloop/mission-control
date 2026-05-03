@@ -794,6 +794,38 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     expect(json.detail).toContain('512-char')
   })
 
+  it('deduplicates duplicate channel IDs before serializing OPENCLAW_SLACK_CONFIG_JSON (round-8 audit)', async () => {
+    // Pre-fix, ['C0123456789', 'C0123456789'] passed all three
+    // validation layers (count cap, per-item regex, 512-char
+    // serialized) and produced
+    // OPENCLAW_SLACK_CONFIG_JSON='{"channels":["C0123456789","C0123456789"]}',
+    // which the OpenClaw Slack plugin (Beat 5d) would subscribe
+    // to twice → duplicate event delivery. Dedupe via Set
+    // collapses identical IDs before stringify.
+    happyPathMocks()
+    const POST = await importHandler()
+    const channels = ['C0123456789', 'C9876543210', 'C0123456789']
+    await POST(mkRequest({ ...validBody(), channels }), mkParams())
+    const registerCall = ecsSendMock.mock.calls.find(
+      (c) => (c[0] as { __type: string }).__type === 'RegisterTaskDefinitionCommand',
+    )
+    expect(registerCall).toBeDefined()
+    const input = (registerCall![0] as { input: Record<string, unknown> }).input
+    const containers = input.containerDefinitions as Array<{
+      name: string
+      environment?: Array<{ name: string; value: string }>
+    }>
+    const gateway = containers.find((c) => c.name === 'gateway')
+    const slackConfigEnv = gateway!.environment!.find(
+      (e) => e.name === 'OPENCLAW_SLACK_CONFIG_JSON',
+    )
+    expect(slackConfigEnv).toBeDefined()
+    const parsed = JSON.parse(slackConfigEnv!.value) as { channels: string[] }
+    // Set preserves first-occurrence order: dedupe of
+    // [a, b, a] → [a, b], not [b, a].
+    expect(parsed.channels).toEqual(['C0123456789', 'C9876543210'])
+  })
+
   it('SIGNING_SECRET_RE rejects 64-char (round-1: narrowed to exactly 32)', async () => {
     const POST = await importHandler()
     const resp = await POST(

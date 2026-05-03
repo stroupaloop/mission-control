@@ -395,8 +395,17 @@ export async function POST(
   // SERIALIZED form fits. Pre-compute + check NOW (before any AWS
   // call) so an oversized list returns a clean 400 instead of
   // failing deep inside RegisterTaskDefinition.
+  // Round-8 audit on PR #48: dedupe channels before serialization.
+  // The count cap + per-item CHANNEL_ID_RE + 512-char serialized
+  // size cap each bound a different axis but don't catch duplicate
+  // entries (`['C012345', 'C012345']` passes all three). A
+  // duplicated channel ID would cause the OpenClaw Slack plugin
+  // (Beat 5d) to subscribe twice and deliver each event twice.
+  // One-line dedupe via Set preserves first-occurrence order for
+  // operator-readable detail messages.
+  const dedupedChannels = [...new Set(body.channels ?? [])]
   const channelsConfigJson = JSON.stringify({
-    channels: body.channels ?? [],
+    channels: dedupedChannels,
   })
   const ECS_ENV_VALUE_MAX = 512
   if (channelsConfigJson.length > ECS_ENV_VALUE_MAX) {
@@ -577,7 +586,7 @@ export async function POST(
       severity: 'info',
       source: 'fleet',
       agent_name: agentName,
-      detail: `actor=${auth.user?.id} taskDef=${newTaskDefArn} channels=${(body.channels ?? []).length}`,
+      detail: `actor=${auth.user?.id} taskDef=${newTaskDefArn} channels=${dedupedChannels.length}`,
     })
 
     return NextResponse.json(
