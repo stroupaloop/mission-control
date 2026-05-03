@@ -38,6 +38,9 @@ jobs:
       - name: API contract parity
         run: pnpm api:parity
 
+      - name: IAM coverage (fleet handlers)
+        run: pnpm iam:coverage
+
       - name: Lint
         run: pnpm lint
 
