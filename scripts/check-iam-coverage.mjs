@@ -174,18 +174,53 @@ function findNamespaceImportsOfAwsSdk(source) {
   return found
 }
 
+/**
+ * Strip line + block comments from the source before regex parsing.
+ * Without this, commented-out imports like `// import { Foo } from
+ * '@aws-sdk/client-ecs'` would be matched and checked against
+ * GRANTED_ACTIONS — failing CI on code that isn't runtime. Round-3
+ * audit on PR #46.
+ *
+ * Implementation is naïve (string-based, no template-literal
+ * awareness) but adequate for an import-line scanner: imports must
+ * be at top-level statement positions, not inside templates or
+ * string-typed values. False positives would have to be deliberately
+ * pathological.
+ */
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '') // block comments
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1') // line comments (avoid http:// etc.)
+}
+
 function extractCommandsFromFile(source) {
   const commands = new Map() // CommandName → iamPrefix
+  const stripped = stripComments(source)
+
+  // Unknown @aws-sdk packages — warn collector returned alongside
+  // commands so the caller can elevate to a hard failure. Round-3
+  // audit on PR #46 caught the silent-skip class for unusual import
+  // paths (subpath imports, internal SDK paths).
+  const unknownAwsSdkPaths = []
 
   // Multi-line import regex: capture the imports list and the package.
   const importRe =
     /import\s*\{\s*([\s\S]*?)\s*\}\s*from\s*['"]([^'"]+)['"]/g
   let match
-  while ((match = importRe.exec(source)) !== null) {
+  while ((match = importRe.exec(stripped)) !== null) {
     const importsBody = match[1]
     const pkg = match[2]
     const iamPrefix = SDK_TO_IAM_PREFIX[pkg]
-    if (!iamPrefix) continue
+    if (!iamPrefix) {
+      // Loud-fail on unknown @aws-sdk paths so a subpath import like
+      // `@aws-sdk/client-ecs/dist/cjs/commands/FooCommand` doesn't
+      // silently bypass the IAM check. Non-AWS packages are
+      // genuinely irrelevant; only the @aws-sdk namespace is gated.
+      if (pkg.startsWith('@aws-sdk/')) {
+        unknownAwsSdkPaths.push(pkg)
+      }
+      continue
+    }
     // Split by comma; each fragment may have `type Foo` or just `Foo`
     // or trailing comments. Type-only fragments (`type FooCommand`)
     // are SKIPPED entirely — they're TS type imports that elide at
@@ -205,7 +240,7 @@ function extractCommandsFromFile(source) {
       }
     }
   }
-  return commands
+  return { commands, unknownAwsSdkPaths }
 }
 
 /** PascalCase Command name → IAM action. Drops the trailing `Command`. */
@@ -249,6 +284,7 @@ function main() {
 
   const violations = []
   const namespaceImports = []
+  const unknownPaths = []
   const allActions = new Set()
 
   for (const file of files) {
@@ -257,7 +293,10 @@ function main() {
     for (const ns of nsImports) {
       namespaceImports.push({ file: path.relative(root, file), ...ns })
     }
-    const commands = extractCommandsFromFile(source)
+    const { commands, unknownAwsSdkPaths } = extractCommandsFromFile(source)
+    for (const pkg of unknownAwsSdkPaths) {
+      unknownPaths.push({ file: path.relative(root, file), pkg })
+    }
     for (const [name, prefix] of commands) {
       const action = commandToAction(name, prefix)
       allActions.add(action)
@@ -283,6 +322,29 @@ function main() {
         'the Command constructors. Example:\n' +
         "  - import * as ECS from '@aws-sdk/client-ecs'\n" +
         "  + import { ListTaskDefinitionsCommand } from '@aws-sdk/client-ecs'\n",
+    )
+    process.exit(1)
+  }
+
+  // Reject unknown @aws-sdk subpaths. Subpath imports like
+  // `@aws-sdk/client-ecs/dist/cjs/commands/FooCommand` would map to
+  // no entry in SDK_TO_IAM_PREFIX, so the command would silently
+  // skip the IAM check. Round-3 audit on PR #46.
+  if (unknownPaths.length > 0) {
+    console.error(
+      `❌ Unknown @aws-sdk import paths found (${unknownPaths.length}):`,
+    )
+    for (const u of unknownPaths) {
+      console.error(`   ${u.file}: from '${u.pkg}'`)
+    }
+    console.error()
+    console.error(
+      'Fix: either (a) convert to a top-level @aws-sdk/client-* import\n' +
+        '  whose prefix is in SDK_TO_IAM_PREFIX (e.g. @aws-sdk/client-ecs),\n' +
+        'or (b) extend SDK_TO_IAM_PREFIX in this script with the new\n' +
+        '  package and its IAM service prefix (e.g. @aws-sdk/client-foo:\n' +
+        "  'foo'). Subpath imports (.../dist/...) silently bypass coverage\n" +
+        '  and are refused as a class.',
     )
     process.exit(1)
   }
