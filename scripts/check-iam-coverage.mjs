@@ -147,6 +147,33 @@ function findHandlerFiles(dir, out = []) {
  *     type Service,
  *   } from '@aws-sdk/client-ecs'
  */
+/**
+ * Detect namespace imports of AWS SDK packages
+ *   (`import * as ECS from '@aws-sdk/client-ecs'`).
+ *
+ * Returns the list of (alias, package) tuples found. Empty when the
+ * file uses only named imports (the supported form).
+ *
+ * Why this exists: the named-import scanner in `extractCommandsFromFile`
+ * is blind to namespace imports — `await client.send(new ECS.FooCommand(...))`
+ * generates zero `*Command` tokens in the named-import position, so an
+ * IAM gap could ship undetected. Round-2 audit on PR #46 flagged this
+ * class. The fix here is explicit: refuse namespace imports of AWS
+ * SDK packages with a loud error directing the developer to convert
+ * to named imports. Catching the pattern at PR-time is strictly
+ * better than silently growing a blind spot.
+ */
+function findNamespaceImportsOfAwsSdk(source) {
+  const found = []
+  const nsImportRe =
+    /import\s+\*\s+as\s+(\w+)\s+from\s+['"](@aws-sdk\/[^'"]+)['"]/g
+  let match
+  while ((match = nsImportRe.exec(source)) !== null) {
+    found.push({ alias: match[1], pkg: match[2] })
+  }
+  return found
+}
+
 function extractCommandsFromFile(source) {
   const commands = new Map() // CommandName → iamPrefix
 
@@ -221,10 +248,15 @@ function main() {
   }
 
   const violations = []
+  const namespaceImports = []
   const allActions = new Set()
 
   for (const file of files) {
     const source = fs.readFileSync(file, 'utf8')
+    const nsImports = findNamespaceImportsOfAwsSdk(source)
+    for (const ns of nsImports) {
+      namespaceImports.push({ file: path.relative(root, file), ...ns })
+    }
     const commands = extractCommandsFromFile(source)
     for (const [name, prefix] of commands) {
       const action = commandToAction(name, prefix)
@@ -235,10 +267,40 @@ function main() {
     }
   }
 
+  // Reject namespace imports of AWS SDK packages — they hide commands
+  // from the named-import scanner and would let an ungranted action
+  // ship silently. Round-2 audit on PR #46.
+  if (namespaceImports.length > 0) {
+    console.error(
+      `❌ Namespace imports of AWS SDK packages found (${namespaceImports.length}):`,
+    )
+    for (const ns of namespaceImports) {
+      console.error(`   ${ns.file}: import * as ${ns.alias} from '${ns.pkg}'`)
+    }
+    console.error()
+    console.error(
+      'Fix: convert to named imports so the IAM coverage scanner can see\n' +
+        'the Command constructors. Example:\n' +
+        "  - import * as ECS from '@aws-sdk/client-ecs'\n" +
+        "  + import { ListTaskDefinitionsCommand } from '@aws-sdk/client-ecs'\n",
+    )
+    process.exit(1)
+  }
+
+  // `iam:PassRole` is in GRANTED_ACTIONS for documentation only — no
+  // SDK Command resolves to it, so it can't appear in the
+  // enforceable-action set. Subtract it for the count display so the
+  // summary line reflects actually-enforceable grants.
+  const enforceableGrantedCount = Array.from(GRANTED_ACTIONS).filter(
+    (a) => a !== 'iam:PassRole',
+  ).length
+
   console.log('IAM coverage check')
   console.log(`- handler files scanned: ${files.length}`)
   console.log(`- distinct AWS actions used: ${allActions.size}`)
-  console.log(`- granted actions in policy: ${GRANTED_ACTIONS.size}`)
+  console.log(
+    `- granted actions in policy: ${enforceableGrantedCount} (+1 doc-only: iam:PassRole)`,
+  )
   console.log()
 
   if (violations.length === 0) {
