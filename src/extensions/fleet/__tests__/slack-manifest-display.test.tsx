@@ -183,6 +183,67 @@ describe('<SlackManifestDisplay />', () => {
     expect(instructions.textContent).toContain('Choose "From an app manifest"')
   })
 
+  it('surfaces a Timeout error (not stuck loading) when fetch is aborted by the timeout', async () => {
+    // Pre-fix, the catch had `if (controller.signal.aborted) return`
+    // which fired for BOTH timeout-abort and cleanup-abort,
+    // silently swallowing timeouts and leaving the UI on
+    // "Loading…" forever. Post-fix: distinguished via a
+    // `timedOut` flag; timeout-abort surfaces an error UI with
+    // the Retry button.
+    fetchMock.mockImplementationOnce((_url, init) => {
+      // Simulate a timeout: never resolve until the AbortSignal
+      // fires (which the wrapper's setTimeout triggers after
+      // FETCH_TIMEOUT_MS). The mock rejects with an AbortError
+      // when the signal aborts.
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = (init as RequestInit).signal as AbortSignal
+        signal.addEventListener('abort', () => {
+          const err = new Error('aborted')
+          err.name = 'AbortError'
+          reject(err)
+        })
+      })
+    })
+    vi.useFakeTimers()
+    render(<SlackManifestDisplay agentName={AGENT} />)
+    // Advance past FETCH_TIMEOUT_MS (10s).
+    await vi.advanceTimersByTimeAsync(11_000)
+    vi.useRealTimers()
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('slack-manifest-error'),
+      ).toBeInTheDocument(),
+    )
+    expect(screen.getByTestId('slack-manifest-error').textContent).toContain(
+      'Timeout',
+    )
+    // Retry button is offered (operator can recover).
+    expect(screen.getByTestId('slack-manifest-retry')).toBeInTheDocument()
+  })
+
+  it('does not linkify a trailing period after a URL', async () => {
+    fetchMock.mockResolvedValueOnce(
+      okResp({
+        ...sampleSuccess,
+        instructions: ['Go to https://api.slack.com/apps.'],
+      }),
+    )
+    render(<SlackManifestDisplay agentName={AGENT} />)
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('slack-manifest-instructions'),
+      ).toBeInTheDocument(),
+    )
+    const link = screen
+      .getByTestId('slack-manifest-instructions')
+      .querySelector('a')
+    expect(link?.getAttribute('href')).toBe('https://api.slack.com/apps')
+    // Period should be rendered as plain text, not part of the href.
+    expect(
+      screen.getByTestId('slack-manifest-instructions').textContent,
+    ).toContain('.')
+  })
+
   it('Retry button re-fetches the manifest after an error', async () => {
     fetchMock
       .mockResolvedValueOnce(

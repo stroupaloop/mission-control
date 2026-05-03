@@ -66,6 +66,12 @@ export function SlackManifestDisplay({ agentName }: Props) {
       abortRef.current = null
       setState({ kind: 'idle' })
       setCopied(false)
+      // Round-4 audit on PR #50: reset retryKey on close so it
+      // doesn't accumulate across panel-close → reopen cycles.
+      // No incorrect behavior follows from the count growing
+      // (it's only used as a useEffect-deps cache-buster), but
+      // a stable starting point is cleaner.
+      setRetryKey(0)
       return
     }
 
@@ -73,7 +79,20 @@ export function SlackManifestDisplay({ agentName }: Props) {
     abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
-    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+    // Round-4 audit on PR #50: distinguish "timeout fired"
+    // (should surface error UI) from "component unmounted /
+    // agent switched" (should bail silently). Both paths set
+    // `controller.signal.aborted === true`, so a single
+    // `if (aborted) return` guard would have silently swallowed
+    // timeout errors and left the UI stuck on "Loading…" — the
+    // exact opposite of what FETCH_TIMEOUT_MS was meant to
+    // achieve.
+    let timedOut = false
+    let cleanupAborted = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, FETCH_TIMEOUT_MS)
 
     // Reset the copied flag so a stale "Copied!" label from the
     // previous agent's manifest doesn't bleed into the new
@@ -94,7 +113,7 @@ export function SlackManifestDisplay({ agentName }: Props) {
         clearTimeout(timeout)
         if (resp.ok) {
           const body = (await resp.json()) as SlackManifestResponse
-          if (!controller.signal.aborted) {
+          if (!cleanupAborted) {
             setState({ kind: 'success', response: body })
           }
           return
@@ -105,12 +124,27 @@ export function SlackManifestDisplay({ agentName }: Props) {
         } catch {
           body = { error: `HTTP ${resp.status}` }
         }
-        if (!controller.signal.aborted) {
+        if (!cleanupAborted) {
           setState({ kind: 'error', status: resp.status, body })
         }
       } catch (err) {
         clearTimeout(timeout)
-        if (controller.signal.aborted) return
+        // Cleanup-aborted = component gone or agent switched —
+        // don't update state on a stale render.
+        if (cleanupAborted) return
+        // Timeout-aborted = surface a real error UI so the
+        // operator gets the Retry button.
+        if (timedOut) {
+          setState({
+            kind: 'error',
+            status: 0,
+            body: {
+              error: 'Timeout',
+              detail: `Request timed out after ${FETCH_TIMEOUT_MS / 1000}s`,
+            },
+          })
+          return
+        }
         setState({
           kind: 'error',
           status: 0,
@@ -123,6 +157,7 @@ export function SlackManifestDisplay({ agentName }: Props) {
     })()
 
     return () => {
+      cleanupAborted = true
       clearTimeout(timeout)
       controller.abort()
     }
@@ -246,8 +281,15 @@ export function SlackManifestDisplay({ agentName }: Props) {
 // preserves it) and TEST (no /g, stateless — calling .test()
 // repeatedly on a /g-flagged regex would advance `lastIndex`
 // and give wrong results inside a .map()).
-const URL_SPLIT_RE = /(https?:\/\/[^\s"'<>)]+)/g
-const URL_TEST_RE = /^https?:\/\/[^\s"'<>)]+$/
+//
+// Round-4 audit on PR #50: trailing punctuation (`.`, `,`, `;`,
+// `:`, `!`, `?`) is excluded from the URL match so a sentence-
+// ending instruction like `Go to https://api.slack.com/apps.`
+// doesn't linkify the dot. Path/query characters that legitimately
+// appear in URLs (`/`, `=`, `&`, `#`, `~`, `@`, `+`, `%`, `_`, `-`)
+// are kept.
+const URL_SPLIT_RE = /(https?:\/\/[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+[A-Za-z0-9_~/#@$&'()*+=%-])/g
+const URL_TEST_RE = /^https?:\/\/[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+[A-Za-z0-9_~/#@$&'()*+=%-]$/
 function linkifyUrls(text: string): ReactNode {
   const parts = text.split(URL_SPLIT_RE)
   return parts.map((part, i) =>
