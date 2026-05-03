@@ -164,6 +164,25 @@ describe('<SlackManifestDisplay />', () => {
     expect(screen.getByTestId('slack-manifest-copy').textContent).toBe('Copy')
   })
 
+  it('Retry button re-fetches the manifest after an error (round-1 audit on PR #50)', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        errResp(502, { error: 'AWSError', detail: 'transient' }),
+      )
+      .mockResolvedValueOnce(okResp(sampleSuccess))
+    render(<SlackManifestDisplay agentName={AGENT} />)
+    const errorEl = await screen.findByTestId('slack-manifest-error')
+    expect(errorEl).toBeInTheDocument()
+    const retry = screen.getByTestId('slack-manifest-retry')
+    fireEvent.click(retry)
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('slack-manifest-display'),
+      ).toBeInTheDocument(),
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('re-fetches when agentName changes', async () => {
     fetchMock
       .mockResolvedValueOnce(okResp(sampleSuccess))

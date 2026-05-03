@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'
 import type { FleetServiceSummary } from '../api/services'
@@ -40,6 +40,14 @@ interface Props {
 
 export function AgentDetailPanel({ agent, agentName, onClose }: Props) {
   const open = agent !== null && agentName !== null
+  // Refs for focus management — round-1 audit on PR #50 carried
+  // this pattern over from create-agent-form.tsx + delete-agent-
+  // form.tsx. With aria-modal="true" set, screen readers treat
+  // background as inert; the focus trap below ensures keyboard-
+  // only / AT users can't actually Tab out.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const previousFocusRef = useRef<Element | null>(null)
 
   // Esc closes (matches modal-form behavior).
   useEffect(() => {
@@ -50,6 +58,50 @@ export function AgentDetailPanel({ agent, agentName, onClose }: Props) {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
+
+  // On open: capture the trigger element so we can return focus on
+  // close, then move focus to the Close button (the most predictable
+  // landing for a read-mostly side-panel — operator's natural Tab
+  // sequence flows from there into the body).
+  useEffect(() => {
+    if (!open) return
+    previousFocusRef.current = document.activeElement
+    const t = setTimeout(() => closeButtonRef.current?.focus(), 0)
+    return () => {
+      clearTimeout(t)
+      const target = previousFocusRef.current as HTMLElement | null
+      target?.focus?.()
+    }
+  }, [open])
+
+  // Focus trap (WAI-ARIA 1.2 Dialog Pattern §2.25). Same shape as
+  // create-agent-form.tsx:171-194. Tab/Shift-Tab cycles within the
+  // panel; without this, focus would escape into the background
+  // even though aria-modal="true" tells screen readers it's inert.
+  useEffect(() => {
+    if (!open) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Tab') return
+      const root = dialogRef.current
+      if (!root) return
+      const focusables = root.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )
+      if (focusables.length === 0) return
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      const active = document.activeElement
+      if (e.shiftKey && active === first) {
+        e.preventDefault()
+        last?.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
 
   if (!open || agent === null || agentName === null) return null
 
@@ -67,6 +119,7 @@ export function AgentDetailPanel({ agent, agentName, onClose }: Props) {
       data-testid="agent-detail-panel"
     >
       <div
+        ref={dialogRef}
         className="bg-background h-full w-full max-w-2xl shadow-xl overflow-y-auto"
         // Stop click propagation so clicks INSIDE the panel don't
         // hit the backdrop dismiss handler above.
@@ -86,6 +139,7 @@ export function AgentDetailPanel({ agent, agentName, onClose }: Props) {
               </p>
             </div>
             <Button
+              ref={closeButtonRef}
               variant="outline"
               size="sm"
               onClick={onClose}

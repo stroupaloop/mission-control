@@ -22,6 +22,10 @@ interface Props {
   agentName: string | null
 }
 
+// Round-1 audit on PR #50: the error UI now offers a Retry button
+// instead of forcing the operator to close + reopen the panel.
+// Pattern matches create-agent-form / delete-agent-form retry UX.
+
 type FetchState =
   | { kind: 'idle' }
   | { kind: 'loading' }
@@ -33,7 +37,21 @@ const FETCH_TIMEOUT_MS = 30_000
 export function SlackManifestDisplay({ agentName }: Props) {
   const [state, setState] = useState<FetchState>({ kind: 'idle' })
   const [copied, setCopied] = useState(false)
+  // Bumping retryKey re-runs the fetch effect (it's in the deps).
+  // Increment on Retry button click — simpler than a manual
+  // re-fetch path that would duplicate the state-management logic.
+  const [retryKey, setRetryKey] = useState(0)
   const abortRef = useRef<AbortController | null>(null)
+  // Round-1 audit on PR #50: track the copied-flag timeout so we
+  // cancel it on unmount (was leaking until it fired).
+  const copiedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // On unmount, clear any pending copied-flag reset timeout.
+  useEffect(() => {
+    return () => {
+      if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     if (agentName === null) {
@@ -93,7 +111,9 @@ export function SlackManifestDisplay({ agentName }: Props) {
       clearTimeout(timeout)
       controller.abort()
     }
-  }, [agentName])
+    // retryKey is intentionally in the deps so the Retry button can
+    // re-trigger a fresh fetch without changing agentName.
+  }, [agentName, retryKey])
 
   const handleCopy = async () => {
     if (state.kind !== 'success') return
@@ -102,7 +122,8 @@ export function SlackManifestDisplay({ agentName }: Props) {
         JSON.stringify(state.response.manifest, null, 2),
       )
       setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+      if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current)
+      copiedTimeoutRef.current = setTimeout(() => setCopied(false), 2000)
     } catch {
       // Clipboard API failure (browser permission, non-secure context).
       // Operator can fall back to manual copy via the rendered <pre>.
@@ -129,15 +150,27 @@ export function SlackManifestDisplay({ agentName }: Props) {
         className="p-3 rounded-md bg-destructive/10 text-destructive text-sm"
         data-testid="slack-manifest-error"
       >
-        <div className="font-semibold">
-          {state.body.error}
-          {state.status > 0 ? ` (HTTP ${state.status})` : ''}
-        </div>
-        {state.body.detail ? (
-          <div className="mt-1">
-            <code className="text-xs">{state.body.detail}</code>
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex-1">
+            <div className="font-semibold">
+              {state.body.error}
+              {state.status > 0 ? ` (HTTP ${state.status})` : ''}
+            </div>
+            {state.body.detail ? (
+              <div className="mt-1">
+                <code className="text-xs">{state.body.detail}</code>
+              </div>
+            ) : null}
           </div>
-        ) : null}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setRetryKey((k) => k + 1)}
+            data-testid="slack-manifest-retry"
+          >
+            Retry
+          </Button>
+        </div>
       </div>
     )
   }
