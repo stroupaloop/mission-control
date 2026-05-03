@@ -335,22 +335,26 @@ export async function writeSlackSecrets(
  */
 export async function getSlackBotToken(agentName: string): Promise<string> {
   const prefix = requireSecretsPrefix()
-  const name = secretName(prefix, agentName, 'slack-bot-token')
+  const fullSecretName = secretName(prefix, agentName, 'slack-bot-token')
   try {
     const resp = await secretsClient.send(
-      new GetSecretValueCommand({ SecretId: name }),
+      new GetSecretValueCommand({ SecretId: fullSecretName }),
     )
     if (!resp.SecretString) {
       const err = new Error(
-        `GetSecretValue for "${name}" returned no SecretString — secret may have been written with binary value or is empty.`,
+        `GetSecretValue for "${fullSecretName}" returned no SecretString — secret may have been written with binary value or is empty.`,
       )
       err.name = 'SlackBotTokenMalformed'
       throw err
     }
     return resp.SecretString
   } catch (err) {
-    const name = (err as { name?: string })?.name
-    if (name === 'ResourceNotFoundException') {
+    // Round-1 audit on PR #49: previously this catch shadowed
+    // `name` (the secret ARN, defined above) with the error
+    // class name, which let `if (name === 'ResourceNotFoundException')`
+    // misread as comparing a secret path. Renamed to `errName`.
+    const errName = (err as { name?: string })?.name
+    if (errName === 'ResourceNotFoundException') {
       const e = new Error(
         `No Slack bot token stored for agent "${agentName}". Operator must run the credential-paste flow first.`,
       )

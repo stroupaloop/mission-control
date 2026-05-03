@@ -23,6 +23,13 @@
 
 const SLACK_API_BASE = 'https://slack.com/api'
 const SLACK_LIST_LIMIT = 100
+// 5s ceiling on the Slack call. Round-1 audit on PR #49: without
+// this, a Slack outage would hang the API route worker until the
+// platform-level TCP timeout fires (potentially minutes). The
+// channel-picker UI is interactive — fail fast with
+// SlackNetworkError so the operator sees a clear error and can
+// retry rather than staring at a spinner.
+const SLACK_FETCH_TIMEOUT_MS = 5_000
 
 export interface SlackChannel {
   id: string
@@ -85,10 +92,22 @@ export async function listChannels(
         Authorization: `Bearer ${botToken}`,
         Accept: 'application/json',
       },
+      signal: AbortSignal.timeout(SLACK_FETCH_TIMEOUT_MS),
     })
   } catch (fetchErr) {
+    // Round-1 audit on PR #49: do NOT embed `fetchErr.message`
+    // in the SlackNetworkError message. The handler logs
+    // `error.message` to CloudWatch, and a misbehaving fetch
+    // implementation that echoes the Authorization header in
+    // its error string would leak the bot token there. Use a
+    // generic message — the SlackNetworkError class name + the
+    // original fetch error's name (if any) is enough for
+    // CloudWatch debugging without risking token material in
+    // structured logs.
+    const fetchErrName =
+      (fetchErr as { name?: string })?.name ?? 'unknown'
     const e = new Error(
-      `Slack conversations.list network error: ${(fetchErr as Error).message}`,
+      `Slack conversations.list network error (cause=${fetchErrName}).`,
     )
     e.name = 'SlackNetworkError'
     throw e

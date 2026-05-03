@@ -28,8 +28,10 @@ vi.mock('@aws-sdk/client-secrets-manager', () => ({
   })),
 }))
 
+const loggerErrorMock = vi.fn()
+const loggerWarnMock = vi.fn()
 vi.mock('@/lib/logger', () => ({
-  logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+  logger: { error: loggerErrorMock, warn: loggerWarnMock, info: vi.fn() },
 }))
 
 vi.mock('@/lib/auth', () => ({
@@ -105,6 +107,8 @@ beforeEach(() => {
   smSendMock.mockReset()
   fetchMock.mockReset()
   logSecurityEventMock.mockReset()
+  loggerErrorMock.mockReset()
+  loggerWarnMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
 })
 
@@ -384,6 +388,37 @@ describe('GET /api/fleet/agents/:name/slack/channels — Slack-side errors', () 
     const json = (await resp.json()) as { error: string }
     expect(json.error).toBe('SlackNetworkError')
   })
+
+  it('passes an AbortSignal with a 5s timeout to fetch (round-1 audit on PR #49)', async () => {
+    // Round-1 audit asked for a fetch timeout so a degraded
+    // Slack doesn't hang the API route worker. Verify the
+    // wrapper supplies a timeout-bearing signal on the fetch
+    // call. We don't fake-time the timeout itself (Node's
+    // AbortSignal.timeout integration with vitest is fragile);
+    // asserting that ANY abortable signal is passed catches
+    // regression where someone removes the wiring.
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackOk([]))
+    const GET = await importHandler()
+    await GET(mkRequest(), mkParams())
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.signal).toBeDefined()
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('maps AbortError (timeout fired) to SlackNetworkError', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockRejectedValueOnce(
+      Object.assign(new Error('signal timed out'), { name: 'TimeoutError' }),
+    )
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('SlackNetworkError')
+  })
 })
 
 describe('GET /api/fleet/agents/:name/slack/channels — token-non-leak', () => {
@@ -419,6 +454,24 @@ describe('GET /api/fleet/agents/:name/slack/channels — token-non-leak', () => 
     // surfacing to the caller. SlackNetworkError's message is
     // generic; raw fetch error doesn't reach the response.
     expect(text).not.toContain(BOT_TOKEN)
+  })
+
+  it('does not include the bot token in any logger.error call (round-1 audit on PR #49)', async () => {
+    // Round-1 audit on PR #49: prior shape embedded
+    // `fetchErr.message` into SlackNetworkError.message, which
+    // the handler then logged via `logger.error({ errorMessage:
+    // error.message })`. If a misbehaving fetch impl echoed the
+    // Authorization header in its error string, the token would
+    // land in CloudWatch. Post-fix: the wrapper uses a generic
+    // error message + the original error class name only, never
+    // the full message string. This test asserts that contract.
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockRejectedValueOnce(new Error(`Failed to fetch with token=${BOT_TOKEN}`))
+    const GET = await importHandler()
+    await GET(mkRequest(), mkParams())
+    const allLogged = JSON.stringify(loggerErrorMock.mock.calls)
+    expect(allLogged).not.toContain(BOT_TOKEN)
   })
 
   it('does not include the bot token in any security-event detail', async () => {
