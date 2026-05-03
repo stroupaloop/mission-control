@@ -10,6 +10,7 @@ import type {
 } from '../api/services'
 import { CreateAgentForm } from './create-agent-form'
 import { DeleteAgentForm } from './delete-agent-form'
+import { AgentDetailPanel } from './agent-detail-panel'
 
 // ---------- Component ----------
 
@@ -52,6 +53,14 @@ export function FleetPanel() {
   // would replace the selection. In practice operators don't multi-
   // select; UI affordance simple.
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  // Beat 5c.1 — agent currently selected for the detail panel.
+  // Stores the full FleetServiceSummary (so the panel can render
+  // identity fields without re-fetching) plus the parsed agent
+  // name (for the Slack manifest endpoint). `null` = panel closed.
+  const [detailTarget, setDetailTarget] = useState<{
+    agent: NonNullable<typeof data>['services'][number]
+    agentName: string
+  } | null>(null)
   // Tracks when `data` was last successfully fetched (Date.now()).
   // Drives the staleness indicator that appears when error+data are
   // both present — operators need to know the table is from before
@@ -335,7 +344,40 @@ export function FleetPanel() {
                       rs.kind === 'pending' || svc.activeDeployments > 0
                     return (
                       <tr key={svc.name} className="border-t">
-                        <td className="p-2 font-mono">{svc.name}</td>
+                        <td className="p-2 font-mono">
+                          {/*
+                            Beat 5c.1: the agent-name cell is a
+                            clickable button when the row is an
+                            MC-managed agent (agentNameForDelete
+                            non-null). Opens the detail panel
+                            with identity fields + Slack manifest.
+                            Non-agent rows (litellm, mission-
+                            control itself, smoke-test) render
+                            plain text — clicking does nothing
+                            since the manifest endpoint would
+                            404 for them anyway. Match the row
+                            convention in delete-agent-form: act
+                            on parsed agent name, not the raw
+                            service name.
+                          */}
+                          {agentNameForDelete !== null ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setDetailTarget({
+                                  agent: svc,
+                                  agentName: agentNameForDelete,
+                                })
+                              }
+                              className="text-left hover:underline focus:outline-none focus:ring-2 focus:ring-primary/50 rounded"
+                              data-testid={`detail-${svc.name}`}
+                            >
+                              {svc.name}
+                            </button>
+                          ) : (
+                            svc.name
+                          )}
+                        </td>
                         <td className="p-2">
                           <span
                             className={
@@ -427,6 +469,11 @@ export function FleetPanel() {
           void load({ silent: false })
         }}
         onClose={() => setDeleteTarget(null)}
+      />
+      <AgentDetailPanel
+        agent={detailTarget?.agent ?? null}
+        agentName={detailTarget?.agentName ?? null}
+        onClose={() => setDetailTarget(null)}
       />
     </div>
   )
