@@ -212,6 +212,21 @@ describe('<SlackCredentialsForm />', () => {
     ).toContain('server check')
   })
 
+  it('surfaces NetworkError when fetch throws (round-3 audit symmetry with picker)', async () => {
+    fetchMock.mockRejectedValueOnce(new Error('ECONNRESET'))
+    render(<SlackCredentialsForm agentName={AGENT} onSaved={vi.fn()} />)
+    fillAll()
+    fireEvent.click(screen.getByTestId('slack-credentials-submit'))
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('slack-credentials-error'),
+      ).toBeInTheDocument(),
+    )
+    expect(
+      screen.getByTestId('slack-credentials-error').textContent,
+    ).toContain('NetworkError')
+  })
+
   it('renders generic error block on 502 AWSError', async () => {
     fetchMock.mockResolvedValueOnce(
       errResp(502, { error: 'AccessDeniedException' }),

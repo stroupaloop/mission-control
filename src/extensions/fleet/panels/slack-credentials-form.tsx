@@ -6,6 +6,15 @@ import type {
   SlackCredentialsResponse,
   SlackCredentialsErrorResponse,
 } from '../api/slack-credentials'
+// Import shared regex patterns rather than duplicate them.
+// Round-3 audit on PR #51: server-side has been revised twice
+// already (PR #48 rounds 1 + 6); duplicating here would silently
+// drift on the next server-side update. Single source of truth.
+import {
+  APP_TOKEN_RE,
+  BOT_TOKEN_RE,
+  SIGNING_SECRET_RE,
+} from '../lib/slack-token-patterns'
 
 // Phase 2.4 Beat 5c.2 — Slack credentials paste form.
 //
@@ -28,9 +37,6 @@ import type {
 // Form stays mounted with a "Saved" success state so the
 // operator can re-paste/rotate without re-opening the panel.
 
-const APP_TOKEN_RE = /^xapp-1-[A-Za-z0-9]+-[0-9]+-[a-zA-Z0-9]+$/
-const BOT_TOKEN_RE = /^xoxb-[0-9]+-[0-9]+-[A-Za-z0-9-]+$/
-const SIGNING_SECRET_RE = /^[a-f0-9]{32}$/
 const SUBMIT_TIMEOUT_MS = 30_000
 
 interface Props {
