@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import type {
   SlackManifestResponse,
@@ -32,7 +32,13 @@ type FetchState =
   | { kind: 'success'; response: SlackManifestResponse }
   | { kind: 'error'; status: number; body: SlackManifestErrorResponse }
 
-const FETCH_TIMEOUT_MS = 30_000
+// Round-2 audit on PR #50: tightened from 30s to 10s. The
+// underlying GET /slack/manifest is a pure read with no
+// downstream calls beyond a single ECS DescribeServices —
+// normally <500ms. 10s is generous for AWS brownouts but
+// keeps the picker UX responsive (operator sees retry UI
+// faster on a degraded path).
+const FETCH_TIMEOUT_MS = 10_000
 
 export function SlackManifestDisplay({ agentName }: Props) {
   const [state, setState] = useState<FetchState>({ kind: 'idle' })
@@ -210,10 +216,44 @@ export function SlackManifestDisplay({ agentName }: Props) {
             // index is stable across renders (no reordering). Using index
             // as key is intentional — the array is treated as a fixed-
             // shape ordered list, not a mutable collection.
-            <li key={i}>{step}</li>
+            <li key={i}>{linkifyUrls(step)}</li>
           ))}
         </ol>
       </div>
     </div>
+  )
+}
+
+// Wrap any http(s) URLs in the step text in <a> tags so operators
+// can click rather than copy-paste. Round-2 audit on PR #50: step 1
+// of SLACK_HANDSHAKE_INSTRUCTIONS contains https://api.slack.com/apps;
+// rendering it as plain text was a UX miss for the most-used step.
+//
+// Regex matches http(s) URLs up to whitespace, quote, or punctuation
+// boundary. `target="_blank"` opens in a new tab so the operator
+// keeps MC visible; `rel="noreferrer"` prevents the new tab from
+// reading window.opener (defense against opener-tab abuse).
+// Two regexes: SPLIT (with /g flag, captures the URL so split
+// preserves it) and TEST (no /g, stateless — calling .test()
+// repeatedly on a /g-flagged regex would advance `lastIndex`
+// and give wrong results inside a .map()).
+const URL_SPLIT_RE = /(https?:\/\/[^\s"'<>)]+)/g
+const URL_TEST_RE = /^https?:\/\/[^\s"'<>)]+$/
+function linkifyUrls(text: string): ReactNode {
+  const parts = text.split(URL_SPLIT_RE)
+  return parts.map((part, i) =>
+    URL_TEST_RE.test(part) ? (
+      <a
+        key={i}
+        href={part}
+        target="_blank"
+        rel="noreferrer"
+        className="underline hover:text-foreground"
+      >
+        {part}
+      </a>
+    ) : (
+      <span key={i}>{part}</span>
+    ),
   )
 }

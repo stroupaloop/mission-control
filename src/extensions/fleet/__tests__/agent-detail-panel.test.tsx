@@ -156,7 +156,31 @@ describe('<AgentDetailPanel />', () => {
     expect(onClose).not.toHaveBeenCalled()
   })
 
-  it('moves focus to the Close button on open (round-1 a11y fix)', async () => {
+  it('places role="dialog" + aria-modal on the focus-trap root, not the backdrop', () => {
+    // WAI-ARIA Dialog Pattern §2.25: ARIA dialog attributes must
+    // coincide with the element the focus trap operates on so
+    // screen readers and the trap reference the same boundary.
+    render(
+      <AgentDetailPanel
+        agent={sampleAgent}
+        agentName={AGENT_NAME}
+        onClose={vi.fn()}
+      />,
+    )
+    const backdrop = document.body.querySelector(
+      '[data-testid="agent-detail-panel"]',
+    )!
+    const dialog = document.body.querySelector(
+      '[data-testid="agent-detail-dialog"]',
+    )!
+    expect(backdrop.getAttribute('role')).toBeNull()
+    expect(backdrop.getAttribute('aria-modal')).toBeNull()
+    expect(dialog.getAttribute('role')).toBe('dialog')
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(dialog.getAttribute('aria-labelledby')).toBe('agent-detail-title')
+  })
+
+  it('moves focus to the Close button on open', async () => {
     render(
       <AgentDetailPanel
         agent={sampleAgent}
@@ -170,7 +194,7 @@ describe('<AgentDetailPanel />', () => {
     expect(document.activeElement).toBe(closeBtn)
   })
 
-  it('traps Tab inside the dialog (round-1 a11y fix)', async () => {
+  it('traps Tab inside the dialog', async () => {
     render(
       <AgentDetailPanel
         agent={sampleAgent}

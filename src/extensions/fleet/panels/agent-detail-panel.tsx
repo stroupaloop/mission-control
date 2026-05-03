@@ -106,21 +106,26 @@ export function AgentDetailPanel({ agent, agentName, onClose }: Props) {
   if (!open || agent === null || agentName === null) return null
 
   const panel = (
+    // Outer div is the backdrop only — handles dismiss-on-click.
+    // Round-2 audit on PR #50: ARIA dialog attributes
+    // (role="dialog", aria-modal, aria-labelledby) MUST coincide
+    // with the focus-trap root so screen readers announce the
+    // same element the focus trap operates on. Moved to the
+    // inner content div below.
     <div
       className="fixed inset-0 z-50 flex justify-end bg-black/40"
       onClick={(e) => {
-        // Backdrop click dismisses (panel itself stops propagation
-        // via its own onClick handler below).
         if (e.target === e.currentTarget) onClose()
       }}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="agent-detail-title"
       data-testid="agent-detail-panel"
     >
       <div
         ref={dialogRef}
         className="bg-background h-full w-full max-w-2xl shadow-xl overflow-y-auto"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="agent-detail-title"
+        data-testid="agent-detail-dialog"
         // Stop click propagation so clicks INSIDE the panel don't
         // hit the backdrop dismiss handler above.
         onClick={(e) => e.stopPropagation()}

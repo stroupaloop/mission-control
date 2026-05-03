@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import type {
   FleetServicesResponse as ServicesResponse,
   FleetServicesErrorResponse as ErrorResponse,
+  FleetServiceSummary,
 } from '../api/services'
 import { CreateAgentForm } from './create-agent-form'
 import { DeleteAgentForm } from './delete-agent-form'
@@ -58,7 +59,7 @@ export function FleetPanel() {
   // identity fields without re-fetching) plus the parsed agent
   // name (for the Slack manifest endpoint). `null` = panel closed.
   const [detailTarget, setDetailTarget] = useState<{
-    agent: NonNullable<typeof data>['services'][number]
+    agent: FleetServiceSummary
     agentName: string
   } | null>(null)
   // Tracks when `data` was last successfully fetched (Date.now()).

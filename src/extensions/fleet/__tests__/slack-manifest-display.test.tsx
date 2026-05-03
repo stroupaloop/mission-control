@@ -38,6 +38,8 @@ const sampleSuccess = {
   agentName: AGENT,
   manifest: sampleManifest,
   instructions: [
+    // Step 1 contains a URL — used by the linkify test below to
+    // verify the panel hyperlinks rather than rendering plain text.
     'Go to https://api.slack.com/apps and click "Create New App".',
     'Choose "From an app manifest", select your workspace, click Next.',
   ],
@@ -164,7 +166,24 @@ describe('<SlackManifestDisplay />', () => {
     expect(screen.getByTestId('slack-manifest-copy').textContent).toBe('Copy')
   })
 
-  it('Retry button re-fetches the manifest after an error (round-1 audit on PR #50)', async () => {
+  it('hyperlinks URLs in instruction text with target=_blank rel=noreferrer', async () => {
+    fetchMock.mockResolvedValueOnce(okResp(sampleSuccess))
+    render(<SlackManifestDisplay agentName={AGENT} />)
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('slack-manifest-instructions'),
+      ).toBeInTheDocument(),
+    )
+    const instructions = screen.getByTestId('slack-manifest-instructions')
+    const link = instructions.querySelector('a[href="https://api.slack.com/apps"]')
+    expect(link).not.toBeNull()
+    expect(link!.getAttribute('target')).toBe('_blank')
+    expect(link!.getAttribute('rel')).toBe('noreferrer')
+    // Plain text without URLs renders as plain text (no <a>).
+    expect(instructions.textContent).toContain('Choose "From an app manifest"')
+  })
+
+  it('Retry button re-fetches the manifest after an error', async () => {
     fetchMock
       .mockResolvedValueOnce(
         errResp(502, { error: 'AWSError', detail: 'transient' }),
