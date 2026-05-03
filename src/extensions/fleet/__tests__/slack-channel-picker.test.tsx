@@ -166,6 +166,37 @@ describe('<SlackChannelPicker />', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('surfaces Timeout error (not stuck loading) when fetch is aborted by the 10s timeout', async () => {
+    // Mirrors the credentials-form / manifest-display timeout
+    // tests. The dual-flag (timedOut vs cleanupAborted) logic is
+    // subtle enough that a direct test pins the behavior.
+    fetchMock.mockImplementationOnce((_url, init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = (init as RequestInit).signal as AbortSignal
+        signal.addEventListener('abort', () => {
+          const err = new Error('aborted')
+          err.name = 'AbortError'
+          reject(err)
+        })
+      })
+    })
+    vi.useFakeTimers()
+    render(<SlackChannelPicker agentName={AGENT} reloadKey={0} />)
+    await vi.advanceTimersByTimeAsync(11_000)
+    vi.useRealTimers()
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('slack-channel-picker-error'),
+      ).toBeInTheDocument(),
+    )
+    expect(
+      screen.getByTestId('slack-channel-picker-error').textContent,
+    ).toContain('Timeout')
+    expect(
+      screen.getByTestId('slack-channel-picker-retry'),
+    ).toBeInTheDocument()
+  })
+
   it('uses encodeURIComponent on agentName in fetch URL', async () => {
     fetchMock.mockResolvedValueOnce(okResp(sampleChannels))
     render(<SlackChannelPicker agentName="agent-1" reloadKey={0} />)
@@ -233,6 +264,10 @@ describe('<SlackChannelPicker />', () => {
     )
   })
 
+  // TODO(ender-stack#283): when the real PUT handler ships,
+  // delete this test. The 501 branch in slack-channel-picker.tsx
+  // and the PUT stub in slack-channels.ts need to move in the
+  // same PR.
   it('Save button surfaces 501 with ender-stack#283 hint (channels-update endpoint not implemented)', async () => {
     fetchMock
       .mockResolvedValueOnce(okResp(sampleChannels))

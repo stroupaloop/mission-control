@@ -371,7 +371,16 @@ export async function GET(
  *
  * Remove this stub when ender-stack#283 lands the real handler.
  */
-export async function PUT(request: NextRequest) {
+export async function PUT(
+  request: NextRequest,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _ctx: { params: Promise<{ name: string }> },
+) {
+  // Round-4 audit on PR #51: signature mirrors GET so the
+  // ender-stack#283 implementer reaches for `params` rather
+  // than re-discovering the convention. The current stub
+  // doesn't read params (returns 501 unconditionally) so the
+  // arg is `_`-prefixed and lint-suppressed.
   const auth = requireRole(request, 'admin')
   if ('error' in auth) {
     return NextResponse.json(

@@ -875,7 +875,7 @@ describe('PUT /api/fleet/agents/:name/slack/channels — stub for ender-stack#28
       status: 401,
     } as never)
     const PUT = await importPut()
-    const resp = await PUT(mkRequest())
+    const resp = await PUT(mkRequest(), mkParams())
     expect(resp.status).toBe(401)
   })
 
@@ -885,13 +885,13 @@ describe('PUT /api/fleet/agents/:name/slack/channels — stub for ender-stack#28
       status: 403,
     } as never)
     const PUT = await importPut()
-    const resp = await PUT(mkRequest())
+    const resp = await PUT(mkRequest(), mkParams())
     expect(resp.status).toBe(403)
   })
 
   it('returns 501 NotImplemented with ender-stack#283 hint for authenticated admin', async () => {
     const PUT = await importPut()
-    const resp = await PUT(mkRequest())
+    const resp = await PUT(mkRequest(), mkParams())
     expect(resp.status).toBe(501)
     const json = (await resp.json()) as { error: string; detail?: string }
     expect(json.error).toBe('NotImplemented')

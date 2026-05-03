@@ -9,33 +9,28 @@ import type {
 
 // Phase 2.4 Beat 5c.2 — Slack channel picker.
 //
-// Two-step UI:
-//   1. Fetch GET /api/fleet/agents/{name}/slack/channels.
+// Three-stage UI:
+//   1. Mount → GET /api/fleet/agents/{name}/slack/channels.
 //      The endpoint reads the bot token from Secrets Manager
 //      (Beat 5b.3) and calls Slack `conversations.list`.
-//   2. Operator selects channels via checkbox grid.
-//   3. Save POSTs the selection back to /slack/credentials —
-//      same handler that wrote the tokens, just with the
-//      `channels` array populated and tokens omitted (the
-//      handler tolerates re-pastes; it diffs the body and
-//      writes only what's present).
+//   2. Operator toggles channel checkboxes; selection state
+//      is local and only sent to the server on Save.
+//   3. Save → PUT /api/fleet/agents/{name}/slack/channels.
+//      Today this is a 501 stub (auth-gated); the real
+//      channels-only update path is tracked as
+//      ender-stack#283. The picker surfaces the 501 with the
+//      operator-actionable hint pointing at that issue.
 //
-// Wait — the credentials POST handler requires all three
-// tokens. So channels-update needs the operator to re-paste
-// tokens, OR a separate channels-only update endpoint. For
-// Beat 5c.2 v1: re-fetch credentials state via the panel's
-// credentials-form is the operator's path. The picker's Save
-// button writes channels to a not-yet-existent endpoint; we'll
-// stub that for now and surface a TODO. The plan calls for a
-// channels-update flow — keeping picker UI in this PR and
-// deferring the channels-update endpoint to its own PR
-// (track via task #18 → file follow-up if needed).
-//
-// Actually — the simpler approach: the credentials POST handler
-// already accepts a `channels` array. The picker's Save calls
-// the SAME endpoint with all four fields (tokens + channels).
-// Operator must re-paste credentials each time they change
-// channels. That's clunky; track an improvement issue.
+// Recovery flows:
+//   - SlackBotTokenNotFound (operator hasn't pasted credentials
+//     yet) → no Retry button, just a hint pointing to the
+//     credentials form above. The form's onSaved bumps
+//     reloadKey, which auto-refreshes the picker.
+//   - Transient errors (rate-limit, network, timeout) → Retry
+//     button preserves the operator's checkbox state.
+//   - Real PUT 501 (channels-update endpoint not yet wired) →
+//     ender-stack#283 hint inline; operator path is to wait
+//     for the real handler to ship.
 
 const FETCH_TIMEOUT_MS = 10_000
 const SAVE_TIMEOUT_MS = 30_000
@@ -410,6 +405,14 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
               <code>{saveState.body.detail}</code>
             </div>
           ) : null}
+          {/*
+            TODO(ender-stack#283): when the real PUT handler
+            ships, remove this entire 501 branch. The
+            corresponding test in slack-channel-picker.test.tsx
+            (`Save button surfaces 501 with ender-stack#283
+            hint`) and the slack-channels.ts PUT stub need to
+            move in the same PR.
+          */}
           {saveState.status === 501 ? (
             <div className="mt-1">
               Channels-update endpoint isn&apos;t implemented yet —
