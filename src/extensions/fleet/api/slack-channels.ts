@@ -223,9 +223,29 @@ export async function GET(
       '[fleet] slack-channels: bot-token or Slack-API error',
     )
 
+    // Round-8 audit on PR #49: branch severity by error class.
+    // Pre-fix, every step-2 error fired `severity: 'warning'`,
+    // including operational classes (SlackBotTokenNotFound,
+    // SlackRateLimited, SlackNetworkError) — those debited the
+    // workspace posture score for non-security reasons. Now:
+    // genuine security signals stay as `warning`; everything
+    // else (operator-setup state + transient infrastructure
+    // noise) drops to `info`. Audit trail still captures all
+    // failed calls.
+    const SECURITY_RELEVANT_ERRORS = new Set([
+      'SlackAuthError',
+      'SlackMissingScope',
+      'AccessDeniedException',
+    ])
+    const severity: 'warning' | 'info' = SECURITY_RELEVANT_ERRORS.has(
+      error.name ?? '',
+    )
+      ? 'warning'
+      : 'info'
+
     logSecurityEvent({
       event_type: 'fleet.slack-channels.failed',
-      severity: 'warning',
+      severity,
       source: 'fleet',
       agent_name: agentName,
       detail: `actor=${auth.user.id} error=${error.name ?? 'AWSError'}`,

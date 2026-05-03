@@ -677,6 +677,93 @@ describe('GET /api/fleet/agents/:name/slack/channels — Cache-Control (round-3 
   })
 })
 
+describe('GET /api/fleet/agents/:name/slack/channels — security event severity (round-8 audit on PR #49)', () => {
+  // Pre-fix, every step-2 error fired `severity: 'warning'` —
+  // including operational classes that debited the workspace
+  // posture score for non-security reasons. Now: genuine
+  // security signals stay as 'warning'; everything else drops
+  // to 'info'. Audit trail still captures all failed calls.
+  const expectSeverity = async (
+    setup: () => void,
+    expected: 'warning' | 'info',
+  ) => {
+    setup()
+    const GET = await importHandler()
+    await GET(mkRequest(), mkParams())
+    const failedEvent = logSecurityEventMock.mock.calls
+      .map((c) => c[0] as { event_type: string; severity: string })
+      .find((e) => e.event_type === 'fleet.slack-channels.failed')
+    expect(failedEvent?.severity).toBe(expected)
+  }
+
+  it('SlackAuthError → severity: warning (genuine security signal)', async () => {
+    await expectSeverity(() => {
+      mockHarnessService()
+      smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+      fetchMock.mockResolvedValueOnce(slackErr('invalid_auth'))
+    }, 'warning')
+  })
+
+  it('SlackMissingScope → severity: warning', async () => {
+    await expectSeverity(() => {
+      mockHarnessService()
+      smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+      fetchMock.mockResolvedValueOnce(slackErr('missing_scope'))
+    }, 'warning')
+  })
+
+  it('AccessDeniedException → severity: warning (IAM)', async () => {
+    await expectSeverity(() => {
+      mockHarnessService()
+      smSendMock.mockRejectedValueOnce(
+        Object.assign(new Error('access denied'), {
+          name: 'AccessDeniedException',
+        }),
+      )
+    }, 'warning')
+  })
+
+  it('SlackBotTokenNotFound → severity: info (operator hasnt run paste yet)', async () => {
+    await expectSeverity(() => {
+      mockHarnessService()
+      smSendMock.mockRejectedValueOnce(
+        Object.assign(new Error('not found'), {
+          name: 'ResourceNotFoundException',
+        }),
+      )
+    }, 'info')
+  })
+
+  it('SlackRateLimited → severity: info (Slack throttling)', async () => {
+    await expectSeverity(() => {
+      mockHarnessService()
+      smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        headers: new Headers({ 'retry-after': '15' }),
+        json: async () => ({}),
+      })
+    }, 'info')
+  })
+
+  it('SlackNetworkError → severity: info (transient infrastructure)', async () => {
+    await expectSeverity(() => {
+      mockHarnessService()
+      smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+      fetchMock.mockRejectedValueOnce(new Error('ECONNRESET'))
+    }, 'info')
+  })
+
+  it('SlackAccountInactive → severity: info (workspace-level Slack state)', async () => {
+    await expectSeverity(() => {
+      mockHarnessService()
+      smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+      fetchMock.mockResolvedValueOnce(slackErr('account_inactive'))
+    }, 'info')
+  })
+})
+
 describe('GET /api/fleet/agents/:name/slack/channels — token-non-leak', () => {
   it('does not include the bot token in any 200-path response field', async () => {
     mockHarnessService()
