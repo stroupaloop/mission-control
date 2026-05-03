@@ -234,9 +234,16 @@ function injectSlackIntoGateway(
   // PR #48.
   const hasGateway = containers.some((c) => c.name === GATEWAY_CONTAINER_NAME)
   if (!hasGateway) {
+    // Round-5 audit on PR #48: this is non-retriable — re-running
+    // will re-write the SM secrets and re-throw. Operator action
+    // required: verify the gateway container name in
+    // `templates/openclaw.ts` matches the registered task-def
+    // container name (or update GATEWAY_CONTAINER_NAME in the
+    // handler if upstream renamed it).
     const err = new Error(
       `Task-def has no '${GATEWAY_CONTAINER_NAME}' container — cannot inject Slack secrets. ` +
-        `Found containers: [${containers.map((c) => c.name).join(', ')}].`,
+        `Found containers: [${containers.map((c) => c.name).join(', ')}]. ` +
+        `Non-retriable: check container names in templates/openclaw.ts vs. the registered task-def.`,
     )
     err.name = 'TaskDefinitionGatewayMissing'
     throw err

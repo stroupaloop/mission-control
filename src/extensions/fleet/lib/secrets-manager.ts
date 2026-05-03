@@ -206,7 +206,7 @@ export interface WriteSlackSecretsInput {
   appToken: string
   /** xoxb-… bot user OAuth token. */
   botToken: string
-  /** 64-char hex signing secret. */
+  /** 32-char lowercase hex signing secret (per current Slack spec; narrowed in PR #48 round-1 from prior {32,64}). */
   signingSecret: string
 }
 
