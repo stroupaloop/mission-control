@@ -102,6 +102,15 @@ export function SlackManifestDisplay({ agentName }: Props) {
     // would otherwise carry the flag over.
     if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current)
     setCopied(false)
+    // NOT resetting retryKey here intentionally. Round-5 audit on
+    // PR #50 noted the inconsistency vs setCopied, but a
+    // setRetryKey() inside this effect would trigger a re-render
+    // with retryKey=0, which re-runs THIS effect (retryKey is in
+    // its deps), wastes an abort + RTT. The cache-buster works
+    // identically whether retryKey starts from 0 or N — only
+    // observable difference would be if retryKey were displayed
+    // somewhere (it isn't). Reset only happens on panel close
+    // (agentName === null branch above).
 
     setState({ kind: 'loading' })
     void (async () => {

@@ -43,8 +43,22 @@ export interface SlackManifestResponse {
   ok: true
   agentName: string
   manifest: SlackAppManifest
-  /** Stable code-named instructions the UI renders next to the JSON. */
-  instructions: string[]
+  /**
+   * Stable code-named instructions the UI renders next to the
+   * JSON.
+   *
+   * Round-5 audit on PR #50: typed `readonly string[]` so the
+   * UI's `linkifyUrls` consumer (which renders raw strings as
+   * `href` attributes) signals the wire-shape contract — these
+   * strings are server-controlled and not derived from operator
+   * input or task-def env. If a future beat ever wires
+   * per-agent dynamic instructions through this field, the
+   * `readonly` constraint forces a deliberate type widening
+   * that should re-trigger linkification review (the
+   * `https?://` regex prefix blocks `javascript:` but not
+   * attacker-supplied https redirects).
+   */
+  instructions: readonly string[]
 }
 
 export interface SlackManifestErrorResponse {
