@@ -171,30 +171,62 @@ export async function putOrCreateSecret(
   } catch (err) {
     const name = (err as { name?: string })?.name
     if (name !== 'ResourceNotFoundException') throw err
-    // Fall through to create — the secret didn't exist, so this
-    // can't race with a successful put.
-    const resp = await secretsClient.send(
-      new CreateSecretCommand({
-        Name: input.name,
-        SecretString: input.value,
-        Description: input.description,
-        Tags: input.tags,
-      }),
-    )
-    // Round-4 audit on PR #48: symmetric guard with the
-    // PutSecretValue branch above. A first-time paste hits
-    // CreateSecret; an SDK anomaly returning no ARN here would
-    // propagate `valueFrom: ''` into the task-def — same opaque
-    // ECS crash-loop the round-3 P1 fix addressed. Throw loudly
-    // instead.
-    if (!resp.ARN) {
-      const err = new Error(
-        `CreateSecret for "${input.name}" returned no ARN — refusing to register a task-def with an empty valueFrom. AWS SDK anomaly; safe to retry.`,
+    // Fall through to create — Put said the secret doesn't
+    // exist. Note: Put-then-create FLIPS the race (so the safe
+    // call is default) but doesn't eliminate it on first-time
+    // paste. Two concurrent first-time pastes can both see
+    // ResourceNotFoundException on Put and both fall through;
+    // one wins the create, the other gets ResourceExistsException
+    // here. Round-6 audit on PR #48 caught the gap. We catch RES
+    // and retry as Put, which always succeeds since the create
+    // race winner just established the secret.
+    try {
+      const resp = await secretsClient.send(
+        new CreateSecretCommand({
+          Name: input.name,
+          SecretString: input.value,
+          Description: input.description,
+          Tags: input.tags,
+        }),
       )
-      err.name = 'CreateSecretMissingArn'
-      throw err
+      // Round-4 audit on PR #48: symmetric guard with the
+      // PutSecretValue branch above. A first-time paste hits
+      // CreateSecret; an SDK anomaly returning no ARN here would
+      // propagate `valueFrom: ''` into the task-def — same opaque
+      // ECS crash-loop the round-3 P1 fix addressed. Throw loudly
+      // instead.
+      if (!resp.ARN) {
+        const err = new Error(
+          `CreateSecret for "${input.name}" returned no ARN — refusing to register a task-def with an empty valueFrom. AWS SDK anomaly; safe to retry.`,
+        )
+        err.name = 'CreateSecretMissingArn'
+        throw err
+      }
+      return { arn: resp.ARN, operation: 'created' }
+    } catch (createErr) {
+      const createName = (createErr as { name?: string })?.name
+      if (createName !== 'ResourceExistsException') throw createErr
+      // Lost the create race. The secret now exists (the other
+      // admin's create just established it); fall back to Put,
+      // which writes our value over the race winner's. Last-
+      // writer-wins is acceptable here because both pastes
+      // carry the operator's intent — the alternative (failing
+      // the second paste) is more confusing for the operator.
+      const retryResp = await secretsClient.send(
+        new PutSecretValueCommand({
+          SecretId: input.name,
+          SecretString: input.value,
+        }),
+      )
+      if (!retryResp.ARN) {
+        const err = new Error(
+          `PutSecretValue retry after CreateSecret race for "${input.name}" returned no ARN — refusing to register a task-def with an empty valueFrom. AWS SDK anomaly; safe to retry.`,
+        )
+        err.name = 'PutSecretValueMissingArn'
+        throw err
+      }
+      return { arn: retryResp.ARN, operation: 'updated' }
     }
-    return { arn: resp.ARN, operation: 'created' }
   }
 }
 

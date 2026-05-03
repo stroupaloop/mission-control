@@ -715,6 +715,54 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     expect(json.detail).toContain('Secrets-write was attempted')
   })
 
+  it('recovers from CreateSecret race via Put retry when ResourceExistsException is thrown (round-6 — TOCTOU on first-time paste)', async () => {
+    // Two concurrent first-time pastes both see Put → RNFE,
+    // both fall through to Create. The race winner establishes
+    // the secret; the loser hits ResourceExistsException. Pre-
+    // round-6: RES propagated up, 502 to the operator. Post-
+    // round-6: catch RES, retry as Put (which now succeeds
+    // since the secret exists), 200 with last-writer-wins
+    // semantics.
+    ecsSendMock.mockReset()
+    smSendMock.mockReset()
+    mockHarnessService()
+    const notFound = Object.assign(new Error('not found'), {
+      name: 'ResourceNotFoundException',
+    })
+    const exists = Object.assign(new Error('exists'), {
+      name: 'ResourceExistsException',
+    })
+    // Ordering: 3× Put rejected with RNFE (call ordering is
+    // mock-call-order, not per-secret-sequential, since
+    // writeSlackSecrets uses Promise.all). Then for the create
+    // round: 1 succeeds, 1 hits RES (race-loser), 1 succeeds.
+    // Then for the RES retry: 1 Put with the race-loser's value
+    // succeeds.
+    smSendMock
+      .mockRejectedValueOnce(notFound) // Put 1
+      .mockRejectedValueOnce(notFound) // Put 2
+      .mockRejectedValueOnce(notFound) // Put 3
+      .mockResolvedValueOnce({ ARN: 'arn:secret:created-1' }) // Create 1
+      .mockRejectedValueOnce(exists) // Create 2 — race loser
+      .mockResolvedValueOnce({ ARN: 'arn:secret:created-3' }) // Create 3
+      .mockResolvedValueOnce({ ARN: 'arn:secret:created-2-retry' }) // Put retry for race loser
+    mockTaskDef()
+    ecsSendMock.mockResolvedValueOnce({
+      taskDefinition: { taskDefinitionArn: NEW_TD_ARN, revision: 6 },
+    })
+    ecsSendMock.mockResolvedValueOnce({
+      service: {
+        serviceArn: SERVICE_ARN,
+        deployments: [{ id: 'ecs-svc/12345', status: 'PRIMARY' }],
+      },
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    // 3 Put + 3 Create + 1 retry-Put = 7 SM calls
+    expect(smSendMock).toHaveBeenCalledTimes(7)
+  })
+
   it('returns 400 when serialized channels JSON exceeds 512-char ECS env limit (round-3 P2)', async () => {
     // Worst case: 50 channels × ~15 chars + framing = ~814 chars,
     // which exceeds the ECS env-value cap. The count + format

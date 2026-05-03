@@ -78,6 +78,14 @@ const SLACK_SIGNING_SECRET_ENV = 'SLACK_SIGNING_SECRET'
 // case in some Slack workspace configurations — relaxed to
 // [A-Za-z0-9]+ to match the "not publicly stable" framing.
 const APP_TOKEN_RE = /^xapp-1-[A-Za-z0-9]+-[0-9]+-[a-zA-Z0-9]+$/
+// Round-6 audit on PR #48: `[A-Za-z0-9-]+` admits trailing
+// hyphens in the final segment (e.g., `xoxb-123-456-trailing-`
+// passes). This is intentional — the framing is "prefix check
+// only / Slack token format is not publicly stable" and over-
+// tightening would lock us out of valid future formats. The
+// IAM + Slack-side rejection handle malformed values that slip
+// through. Documenting the tolerance explicitly so a future
+// reader doesn't assume the regex is canonical.
 const BOT_TOKEN_RE = /^xoxb-[0-9]+-[0-9]+-[A-Za-z0-9-]+$/
 // Signing secret: exactly 32 lowercase hex chars per Slack's
 // current spec. Round-1 audit on PR #48 narrowed this from {32,64}
