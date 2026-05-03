@@ -111,18 +111,19 @@ describe('<SlackCredentialsForm />', () => {
   })
 
   it('POSTs valid tokens to the encoded URL and shows success on 200', async () => {
+    // Mock matches the actual SlackCredentialsResponse shape from
+    // slack-credentials.ts (taskDefinitionArn, not newTaskDefArn).
     fetchMock.mockResolvedValueOnce(
       okResp({
         ok: true,
         agentName: AGENT,
+        taskDefinitionArn: 'arn:td:6',
+        deploymentId: 'ecs-svc/12345',
         secretArns: {
           appToken: 'arn:1',
           botToken: 'arn:2',
           signingSecret: 'arn:3',
         },
-        operations: { appToken: 'created', botToken: 'created', signingSecret: 'created' },
-        newTaskDefArn: 'arn:td:6',
-        deploymentId: 'ecs-svc/12345',
       }),
     )
     const onSaved = vi.fn()
@@ -142,7 +143,8 @@ describe('<SlackCredentialsForm />', () => {
     expect((init as RequestInit).method).toBe('POST')
     const body = JSON.parse((init as RequestInit).body as string)
     expect(body).toEqual(validTokens)
-    expect(onSaved).toHaveBeenCalled()
+    // onSaved is now `() => void` — no response argument.
+    expect(onSaved).toHaveBeenCalledWith()
   })
 
   it('passes encoded agentName in the URL (defense-in-depth)', async () => {

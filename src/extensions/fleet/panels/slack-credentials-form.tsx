@@ -35,8 +35,14 @@ const SUBMIT_TIMEOUT_MS = 30_000
 
 interface Props {
   agentName: string
-  /** Called after a successful 200 — parent should refresh the channel picker. */
-  onSaved: (response: SlackCredentialsResponse) => void
+  /**
+   * Called after a successful 200 — parent should refresh the
+   * channel picker. Round-1 audit on PR #51: simplified from
+   * `(response: SlackCredentialsResponse) => void` since no
+   * caller reads the response body. Server-confirmed success
+   * is the only signal needed.
+   */
+  onSaved: () => void
 }
 
 type FormState =
@@ -62,6 +68,12 @@ export function SlackCredentialsForm({ agentName, onSaved }: Props) {
   const [state, setState] = useState<FormState>({ kind: 'idle' })
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
   const abortRef = useRef<AbortController | null>(null)
+  // Round-1 audit on PR #51: unmount guard so the in-flight POST's
+  // catch block doesn't setState after the panel closes. React 18+
+  // silently swallows stale-state-on-unmount, but matching the
+  // SlackChannelPicker pattern (cleanupAborted flag) closes the
+  // inconsistency.
+  const mountedRef = useRef(true)
 
   // Reset transient state when the agent changes (panel switched
   // to a different row). Token fields stay private to this
@@ -74,9 +86,11 @@ export function SlackCredentialsForm({ agentName, onSaved }: Props) {
     setFieldErrors({})
   }, [agentName])
 
-  // Abort the in-flight POST on unmount.
+  // Abort the in-flight POST on unmount + flip the mounted
+  // guard so the catch block bails before setState.
   useEffect(() => {
     return () => {
+      mountedRef.current = false
       abortRef.current?.abort()
     }
   }, [])
@@ -130,6 +144,7 @@ export function SlackCredentialsForm({ agentName, onSaved }: Props) {
 
       if (resp.ok) {
         const body = (await resp.json()) as SlackCredentialsResponse
+        if (!mountedRef.current) return
         // Clear the in-memory token values now that they're
         // safely in Secrets Manager. No reason to keep them
         // in React state past success.
@@ -137,7 +152,7 @@ export function SlackCredentialsForm({ agentName, onSaved }: Props) {
         setBotToken('')
         setSigningSecret('')
         setState({ kind: 'success', response: body })
-        onSaved(body)
+        onSaved()
         return
       }
 
@@ -147,6 +162,7 @@ export function SlackCredentialsForm({ agentName, onSaved }: Props) {
       } catch {
         body = { error: `HTTP ${resp.status}` }
       }
+      if (!mountedRef.current) return
       // Map the server's `fieldErrors` (if present) to inline
       // field state so the operator sees which token failed.
       if (body.fieldErrors) {
@@ -155,6 +171,7 @@ export function SlackCredentialsForm({ agentName, onSaved }: Props) {
       setState({ kind: 'error', status: resp.status, body })
     } catch (err) {
       clearTimeout(timeout)
+      if (!mountedRef.current) return
       if (controller.signal.aborted) {
         setState({
           kind: 'error',

@@ -103,6 +103,16 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
     }
   }, [])
 
+  // Reset operator's selections only on a true context-switch:
+  // agent change, or credentials-form bumped reloadKey (token
+  // material changed → channel list shape may differ). NOT on
+  // retryKey bumps, which fire after transient errors where
+  // preserving the prior picks is the obvious operator
+  // expectation.
+  useEffect(() => {
+    setSelected(new Set())
+  }, [agentName, reloadKey])
+
   // Fetch channels when agentName / reloadKey / retryKey changes.
   useEffect(() => {
     fetchAbortRef.current?.abort()
@@ -116,8 +126,12 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
     }, FETCH_TIMEOUT_MS)
 
     setState({ kind: 'loading' })
-    setSelected(new Set())
     setSaveState({ kind: 'idle' })
+    // Round-1 audit on PR #51: only reset `selected` when the
+    // operator switches agents OR the credentials form fires
+    // reloadKey (fresh credential paste — channel list shape may
+    // change). On a retryKey bump (transient error retry) keep
+    // the operator's prior selections so they don't lose work.
 
     void (async () => {
       try {
