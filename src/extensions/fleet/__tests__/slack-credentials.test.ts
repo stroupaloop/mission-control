@@ -686,6 +686,35 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     expect(json.detail).toContain('Secrets-write was attempted')
   })
 
+  it('throws CreateSecretMissingArn when first-time-paste SDK returns no ARN (round-4 — symmetric to PutSecretValueMissingArn)', async () => {
+    // Round-3 fixed the PutSecretValue branch; round-4 audit caught
+    // that CreateSecret has the same risk on first-time paste:
+    // the secret doesn't exist yet → Put rejects with
+    // ResourceNotFoundException → we fall through to CreateSecret →
+    // SDK anomaly returns no ARN. Pre-fix: empty `valueFrom`
+    // propagated into the task-def, ECS crash-loop. Post-fix:
+    // throws CreateSecretMissingArn → 502 + safe-retry hint.
+    ecsSendMock.mockReset()
+    smSendMock.mockReset()
+    mockHarnessService()
+    const notFound = Object.assign(new Error('not found'), {
+      name: 'ResourceNotFoundException',
+    })
+    smSendMock
+      .mockRejectedValueOnce(notFound)
+      .mockRejectedValueOnce(notFound)
+      .mockRejectedValueOnce(notFound)
+      .mockResolvedValueOnce({ ARN: undefined }) // SDK anomaly
+      .mockResolvedValueOnce({ ARN: 'arn:secret:created-2' })
+      .mockResolvedValueOnce({ ARN: 'arn:secret:created-3' })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('CreateSecretMissingArn')
+    expect(json.detail).toContain('Secrets-write was attempted')
+  })
+
   it('returns 400 when serialized channels JSON exceeds 512-char ECS env limit (round-3 P2)', async () => {
     // Worst case: 50 channels × ~15 chars + framing = ~814 chars,
     // which exceeds the ECS env-value cap. The count + format

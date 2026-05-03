@@ -181,7 +181,20 @@ export async function putOrCreateSecret(
         Tags: input.tags,
       }),
     )
-    return { arn: resp.ARN ?? '', operation: 'created' }
+    // Round-4 audit on PR #48: symmetric guard with the
+    // PutSecretValue branch above. A first-time paste hits
+    // CreateSecret; an SDK anomaly returning no ARN here would
+    // propagate `valueFrom: ''` into the task-def — same opaque
+    // ECS crash-loop the round-3 P1 fix addressed. Throw loudly
+    // instead.
+    if (!resp.ARN) {
+      const err = new Error(
+        `CreateSecret for "${input.name}" returned no ARN — refusing to register a task-def with an empty valueFrom. AWS SDK anomaly; safe to retry.`,
+      )
+      err.name = 'CreateSecretMissingArn'
+      throw err
+    }
+    return { arn: resp.ARN, operation: 'created' }
   }
 }
 
@@ -239,9 +252,24 @@ export async function writeSlackSecrets(
   )
 
   const byType = new Map(writes.map((w) => [w.type, w.arn]))
+  // Round-4 audit on PR #48: with putOrCreateSecret now throwing
+  // on missing ARN in both branches, the Map should always be
+  // fully populated. The earlier `?? ''` fallbacks would have
+  // silently propagated empty `valueFrom` if SLACK_SECRET_TYPES
+  // and the per-write tagging ever drifted. Assert instead.
+  const appTokenArn = byType.get('slack-app-token')
+  const botTokenArn = byType.get('slack-bot-token')
+  const signingSecretArn = byType.get('slack-signing-secret')
+  if (!appTokenArn || !botTokenArn || !signingSecretArn) {
+    const err = new Error(
+      `writeSlackSecrets: missing ARN(s) in result map (appToken=${!!appTokenArn} botToken=${!!botTokenArn} signingSecret=${!!signingSecretArn}). This indicates a drift between SLACK_SECRET_TYPES and the per-type write loop.`,
+    )
+    err.name = 'WriteSlackSecretsMissingArn'
+    throw err
+  }
   return {
-    appToken: byType.get('slack-app-token') ?? '',
-    botToken: byType.get('slack-bot-token') ?? '',
-    signingSecret: byType.get('slack-signing-secret') ?? '',
+    appToken: appTokenArn,
+    botToken: botTokenArn,
+    signingSecret: signingSecretArn,
   }
 }
