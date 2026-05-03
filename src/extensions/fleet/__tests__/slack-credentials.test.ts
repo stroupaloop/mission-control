@@ -1,0 +1,498 @@
+import { describe, expect, it, vi, beforeEach } from 'vitest'
+import * as auth from '@/lib/auth'
+
+const ecsSendMock = vi.fn()
+const smSendMock = vi.fn()
+
+vi.mock('@aws-sdk/client-ecs', () => ({
+  ECSClient: vi.fn().mockImplementation(() => ({ send: ecsSendMock })),
+  DescribeServicesCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DescribeServicesCommand',
+    input,
+  })),
+  DescribeTaskDefinitionCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DescribeTaskDefinitionCommand',
+    input,
+  })),
+  RegisterTaskDefinitionCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'RegisterTaskDefinitionCommand',
+    input,
+  })),
+  UpdateServiceCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'UpdateServiceCommand',
+    input,
+  })),
+}))
+
+vi.mock('@aws-sdk/client-secrets-manager', () => ({
+  SecretsManagerClient: vi.fn().mockImplementation(() => ({ send: smSendMock })),
+  CreateSecretCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'CreateSecretCommand',
+    input,
+  })),
+  PutSecretValueCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'PutSecretValueCommand',
+    input,
+  })),
+}))
+
+vi.mock('@/lib/logger', () => ({
+  logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+}))
+
+vi.mock('@/lib/auth', () => ({
+  requireRole: vi.fn(() => ({ user: { id: 'test', role: 'admin' } })),
+}))
+
+vi.mock('@/lib/security-events', () => ({
+  logSecurityEvent: vi.fn(),
+}))
+
+const importHandler = async () => {
+  const mod = await import('../api/slack-credentials')
+  return mod.POST
+}
+
+const setRequiredEnv = () => {
+  process.env.AWS_REGION = 'us-east-1'
+  process.env.MC_FLEET_CLUSTER_NAME = 'ender-stack-dev'
+  process.env.MC_FLEET_PROJECT_NAME = 'ender-stack'
+  process.env.MC_FLEET_ENVIRONMENT = 'dev'
+  process.env.MC_AGENT_SECRETS_NAME_PREFIX = 'ender-stack/dev/companion-openclaw'
+}
+
+const AGENT = 'hello-bot'
+const SERVICE_ARN = `arn:aws:ecs:us-east-1:398152419239:service/ender-stack-dev/ender-stack-dev-companion-openclaw-${AGENT}`
+const CURRENT_TD_ARN = `arn:aws:ecs:us-east-1:398152419239:task-definition/ender-stack-dev-companion-openclaw-${AGENT}:5`
+const NEW_TD_ARN = `arn:aws:ecs:us-east-1:398152419239:task-definition/ender-stack-dev-companion-openclaw-${AGENT}:6`
+
+const validBody = () => ({
+  appToken: 'xapp-1-A12345678-1234567890-abcdef0123456789',
+  botToken: 'xoxb-12345-67890-abcdefABCDEFabcdef-extra',
+  signingSecret: 'a'.repeat(64),
+  channels: ['C0123456789'],
+})
+
+const mkRequest = (body?: unknown) =>
+  ({
+    json: async () => (body === undefined ? validBody() : body),
+    url: `http://localhost/api/fleet/agents/${AGENT}/slack/credentials`,
+  }) as unknown as Parameters<Awaited<ReturnType<typeof importHandler>>>[0]
+
+const mkParams = (name: string = AGENT) => ({
+  params: Promise.resolve({ name }),
+})
+
+const mockHarnessService = () =>
+  ecsSendMock.mockResolvedValueOnce({
+    services: [
+      {
+        serviceArn: SERVICE_ARN,
+        status: 'ACTIVE',
+        taskDefinition: CURRENT_TD_ARN,
+        tags: [
+          { key: 'Component', value: 'agent-harness' },
+          { key: 'ManagedBy', value: 'mission-control' },
+        ],
+      },
+    ],
+  })
+
+const mockTaskDef = () =>
+  ecsSendMock.mockResolvedValueOnce({
+    taskDefinition: {
+      taskDefinitionArn: CURRENT_TD_ARN,
+      family: `ender-stack-dev-companion-openclaw-${AGENT}`,
+      revision: 5,
+      status: 'ACTIVE',
+      networkMode: 'awsvpc',
+      requiresCompatibilities: ['FARGATE'],
+      cpu: '512',
+      memory: '1024',
+      taskRoleArn: 'arn:role:task',
+      executionRoleArn: 'arn:role:exec',
+      containerDefinitions: [
+        { name: 'init-config', image: 'foo', essential: false },
+        {
+          name: 'gateway',
+          image: 'foo',
+          essential: true,
+          environment: [{ name: 'OPENCLAW_AGENT_NAME', value: AGENT }],
+        },
+      ],
+      // Read-only fields that should be stripped on register
+      registeredAt: new Date(),
+      registeredBy: 'arn:user',
+    },
+  })
+
+const happyPathMocks = () => {
+  ecsSendMock.mockReset()
+  smSendMock.mockReset()
+  mockHarnessService()
+  smSendMock.mockResolvedValueOnce({
+    ARN: 'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/companion-openclaw-hello-bot-slack-app-token-AbCdEf',
+  })
+  smSendMock.mockResolvedValueOnce({
+    ARN: 'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/companion-openclaw-hello-bot-slack-bot-token-GhIjKl',
+  })
+  smSendMock.mockResolvedValueOnce({
+    ARN: 'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/companion-openclaw-hello-bot-slack-signing-secret-MnOpQr',
+  })
+  mockTaskDef()
+  ecsSendMock.mockResolvedValueOnce({
+    taskDefinition: { taskDefinitionArn: NEW_TD_ARN, revision: 6 },
+  })
+  ecsSendMock.mockResolvedValueOnce({
+    service: {
+      serviceArn: SERVICE_ARN,
+      deployments: [{ id: 'ecs-svc/12345', status: 'PRIMARY' }],
+    },
+  })
+}
+
+beforeEach(() => {
+  setRequiredEnv()
+  ecsSendMock.mockReset()
+  smSendMock.mockReset()
+})
+
+describe('POST /api/fleet/agents/:name/slack/credentials — happy path', () => {
+  it('returns 200 with task-def ARN + deploymentId + secret ARNs', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      ok: boolean
+      agentName: string
+      taskDefinitionArn: string
+      deploymentId?: string
+      secretArns: { appToken: string; botToken: string; signingSecret: string }
+    }
+    expect(json.ok).toBe(true)
+    expect(json.agentName).toBe(AGENT)
+    expect(json.taskDefinitionArn).toBe(NEW_TD_ARN)
+    expect(json.deploymentId).toBe('ecs-svc/12345')
+    expect(json.secretArns.appToken).toContain('slack-app-token')
+    expect(json.secretArns.botToken).toContain('slack-bot-token')
+    expect(json.secretArns.signingSecret).toContain('slack-signing-secret')
+  })
+
+  it('writes 3 secrets to Secrets Manager (PutSecretValue happy path)', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    await POST(mkRequest(), mkParams())
+    const putCalls = smSendMock.mock.calls.filter(
+      (c) => (c[0] as { __type: string }).__type === 'PutSecretValueCommand',
+    )
+    expect(putCalls).toHaveLength(3)
+  })
+
+  it('falls back to CreateSecret when PutSecretValue throws ResourceNotFoundException', async () => {
+    ecsSendMock.mockReset()
+    smSendMock.mockReset()
+    mockHarnessService()
+    const notFound = Object.assign(new Error('not found'), {
+      name: 'ResourceNotFoundException',
+    })
+    // writeSlackSecrets uses Promise.all so all 3 PutSecretValue
+    // calls fire BEFORE any of them awaits — the mock chain is
+    // call-order, not per-secret-sequential. So: 3 Puts reject
+    // first, then 3 Creates resolve.
+    smSendMock
+      .mockRejectedValueOnce(notFound)
+      .mockRejectedValueOnce(notFound)
+      .mockRejectedValueOnce(notFound)
+      .mockResolvedValueOnce({ ARN: 'arn:secret:created-1' })
+      .mockResolvedValueOnce({ ARN: 'arn:secret:created-2' })
+      .mockResolvedValueOnce({ ARN: 'arn:secret:created-3' })
+    mockTaskDef()
+    ecsSendMock.mockResolvedValueOnce({
+      taskDefinition: { taskDefinitionArn: NEW_TD_ARN, revision: 6 },
+    })
+    ecsSendMock.mockResolvedValueOnce({
+      service: {
+        serviceArn: SERVICE_ARN,
+        deployments: [{ id: 'ecs-svc/12345', status: 'PRIMARY' }],
+      },
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    // 3 PutSecretValue + 3 CreateSecret = 6 SM calls total
+    expect(smSendMock).toHaveBeenCalledTimes(6)
+  })
+
+  it('mutates the gateway container with secrets array + OPENCLAW_SLACK_CONFIG_JSON env', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    await POST(mkRequest(), mkParams())
+    const registerCall = ecsSendMock.mock.calls.find(
+      (c) => (c[0] as { __type: string }).__type === 'RegisterTaskDefinitionCommand',
+    )
+    expect(registerCall).toBeDefined()
+    const input = (registerCall![0] as { input: Record<string, unknown> }).input
+    const containers = input.containerDefinitions as Array<{
+      name: string
+      secrets?: Array<{ name: string; valueFrom: string }>
+      environment?: Array<{ name: string; value: string }>
+    }>
+    const gateway = containers.find((c) => c.name === 'gateway')
+    expect(gateway).toBeDefined()
+    expect(gateway!.secrets).toHaveLength(3)
+    expect(gateway!.secrets!.map((s) => s.name)).toEqual([
+      'SLACK_APP_TOKEN',
+      'SLACK_BOT_TOKEN',
+      'SLACK_SIGNING_SECRET',
+    ])
+    const slackConfigEnv = gateway!.environment!.find(
+      (e) => e.name === 'OPENCLAW_SLACK_CONFIG_JSON',
+    )
+    expect(slackConfigEnv).toBeDefined()
+    expect(slackConfigEnv!.value).toContain('C0123456789')
+  })
+
+  it('strips read-only task-def fields before RegisterTaskDefinition', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    await POST(mkRequest(), mkParams())
+    const registerCall = ecsSendMock.mock.calls.find(
+      (c) => (c[0] as { __type: string }).__type === 'RegisterTaskDefinitionCommand',
+    )
+    const input = (registerCall![0] as { input: Record<string, unknown> }).input
+    expect(input.taskDefinitionArn).toBeUndefined()
+    expect(input.revision).toBeUndefined()
+    expect(input.status).toBeUndefined()
+    expect(input.registeredAt).toBeUndefined()
+    expect(input.registeredBy).toBeUndefined()
+  })
+
+  it('forces a new deployment via UpdateService', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    await POST(mkRequest(), mkParams())
+    const updateCall = ecsSendMock.mock.calls.find(
+      (c) => (c[0] as { __type: string }).__type === 'UpdateServiceCommand',
+    )
+    expect(updateCall).toBeDefined()
+    const input = (updateCall![0] as { input: Record<string, unknown> }).input
+    expect(input.forceNewDeployment).toBe(true)
+    expect(input.taskDefinition).toBe(NEW_TD_ARN)
+  })
+
+  it('does not duplicate OPENCLAW_SLACK_CONFIG_JSON when re-pasting (env replacement)', async () => {
+    ecsSendMock.mockReset()
+    smSendMock.mockReset()
+    mockHarnessService()
+    smSendMock
+      .mockResolvedValueOnce({ ARN: 'arn:1' })
+      .mockResolvedValueOnce({ ARN: 'arn:2' })
+      .mockResolvedValueOnce({ ARN: 'arn:3' })
+    // Task-def already has OPENCLAW_SLACK_CONFIG_JSON from a prior paste
+    ecsSendMock.mockResolvedValueOnce({
+      taskDefinition: {
+        taskDefinitionArn: CURRENT_TD_ARN,
+        family: 'fam',
+        containerDefinitions: [
+          {
+            name: 'gateway',
+            image: 'foo',
+            essential: true,
+            environment: [
+              { name: 'OPENCLAW_AGENT_NAME', value: AGENT },
+              { name: 'OPENCLAW_SLACK_CONFIG_JSON', value: '{"channels":["C_OLD"]}' },
+            ],
+          },
+        ],
+      },
+    })
+    ecsSendMock.mockResolvedValueOnce({
+      taskDefinition: { taskDefinitionArn: NEW_TD_ARN, revision: 6 },
+    })
+    ecsSendMock.mockResolvedValueOnce({ service: { deployments: [] } })
+    const POST = await importHandler()
+    await POST(mkRequest(), mkParams())
+    const registerCall = ecsSendMock.mock.calls.find(
+      (c) => (c[0] as { __type: string }).__type === 'RegisterTaskDefinitionCommand',
+    )
+    const input = (registerCall![0] as { input: Record<string, unknown> }).input
+    const containers = input.containerDefinitions as Array<{
+      name: string
+      environment?: Array<{ name: string; value: string }>
+    }>
+    const gateway = containers.find((c) => c.name === 'gateway')!
+    const slackEnvCount = gateway.environment!.filter(
+      (e) => e.name === 'OPENCLAW_SLACK_CONFIG_JSON',
+    ).length
+    expect(slackEnvCount).toBe(1)
+    // And the new value, not the stale one
+    const slackEnv = gateway.environment!.find(
+      (e) => e.name === 'OPENCLAW_SLACK_CONFIG_JSON',
+    )
+    expect(slackEnv!.value).toContain('C0123456789')
+    expect(slackEnv!.value).not.toContain('C_OLD')
+  })
+})
+
+describe('POST /api/fleet/agents/:name/slack/credentials — token validation', () => {
+  it('returns 400 InvalidTokenShape with field errors when appToken is wrong shape', async () => {
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ ...validBody(), appToken: 'not-an-xapp-token' }),
+      mkParams(),
+    )
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as {
+      error: string
+      fieldErrors?: Record<string, string>
+    }
+    expect(json.error).toBe('InvalidTokenShape')
+    expect(json.fieldErrors?.appToken).toBeDefined()
+    expect(ecsSendMock).not.toHaveBeenCalled()
+    expect(smSendMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 400 with botToken field error when bot token has wrong prefix', async () => {
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ ...validBody(), botToken: 'xapp-wrong-prefix' }),
+      mkParams(),
+    )
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as {
+      fieldErrors?: Record<string, string>
+    }
+    expect(json.fieldErrors?.botToken).toBeDefined()
+  })
+
+  it('returns 400 with signingSecret field error when not 32-64 char hex', async () => {
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ ...validBody(), signingSecret: 'too-short' }),
+      mkParams(),
+    )
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as {
+      fieldErrors?: Record<string, string>
+    }
+    expect(json.fieldErrors?.signingSecret).toBeDefined()
+  })
+
+  it('accepts 32-char and 64-char hex signing secrets', async () => {
+    happyPathMocks()
+    let POST = await importHandler()
+    let resp = await POST(
+      mkRequest({ ...validBody(), signingSecret: 'a'.repeat(32) }),
+      mkParams(),
+    )
+    expect(resp.status).toBe(200)
+    happyPathMocks()
+    POST = await importHandler()
+    resp = await POST(
+      mkRequest({ ...validBody(), signingSecret: 'b'.repeat(64) }),
+      mkParams(),
+    )
+    expect(resp.status).toBe(200)
+  })
+})
+
+describe('POST /api/fleet/agents/:name/slack/credentials — refusal paths', () => {
+  it('returns 404 when service does not exist', async () => {
+    ecsSendMock.mockResolvedValueOnce({ services: [] })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
+    expect(smSendMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 for non-MC-managed service (smoke-test protection)', async () => {
+    ecsSendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn: SERVICE_ARN,
+          status: 'ACTIVE',
+          taskDefinition: CURRENT_TD_ARN,
+          tags: [
+            { key: 'Component', value: 'agent-harness' },
+            { key: 'ManagedBy', value: 'terraform' },
+          ],
+        },
+      ],
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
+    expect(smSendMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 403 when caller is not admin', async () => {
+    vi.mocked(auth.requireRole).mockReturnValueOnce({
+      error: 'Forbidden',
+      status: 403,
+    } as unknown as ReturnType<typeof auth.requireRole>)
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(403)
+    expect(ecsSendMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 400 InvalidAgentName when path param fails AGENT_NAME_RE', async () => {
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams('UPPERCASE'))
+    expect(resp.status).toBe(400)
+  })
+
+  it('returns 400 InvalidRequestShape when body lacks required fields', async () => {
+    const POST = await importHandler()
+    const resp = await POST(mkRequest({ appToken: 'foo' }), mkParams())
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('InvalidRequestShape')
+  })
+
+  it('returns 500 ConfigurationError when MC_AGENT_SECRETS_NAME_PREFIX is unset', async () => {
+    delete process.env.MC_AGENT_SECRETS_NAME_PREFIX
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('ConfigurationError')
+    expect(ecsSendMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /api/fleet/agents/:name/slack/credentials — partial failure', () => {
+  it('returns 502 when SecretsManager call throws AccessDeniedException', async () => {
+    mockHarnessService()
+    smSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('access denied'), {
+        name: 'AccessDeniedException',
+      }),
+    )
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('AccessDeniedException')
+  })
+
+  it('returns 502 when RegisterTaskDefinition fails', async () => {
+    mockHarnessService()
+    smSendMock
+      .mockResolvedValueOnce({ ARN: 'arn:1' })
+      .mockResolvedValueOnce({ ARN: 'arn:2' })
+      .mockResolvedValueOnce({ ARN: 'arn:3' })
+    mockTaskDef()
+    ecsSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('invalid'), {
+        name: 'ClientException',
+      }),
+    )
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('ClientException')
+  })
+})
