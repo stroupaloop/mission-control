@@ -13440,7 +13440,8 @@
               }
             }
           },
-          "401": { "description": "Unauthorized — caller is not an admin." },
+          "401": { "description": "Unauthenticated — no valid session or API key." },
+          "403": { "description": "Authenticated but caller is not an admin." },
           "404": {
             "description": "Agent service not found, or no Slack bot token has been stored yet (run the credential-paste flow first).",
             "content": {
@@ -13490,7 +13491,7 @@
                   "properties": {
                     "error": {
                       "type": "string",
-                      "description": "Error class name (SlackAuthError, SlackMissingScope, SlackNetworkError, SlackUnknownError, SlackBotTokenMalformed, AccessDeniedException, ThrottlingException, etc.)."
+                      "description": "Error class name (SlackAuthError, SlackMissingScope, SlackAccountInactive, SlackNetworkError, SlackUnknownError, SlackBotTokenMalformed, AccessDeniedException, ThrottlingException, etc.). SlackBotTokenMalformed surfaces with a 're-paste credentials' detail; SlackAccountInactive surfaces with an 'api.slack.com/apps before re-pasting' detail since re-paste alone won't fix workspace-level disabled state."
                     },
                     "detail": { "type": "string" }
                   }

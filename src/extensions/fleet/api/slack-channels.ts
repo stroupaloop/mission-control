@@ -240,6 +240,20 @@ export async function GET(
         { status: 404, headers: NO_STORE },
       )
     }
+    if (error.name === 'SlackBotTokenMalformed') {
+      // Round-4 audit on PR #49: was falling through to the
+      // generic 502 with no operator-actionable detail. The
+      // remediation is the same as a token rejection — re-paste
+      // credentials — so surface that explicitly.
+      return NextResponse.json(
+        {
+          error: 'SlackBotTokenMalformed',
+          detail:
+            'The stored bot token is corrupt or empty (Secrets Manager returned no SecretString). Re-paste credentials in the agent panel.',
+        } satisfies SlackChannelsErrorResponse,
+        { status: 502, headers: NO_STORE },
+      )
+    }
     if (error.name === 'SlackAuthError') {
       return NextResponse.json(
         {
@@ -256,6 +270,16 @@ export async function GET(
           error: 'SlackMissingScope',
           detail:
             'Bot is missing required scopes (channels:read + groups:read). Reinstall the app from the manifest, then re-paste credentials.',
+        } satisfies SlackChannelsErrorResponse,
+        { status: 502, headers: NO_STORE },
+      )
+    }
+    if (error.name === 'SlackAccountInactive') {
+      return NextResponse.json(
+        {
+          error: 'SlackAccountInactive',
+          detail:
+            "Slack workspace or app is inactive. The Slack workspace's plan may be suspended, or the app was deleted from the workspace. Resolve in api.slack.com/apps before re-pasting credentials.",
         } satisfies SlackChannelsErrorResponse,
         { status: 502, headers: NO_STORE },
       )

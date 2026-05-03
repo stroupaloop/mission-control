@@ -339,14 +339,18 @@ describe('GET /api/fleet/agents/:name/slack/channels — bot-token paths', () =>
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('returns 502 SlackBotTokenMalformed when SM returns no SecretString', async () => {
+  it('returns 502 SlackBotTokenMalformed with re-paste detail when SM returns no SecretString (round-4 audit on PR #49)', async () => {
+    // Pre-fix, this fell through to the generic 502 with no
+    // operator-actionable hint. Round-4 added an explicit
+    // branch with a "re-paste credentials" remediation.
     mockHarnessService()
     smSendMock.mockResolvedValueOnce({ SecretString: undefined })
     const GET = await importHandler()
     const resp = await GET(mkRequest(), mkParams())
     expect(resp.status).toBe(502)
-    const json = (await resp.json()) as { error: string }
+    const json = (await resp.json()) as { error: string; detail?: string }
     expect(json.error).toBe('SlackBotTokenMalformed')
+    expect(json.detail).toContain('Re-paste credentials')
   })
 
   it('returns 502 (not 404) on AccessDeniedException — IAM grant misconfigured', async () => {
@@ -416,10 +420,37 @@ describe('GET /api/fleet/agents/:name/slack/channels — Slack-side errors', () 
     expect(json.error).toBe('SlackRateLimited')
   })
 
-  it('maps unknown Slack error to 502 SlackUnknownError', async () => {
+  it('maps account_inactive to 502 SlackAccountInactive with workspace-action hint (round-4 audit on PR #49)', async () => {
+    // Pre-fix, account_inactive fell through to SlackUnknownError
+    // — opaque, no UI hint. Round-4 mapped it to a distinct
+    // class because re-pasting credentials WONT fix
+    // workspace-level disabled state; the operator needs to
+    // resolve in api.slack.com/apps first.
     mockHarnessService()
     smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
     fetchMock.mockResolvedValueOnce(slackErr('account_inactive'))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('SlackAccountInactive')
+    expect(json.detail).toContain('api.slack.com/apps')
+  })
+
+  it('maps app_inactive to SlackAccountInactive (same shape)', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackErr('app_inactive'))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('SlackAccountInactive')
+  })
+
+  it('maps an unrecognized Slack error code to 502 SlackUnknownError', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackErr('some_brand_new_error'))
     const GET = await importHandler()
     const resp = await GET(mkRequest(), mkParams())
     expect(resp.status).toBe(502)

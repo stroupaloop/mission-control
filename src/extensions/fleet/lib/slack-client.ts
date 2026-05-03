@@ -158,6 +158,19 @@ export async function listChannels(
       e.name = 'SlackMissingScope'
       throw e
     }
+    if (slackErr === 'account_inactive' || slackErr === 'app_inactive') {
+      // Round-4 audit on PR #49: workspace-level disabled state
+      // (Slack plan suspended, app deleted from workspace).
+      // Re-pasting credentials WON'T fix this; the operator
+      // needs to take action in api.slack.com/apps directly. The
+      // distinct error class lets the UI render a different
+      // remediation hint.
+      const e = new Error(
+        `Slack workspace or app is inactive (${slackErr}). The Slack workspace's plan may be suspended, or the app was deleted from the workspace. Resolve in api.slack.com/apps before re-pasting credentials.`,
+      )
+      e.name = 'SlackAccountInactive'
+      throw e
+    }
     const e = new Error(`Slack returned ok:false with error="${slackErr}".`)
     e.name = 'SlackUnknownError'
     throw e
