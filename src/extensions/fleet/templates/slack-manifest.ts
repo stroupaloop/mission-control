@@ -186,9 +186,16 @@ export function renderSlackManifest(
  * chars per the manifest schema). Operator-supplied role descriptions
  * can exceed that — truncate so the manifest is always Slack-valid
  * rather than failing schema validation at paste time.
+ *
+ * Codepoint-aware (round-2 audit on PR #47): `String.prototype.slice`
+ * operates on UTF-16 code units, so cutting at `maxLength - 1` could
+ * split a surrogate pair (emoji, some CJK extension blocks) and
+ * produce invalid UTF-16. `Array.from(text)` splits by Unicode
+ * codepoint; rejoining is safe.
  */
 function truncateForSlack(text: string, maxLength: number): string {
-  if (text.length <= maxLength) return text
-  // Reserve 1 char for the truncation marker.
-  return text.slice(0, maxLength - 1) + '…'
+  const codePoints = Array.from(text)
+  if (codePoints.length <= maxLength) return text
+  // Reserve 1 codepoint for the truncation marker.
+  return codePoints.slice(0, maxLength - 1).join('') + '…'
 }

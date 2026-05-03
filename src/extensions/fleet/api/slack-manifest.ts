@@ -140,16 +140,13 @@ export async function GET(
       )
     }
 
-    // Pull the role description out of the task-def env block. The
-    // task-def is the canonical agent-metadata store today (no
-    // dedicated DB row for agents — Phase-2.x will add one if
-    // needed). DescribeTaskDefinition isn't called here directly;
-    // role-description is on the running container's environment,
-    // which DescribeServices doesn't return. So we fall back to a
-    // generic description if the agent metadata isn't readily
-    // available. The role description is a UX nicety in the
-    // manifest (shown as the Slack app description), not a
-    // load-bearing field.
+    // Fall back to a generic description — DescribeServices doesn't
+    // expose the task-def env block (where OPENCLAW_ROLE_DESCRIPTION
+    // lives). Pulling the operator's actual role description would
+    // require a separate DescribeTaskDefinition call, which isn't
+    // worth the extra round-trip for a UX-nicety field that shows
+    // up only in Slack's app description. Phase-2.x can wire it
+    // through if/when there's a reason to.
     const roleDescription = `Mission Control agent ${agentName}`
 
     const manifest = renderSlackManifest({
