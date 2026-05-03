@@ -381,6 +381,18 @@ export async function PUT(
   // than re-discovering the convention. The current stub
   // doesn't read params (returns 501 unconditionally) so the
   // arg is `_`-prefixed and lint-suppressed.
+  //
+  // TODO(ender-stack#283): when the real handler lands:
+  //   1. Validate agentName via `AGENT_NAME_RE` (mirror GET's
+  //      check at the top of the function — currently skipped
+  //      because the 501 stub doesn't read params).
+  //   2. In the picker's fetch-success path, filter
+  //      `selected` to the intersection with returned channel
+  //      IDs — round-5 audit on PR #51 caught the
+  //      ghost-selection trap where a channel deleted between
+  //      fetch+retry can leave a stale ID in the selection.
+  //   3. Remove this stub + the picker's 501 JSX branch + the
+  //      picker's #283 hint test (TODO markers at each site).
   const auth = requireRole(request, 'admin')
   if ('error' in auth) {
     return NextResponse.json(
