@@ -628,8 +628,22 @@ export async function POST(
     // call that out so the operator knows the prior revision is
     // dangling (cosmetic — ECS handles million-revision families
     // fine, but tidy operators may want to deregister it).
+    //
+    // Round-7 audit on PR #48: TaskDefinitionGatewayMissing is a
+    // configuration error that NO retry will fix — the gateway
+    // container name doesn't match what's in the registered task-
+    // def. Without this branch the generic "retry is safe" hint
+    // would mislead operators into a retry loop. Emit a distinct
+    // non-retriable detail and skip the dangling-revision branch
+    // (no task-def is registered when this throws — it fires
+    // pre-RegisterTaskDefinition).
     let detail: string | undefined
-    if (secretsAttempted) {
+    if (error.name === 'TaskDefinitionGatewayMissing') {
+      detail =
+        "Non-retriable: the task-def has no 'gateway' container. " +
+        'Check container names in templates/openclaw.ts vs. the registered task-def. ' +
+        'Secrets were written (idempotent) and will be overwritten on the next successful paste.'
+    } else if (secretsAttempted) {
       detail =
         'Secrets-write was attempted (idempotent); retry is safe.'
       if (newTaskDefArnIfRegistered) {

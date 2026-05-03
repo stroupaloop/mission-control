@@ -366,7 +366,7 @@ describe('POST /api/fleet/agents/:name/slack/credentials — token validation', 
     expect(json.fieldErrors?.botToken).toBeDefined()
   })
 
-  it('returns 400 with signingSecret field error when not 32-64 char hex', async () => {
+  it('returns 400 with signingSecret field error when not exactly 32 lowercase hex chars', async () => {
     const POST = await importHandler()
     const resp = await POST(
       mkRequest({ ...validBody(), signingSecret: 'too-short' }),
@@ -598,8 +598,16 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     const POST = await importHandler()
     const resp = await POST(mkRequest(), mkParams())
     expect(resp.status).toBe(502)
-    const json = (await resp.json()) as { error: string }
+    const json = (await resp.json()) as { error: string; detail?: string }
     expect(json.error).toBe('TaskDefinitionGatewayMissing')
+    // Round-7 audit on PR #48: non-retriable detail must NOT
+    // suggest "retry is safe" — that hint would loop an operator
+    // on a config-mismatch failure. Detail must mention the
+    // remediation file (templates/openclaw.ts) so a runbook reader
+    // knows where to look.
+    expect(json.detail).toContain('Non-retriable')
+    expect(json.detail).toContain('templates/openclaw.ts')
+    expect(json.detail).not.toContain('retry is safe')
   })
 
   it('surfaces a safe-retry hint on 502 when secrets-write was attempted', async () => {
