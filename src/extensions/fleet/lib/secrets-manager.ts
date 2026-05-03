@@ -336,18 +336,17 @@ export async function writeSlackSecrets(
 export async function getSlackBotToken(agentName: string): Promise<string> {
   const prefix = requireSecretsPrefix()
   const fullSecretName = secretName(prefix, agentName, 'slack-bot-token')
+  // Round-9 audit on PR #49: split the GetSecretValue call into
+  // a try/catch only around the AWS SDK call — the SecretString
+  // emptiness check runs AFTER the catch, so SlackBotTokenMalformed
+  // is thrown directly to the caller without going through this
+  // function's own catch (a "throw-to-your-own-catch" pattern that
+  // the auditor flagged as non-obvious).
+  let resp
   try {
-    const resp = await secretsClient.send(
+    resp = await secretsClient.send(
       new GetSecretValueCommand({ SecretId: fullSecretName }),
     )
-    if (!resp.SecretString) {
-      const err = new Error(
-        `GetSecretValue for "${fullSecretName}" returned no SecretString — secret may have been written with binary value or is empty.`,
-      )
-      err.name = 'SlackBotTokenMalformed'
-      throw err
-    }
-    return resp.SecretString
   } catch (err) {
     // Round-1 audit on PR #49: previously this catch shadowed
     // `name` (the secret ARN, defined above) with the error
@@ -363,4 +362,12 @@ export async function getSlackBotToken(agentName: string): Promise<string> {
     }
     throw err
   }
+  if (!resp.SecretString) {
+    const err = new Error(
+      `GetSecretValue for "${fullSecretName}" returned no SecretString — secret may have been written with binary value or is empty.`,
+    )
+    err.name = 'SlackBotTokenMalformed'
+    throw err
+  }
+  return resp.SecretString
 }

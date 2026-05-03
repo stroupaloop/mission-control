@@ -13506,7 +13506,7 @@
                   "properties": {
                     "error": {
                       "type": "string",
-                      "description": "Error class name (SlackAuthError, SlackMissingScope, SlackAccountInactive, SlackNetworkError, SlackUnknownError, SlackBotTokenMalformed, AccessDeniedException, ThrottlingException, etc.). SlackBotTokenMalformed surfaces with a 're-paste credentials' detail; SlackAccountInactive surfaces with an 'api.slack.com/apps before re-pasting' detail since re-paste alone won't fix workspace-level disabled state."
+                      "description": "Error class name (SlackAuthError, SlackMissingScope, SlackAccountInactive, SlackNetworkError, SlackUnknownError, SlackBotTokenMalformed, AccessDeniedException, ThrottlingException, etc.). SlackBotTokenMalformed surfaces with a 're-paste credentials' detail; SlackAccountInactive surfaces with an 'api.slack.com/apps before re-pasting' detail since re-paste alone won't fix workspace-level disabled state. NOTE: this 502 response intentionally uses a prose description rather than a strict enum (unlike 400/404/429/500 above) — the 502 bundles too many error classes (Slack-side + AWS-side + future additions like SlackTokenExpired) for an enum to remain accurate as Slack's error taxonomy evolves."
                     },
                     "detail": { "type": "string" }
                   }

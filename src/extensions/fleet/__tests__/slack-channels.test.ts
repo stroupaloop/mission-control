@@ -319,6 +319,39 @@ describe('GET /api/fleet/agents/:name/slack/channels — service-scope guard', (
     expect(smSendMock).not.toHaveBeenCalled()
   })
 
+  it('returns 404 when DescribeServices resolves with empty services + non-empty failures (round-9 audit on PR #49)', async () => {
+    // ECS reports service-not-found in `failures` (not via reject).
+    // The handler logs a warn and falls through to the `!target`
+    // 404. This test pins the behavior so a future refactor that
+    // changes the failure-array handling is caught.
+    //
+    // Auditor flagged that an IAM AccessDeniedException at the
+    // service-describe level would also land in `failures` and
+    // surface as 404, masking the real issue. That's a known
+    // systemic gap shared with sibling handlers (filed as a
+    // follow-up); this test pins the not-found path.
+    ecsSendMock.mockResolvedValueOnce({
+      services: [],
+      failures: [{ arn: SERVICE_ARN, reason: 'MISSING' }],
+    })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('ServiceNotFoundException')
+    expect(smSendMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+    // Warn was logged for forensic visibility
+    expect(loggerWarnMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failures: expect.arrayContaining([
+          expect.objectContaining({ reason: 'MISSING' }),
+        ]),
+      }),
+      expect.stringContaining('DescribeServices returned failures'),
+    )
+  })
+
   it('returns 502 when DescribeServices itself rejects (round-3 audit on PR #49)', async () => {
     // Round-3 caught the ECS catch branch was untested. Every
     // service-scope-guard test resolves DescribeServices; this
