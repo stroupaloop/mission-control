@@ -94,6 +94,18 @@ const slackOk = (channels: unknown[], nextCursor = '') => ({
   }),
 })
 
+// Slack returns errors as HTTP-200 + `{ ok: false, error: "..." }`
+// for the application-level cases (invalid_auth, missing_scope,
+// account_inactive, etc.). HTTP-non-200 is reserved for transport-
+// level failures (429 rate limit, 5xx outages).
+//
+// Round-3 audit on PR #49: this helper's `status` parameter only
+// affects the `ok` field used by `if (!resp.ok)` in slack-client.ts.
+// Passing `status >= 300` makes the wrapper short-circuit to
+// SlackNetworkError BEFORE the body is parsed — so the `code`
+// argument has no effect on the test outcome. Keep
+// `slackErr('invalid_auth', 200)` for application errors; use the
+// inline `{ status: 503, ... }` mock shape for transport errors.
 const slackErr = (code: string, status = 200) => ({
   ok: status === 200,
   status,
@@ -271,6 +283,24 @@ describe('GET /api/fleet/agents/:name/slack/channels — service-scope guard', (
     const resp = await GET(mkRequest(), mkParams())
     expect(resp.status).toBe(404)
     expect(smSendMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 502 when DescribeServices itself rejects (round-3 audit on PR #49)', async () => {
+    // Round-3 caught the ECS catch branch was untested. Every
+    // service-scope-guard test resolves DescribeServices; this
+    // covers the throw path (throttling, IAM, transient AWS).
+    ecsSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('rate exceeded'), {
+        name: 'ThrottlingException',
+      }),
+    )
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('ThrottlingException')
+    expect(smSendMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('returns 404 for INACTIVE service', async () => {
@@ -453,6 +483,92 @@ describe('GET /api/fleet/agents/:name/slack/channels — Slack-side errors', () 
     expect(resp.status).toBe(502)
     const json = (await resp.json()) as { error: string }
     expect(json.error).toBe('SlackNetworkError')
+  })
+})
+
+describe('GET /api/fleet/agents/:name/slack/channels — Cache-Control (round-3 audit on PR #49)', () => {
+  // The picker UI is interactive — a caching reverse proxy
+  // (CloudFront, nginx) that cached a transient `404
+  // SlackBotTokenNotFound` would keep the picker broken even
+  // after the operator completed credential paste. Same risk
+  // applies across 200, 400, 404, 429, 500, 502. Every response
+  // path must set `Cache-Control: no-store`.
+  const assertNoStore = (resp: Response) => {
+    expect(resp.headers.get('Cache-Control')).toBe('no-store')
+  }
+
+  it('200 sets Cache-Control: no-store', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackOk([]))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    assertNoStore(resp)
+  })
+
+  it('400 InvalidAgentName sets Cache-Control: no-store', async () => {
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams('Invalid_Name'))
+    assertNoStore(resp)
+  })
+
+  it('500 ConfigurationError sets Cache-Control: no-store', async () => {
+    delete process.env.MC_AGENT_SECRETS_NAME_PREFIX
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    assertNoStore(resp)
+  })
+
+  it('404 ServiceNotFoundException sets Cache-Control: no-store', async () => {
+    ecsSendMock.mockResolvedValueOnce({ services: [] })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    assertNoStore(resp)
+  })
+
+  it('404 SlackBotTokenNotFound sets Cache-Control: no-store', async () => {
+    mockHarnessService()
+    smSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('not found'), {
+        name: 'ResourceNotFoundException',
+      }),
+    )
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    assertNoStore(resp)
+  })
+
+  it('429 SlackRateLimited sets Cache-Control: no-store (alongside Retry-After)', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      headers: new Headers({ 'retry-after': '15' }),
+      json: async () => ({}),
+    })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    assertNoStore(resp)
+    expect(resp.headers.get('Retry-After')).toBe('15')
+  })
+
+  it('502 SlackAuthError sets Cache-Control: no-store', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackErr('invalid_auth'))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    assertNoStore(resp)
+  })
+
+  it('502 ECS error path sets Cache-Control: no-store', async () => {
+    ecsSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('throttled'), { name: 'ThrottlingException' }),
+    )
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    assertNoStore(resp)
   })
 })
 

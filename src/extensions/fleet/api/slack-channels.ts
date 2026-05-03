@@ -52,6 +52,14 @@ import {
 const AWS_REGION_AT_LOAD = process.env.AWS_REGION || 'us-east-1'
 const ecsClient = new ECSClient({ region: AWS_REGION_AT_LOAD })
 
+// Round-3 audit on PR #49: every response (success AND error)
+// sets `Cache-Control: no-store`. The picker UI is interactive
+// and a caching reverse proxy that cached a transient 404
+// `SlackBotTokenNotFound` would keep the picker broken after
+// the operator completes the credential-paste flow. Same risk
+// applies to 429 / 502 / 500 / 400.
+const NO_STORE = { 'Cache-Control': 'no-store' } as const
+
 export interface SlackChannelsResponse {
   ok: true
   agentName: string
@@ -71,7 +79,10 @@ export async function GET(
 ) {
   const auth = requireRole(request, 'admin')
   if ('error' in auth) {
-    return NextResponse.json({ error: auth.error }, { status: auth.status })
+    return NextResponse.json(
+      { error: auth.error },
+      { status: auth.status, headers: NO_STORE },
+    )
   }
 
   const { name: agentName } = await params
@@ -82,7 +93,7 @@ export async function GET(
         error: 'InvalidAgentName',
         detail: `agentName must match ${AGENT_NAME_RE.source}`,
       } satisfies SlackChannelsErrorResponse,
-      { status: 400 },
+      { status: 400, headers: NO_STORE },
     )
   }
 
@@ -101,7 +112,7 @@ export async function GET(
         error: 'ConfigurationError',
         detail: (err as Error).message,
       } satisfies SlackChannelsErrorResponse,
-      { status: 500 },
+      { status: 500, headers: NO_STORE },
     )
   }
 
@@ -142,7 +153,7 @@ export async function GET(
           error: 'ServiceNotFoundException',
           detail: `agent "${agentName}" not found`,
         } satisfies SlackChannelsErrorResponse,
-        { status: 404 },
+        { status: 404, headers: NO_STORE },
       )
     }
     if (!isAgentHarness(target)) {
@@ -151,7 +162,7 @@ export async function GET(
           error: 'ServiceNotFoundException',
           detail: `agent "${agentName}" not found`,
         } satisfies SlackChannelsErrorResponse,
-        { status: 404 },
+        { status: 404, headers: NO_STORE },
       )
     }
   } catch (err) {
@@ -168,7 +179,7 @@ export async function GET(
     )
     return NextResponse.json(
       { error: error.name || 'AWSError' } satisfies SlackChannelsErrorResponse,
-      { status: 502 },
+      { status: 502, headers: NO_STORE },
     )
   }
 
@@ -194,7 +205,7 @@ export async function GET(
         channels: result.channels,
         truncated: result.truncated,
       } satisfies SlackChannelsResponse,
-      { status: 200, headers: { 'Cache-Control': 'no-store' } },
+      { status: 200, headers: NO_STORE },
     )
   } catch (err) {
     const error = err as { name?: string; message?: string; retryAfter?: string }
@@ -226,7 +237,7 @@ export async function GET(
           error: 'SlackBotTokenNotFound',
           detail: `No Slack bot token stored for agent "${agentName}". Run the credential-paste flow first.`,
         } satisfies SlackChannelsErrorResponse,
-        { status: 404 },
+        { status: 404, headers: NO_STORE },
       )
     }
     if (error.name === 'SlackAuthError') {
@@ -236,7 +247,7 @@ export async function GET(
           detail:
             'Slack rejected the stored bot token. Re-paste credentials in the agent panel.',
         } satisfies SlackChannelsErrorResponse,
-        { status: 502 },
+        { status: 502, headers: NO_STORE },
       )
     }
     if (error.name === 'SlackMissingScope') {
@@ -246,11 +257,11 @@ export async function GET(
           detail:
             'Bot is missing required scopes (channels:read + groups:read). Reinstall the app from the manifest, then re-paste credentials.',
         } satisfies SlackChannelsErrorResponse,
-        { status: 502 },
+        { status: 502, headers: NO_STORE },
       )
     }
     if (error.name === 'SlackRateLimited') {
-      const headers: Record<string, string> = {}
+      const headers: Record<string, string> = { ...NO_STORE }
       if (error.retryAfter) headers['Retry-After'] = error.retryAfter
       return NextResponse.json(
         {
@@ -264,7 +275,7 @@ export async function GET(
       {
         error: error.name || 'AWSError',
       } satisfies SlackChannelsErrorResponse,
-      { status: 502 },
+      { status: 502, headers: NO_STORE },
     )
   }
 }
