@@ -202,6 +202,30 @@ describe('<SlackManifestDisplay />', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('resets the copied flag when agentName changes (round-3 audit fix)', async () => {
+    fetchMock
+      .mockResolvedValueOnce(okResp(sampleSuccess))
+      .mockResolvedValueOnce(okResp({ ...sampleSuccess, agentName: 'other' }))
+    const writeTextMock = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText: writeTextMock } })
+    const { rerender } = render(<SlackManifestDisplay agentName={AGENT} />)
+    // Wait for first fetch + Copy.
+    const copyBtn = await screen.findByTestId('slack-manifest-copy')
+    fireEvent.click(copyBtn)
+    await waitFor(() =>
+      expect(screen.getByTestId('slack-manifest-copy').textContent).toBe(
+        'Copied!',
+      ),
+    )
+    // Switch to a different agent — should reset to "Copy".
+    rerender(<SlackManifestDisplay agentName="other" />)
+    await waitFor(() =>
+      expect(screen.getByTestId('slack-manifest-copy').textContent).toBe(
+        'Copy',
+      ),
+    )
+  })
+
   it('re-fetches when agentName changes', async () => {
     fetchMock
       .mockResolvedValueOnce(okResp(sampleSuccess))

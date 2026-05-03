@@ -75,6 +75,15 @@ export function SlackManifestDisplay({ agentName }: Props) {
     abortRef.current = controller
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
 
+    // Reset the copied flag so a stale "Copied!" label from the
+    // previous agent's manifest doesn't bleed into the new
+    // agent's view. The current effect-cleanup branch only fires
+    // when agentName goes to null (panel closed); a direct
+    // agent-A → agent-B switch keeps the panel mounted and
+    // would otherwise carry the flag over.
+    if (copiedTimeoutRef.current) clearTimeout(copiedTimeoutRef.current)
+    setCopied(false)
+
     setState({ kind: 'loading' })
     void (async () => {
       try {
