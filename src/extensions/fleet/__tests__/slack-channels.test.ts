@@ -238,6 +238,41 @@ describe('GET /api/fleet/agents/:name/slack/channels — service-scope guard', (
     expect(json.error).toBe('ServiceNotFoundException')
   })
 
+  it('returns 500 ConfigurationError when MC_AGENT_SECRETS_NAME_PREFIX is unset (round-2 audit on PR #49)', async () => {
+    // Pre-fix, a missing env var would have surfaced as 502
+    // deep in the SM call's catch — operator hunts Slack/AWS
+    // errors when the real fix is in their MC container env.
+    // Now: pre-check before any AWS call, return 500.
+    delete process.env.MC_AGENT_SECRETS_NAME_PREFIX
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('ConfigurationError')
+    expect(ecsSendMock).not.toHaveBeenCalled()
+    expect(smSendMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 for DRAINING service (round-2 audit: tightened !== ACTIVE)', async () => {
+    ecsSendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn: SERVICE_ARN,
+          status: 'DRAINING',
+          tags: [
+            { key: 'Component', value: 'agent-harness' },
+            { key: 'ManagedBy', value: 'mission-control' },
+          ],
+        },
+      ],
+    })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
+    expect(smSendMock).not.toHaveBeenCalled()
+  })
+
   it('returns 404 for INACTIVE service', async () => {
     ecsSendMock.mockResolvedValueOnce({
       services: [

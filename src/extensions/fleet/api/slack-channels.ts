@@ -9,7 +9,10 @@ import { logSecurityEvent } from '@/lib/security-events'
 import { AGENT_NAME_RE } from '@/extensions/fleet/templates/constraints'
 import { resolveFleetPrefix } from '@/extensions/fleet/lib/fleet-prefix'
 import { isAgentHarness } from '@/extensions/fleet/lib/ecs-guards'
-import { getSlackBotToken } from '@/extensions/fleet/lib/secrets-manager'
+import {
+  getSlackBotToken,
+  requireSecretsPrefix,
+} from '@/extensions/fleet/lib/secrets-manager'
 import {
   listChannels,
   type SlackChannel,
@@ -83,6 +86,25 @@ export async function GET(
     )
   }
 
+  // Pre-check the secrets prefix env var BEFORE any AWS call —
+  // ConfigurationError surfaces as a 500 (server misconfigured),
+  // not a 502 (upstream failure). Round-2 audit on PR #49: a
+  // missing MC_AGENT_SECRETS_NAME_PREFIX would have surfaced as
+  // 502 deep in the SM call's catch block, sending the operator
+  // hunting Slack/AWS errors when the real fix is in their MC
+  // container env config. Mirrors slack-credentials.ts:322.
+  try {
+    requireSecretsPrefix()
+  } catch (err) {
+    return NextResponse.json(
+      {
+        error: 'ConfigurationError',
+        detail: (err as Error).message,
+      } satisfies SlackChannelsErrorResponse,
+      { status: 500 },
+    )
+  }
+
   const fleetPrefix = resolveFleetPrefix()
   const clusterName = fleetPrefix.clusterName
   const serviceName = `${fleetPrefix.prefix}-companion-openclaw-${agentName}`
@@ -109,7 +131,12 @@ export async function GET(
       )
     }
     const target = describe.services?.[0]
-    if (!target || target.status === 'INACTIVE') {
+    // Round-2 audit on PR #49: tighten to `!== 'ACTIVE'` so
+    // DRAINING services (mid-stop / mid-deploy) are also
+    // rejected. Same fix shape as PR #48 round-2. Read endpoint
+    // blast radius is lower than credentials-write but the guard
+    // logic shouldn't diverge between sibling handlers.
+    if (!target || target.status !== 'ACTIVE') {
       return NextResponse.json(
         {
           error: 'ServiceNotFoundException',
@@ -157,7 +184,7 @@ export async function GET(
       severity: 'info',
       source: 'fleet',
       agent_name: agentName,
-      detail: `actor=${auth.user?.id} channels=${result.channels.length} truncated=${result.truncated}`,
+      detail: `actor=${auth.user.id} channels=${result.channels.length} truncated=${result.truncated}`,
     })
 
     return NextResponse.json(
@@ -190,7 +217,7 @@ export async function GET(
       severity: 'warning',
       source: 'fleet',
       agent_name: agentName,
-      detail: `actor=${auth.user?.id} error=${error.name ?? 'AWSError'}`,
+      detail: `actor=${auth.user.id} error=${error.name ?? 'AWSError'}`,
     })
 
     if (error.name === 'SlackBotTokenNotFound') {
