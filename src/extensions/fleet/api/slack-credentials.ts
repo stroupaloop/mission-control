@@ -159,9 +159,31 @@ function validateTokenShapes(
     errs.botToken = 'Expected `xoxb-...` bot user OAuth token'
   }
   if (!SIGNING_SECRET_RE.test(req.signingSecret)) {
-    errs.signingSecret = 'Expected 32-64 char hex signing secret'
+    errs.signingSecret =
+      'Expected exactly 32 lowercase hex chars (Slack signing secret)'
   }
   return errs
+}
+
+/**
+ * Validate Slack channel ID shapes. Slack channel IDs are
+ * `C[A-Z0-9]{8,10}` for public channels, `G[A-Z0-9]{8,10}` for
+ * private (legacy), `D[A-Z0-9]{8,10}` for DMs. Be lenient on the
+ * first letter (C/G/D) but tight on length to avoid the
+ * size-blowup path the auditor flagged on round-2 (a single huge
+ * string in the channels array could push OPENCLAW_SLACK_CONFIG_JSON
+ * past the 512-char ECS env-value cap even with the 50-item
+ * count-cap in place).
+ */
+const CHANNEL_ID_RE = /^[CGD][A-Z0-9]{8,12}$/
+function validateChannelIds(channels: string[] | undefined): string | null {
+  if (!channels || channels.length === 0) return null
+  for (const c of channels) {
+    if (!CHANNEL_ID_RE.test(c)) {
+      return `Channel ID "${c.slice(0, 30)}" doesn't match Slack format ([CGD] + 8-12 alphanumerics)`
+    }
+  }
+  return null
 }
 
 /**
@@ -334,17 +356,41 @@ export async function POST(
     )
   }
 
+  // Per-item channel ID format check — protects against arbitrary
+  // long strings inflating OPENCLAW_SLACK_CONFIG_JSON past the
+  // ECS 512-char env-value cap even within the 50-item count cap.
+  // Round-2 audit on PR #48 flagged the size-blowup path.
+  const channelErr = validateChannelIds(body.channels)
+  if (channelErr) {
+    return NextResponse.json(
+      {
+        error: 'InvalidChannelList',
+        detail: channelErr,
+      } satisfies SlackCredentialsErrorResponse,
+      { status: 400 },
+    )
+  }
+
   const fleetPrefix = resolveFleetPrefix()
   const clusterName = fleetPrefix.clusterName
   const serviceName = `${fleetPrefix.prefix}-companion-openclaw-${agentName}`
 
-  // Track whether secrets were successfully written before any
-  // post-write step fails. Used to surface a `hint` field on 502s
-  // so the operator knows a retry will succeed (the secrets are
-  // already there; they just need the task-def + service update
-  // to land). Round-1 audit on PR #48 flagged the missing
-  // signal-to-operator on partial-failure paths.
-  let secretsWritten = false
+  // Track whether ANY secret-write attempts have started. Round-2
+  // audit on PR #48 flipped this from "all 3 succeeded" to
+  // "attempted at all" — putOrCreateSecret is idempotent, so
+  // retrying after a partial failure (1 of 3 SM writes failed) is
+  // also safe. The hint should fire for any post-write-attempt
+  // failure, not just post-all-3-succeeded. Track a flag set
+  // BEFORE Promise.all so partial-success still surfaces "retry
+  // is safe."
+  //
+  // Track separately whether a NEW task-def revision was already
+  // registered. If RegisterTaskDef succeeded but UpdateService
+  // failed, a re-paste registers another revision; the operator
+  // should know the prior revision is dangling so they can
+  // optionally clean up via the deregister-task-definition path.
+  let secretsAttempted = false
+  let newTaskDefArnIfRegistered: string | undefined
 
   try {
     // ================================================================
@@ -358,11 +404,16 @@ export async function POST(
       }),
     )
     const target = describeSvc.services?.[0]
-    if (!target || target.status === 'INACTIVE') {
+    // Round-2 audit on PR #48: tighten from "INACTIVE only" to
+    // "anything other than ACTIVE" — DRAINING services (mid-stop,
+    // mid-deploy) shouldn't accept new credentials. ECS service
+    // states: ACTIVE, INACTIVE, DRAINING. Only ACTIVE is a stable
+    // state where mutating the task-def is safe.
+    if (!target || target.status !== 'ACTIVE') {
       return NextResponse.json(
         {
           error: 'ServiceNotFoundException',
-          detail: `agent "${agentName}" not found`,
+          detail: `agent "${agentName}" not found or not in ACTIVE state`,
         } satisfies SlackCredentialsErrorResponse,
         { status: 404 },
       )
@@ -394,6 +445,7 @@ export async function POST(
     // ================================================================
     // Step 2: Write three Slack secrets to Secrets Manager
     // ================================================================
+    secretsAttempted = true
     const arns = await writeSlackSecrets({
       agentName,
       projectName: fleetPrefix.projectName,
@@ -402,7 +454,6 @@ export async function POST(
       botToken: body.botToken,
       signingSecret: body.signingSecret,
     })
-    secretsWritten = true
 
     // ================================================================
     // Step 3: Read live task-def (with tags)
@@ -458,6 +509,7 @@ export async function POST(
       new RegisterTaskDefinitionCommand(tdInput),
     )
     const newTaskDefArn = registered.taskDefinition?.taskDefinitionArn
+    newTaskDefArnIfRegistered = newTaskDefArn
     if (!newTaskDefArn) {
       return NextResponse.json(
         {
@@ -510,18 +562,29 @@ export async function POST(
         agentName,
         errorName: error.name,
         errorMessage: error.message,
-        secretsWritten,
+        secretsAttempted,
+        newTaskDefArnIfRegistered,
       },
       '[fleet] slack-credentials: AWS error',
     )
-    // If secrets were already written but a downstream step
-    // (RegisterTaskDefinition / UpdateService) failed, surface a
-    // hint so the operator knows a retry is safe + cheap (the
-    // SecretsManager writes are idempotent; the retry just
-    // re-mutates the task-def). Round-1 audit on PR #48.
-    const detail = secretsWritten
-      ? 'Secrets were written successfully; retry to complete task-def registration + service redeploy.'
-      : undefined
+    // Hint the operator about retry safety + dangling state.
+    // PutSecretValue/CreateSecret are idempotent (round-1 audit
+    // pattern), so a retry after ANY secrets-attempted failure is
+    // safe. If a task-def was registered but UpdateService failed,
+    // call that out so the operator knows the prior revision is
+    // dangling (cosmetic — ECS handles million-revision families
+    // fine, but tidy operators may want to deregister it).
+    let detail: string | undefined
+    if (secretsAttempted) {
+      detail =
+        'Secrets-write was attempted (idempotent); retry is safe.'
+      if (newTaskDefArnIfRegistered) {
+        detail +=
+          ` A new task-def revision was already registered (${newTaskDefArnIfRegistered})` +
+          ' but the service update failed; a retry will register another revision.' +
+          ' The dangling revision is harmless but can be deregistered manually if desired.'
+      }
+    }
     return NextResponse.json(
       {
         error: error.name || 'AWSError',

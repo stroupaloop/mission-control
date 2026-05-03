@@ -458,7 +458,12 @@ describe('POST /api/fleet/agents/:name/slack/credentials — refusal paths', () 
 describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit hardening', () => {
   it('returns 400 InvalidChannelList when channels exceed cap', async () => {
     const POST = await importHandler()
-    const oversized = Array.from({ length: 51 }, (_, i) => `C${String(i).padStart(9, '0')}`)
+    // Channel IDs must match CHANNEL_ID_RE — generate valid-shape IDs
+    // to ensure the count cap (not the per-item check) is what fires.
+    const oversized = Array.from(
+      { length: 51 },
+      (_, i) => `C${String(i).padStart(9, 'A')}`,
+    )
     const resp = await POST(
       mkRequest({ ...validBody(), channels: oversized }),
       mkParams(),
@@ -469,6 +474,50 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     expect(json.detail).toContain('51')
     // No AWS calls — bail fast
     expect(ecsSendMock).not.toHaveBeenCalled()
+    expect(smSendMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 400 InvalidChannelList when a single channel ID has wrong format', async () => {
+    // Slack channel IDs are [CGD] + 8-12 alphanumerics. Round-2
+    // audit added per-item validation so a single huge string can't
+    // bypass the count cap and inflate OPENCLAW_SLACK_CONFIG_JSON
+    // past the ECS env-value 512-char limit.
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({
+        ...validBody(),
+        channels: ['C0123456789', 'this-is-not-a-channel-id-at-all'],
+      }),
+      mkParams(),
+    )
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('InvalidChannelList')
+    expect(json.detail).toContain('Slack format')
+    expect(ecsSendMock).not.toHaveBeenCalled()
+    expect(smSendMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 when service is DRAINING (not just INACTIVE)', async () => {
+    // Round-2 audit on PR #48: tightened from "INACTIVE only" to
+    // "anything other than ACTIVE" — DRAINING shouldn't accept
+    // new credential pastes.
+    ecsSendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn: SERVICE_ARN,
+          status: 'DRAINING',
+          taskDefinition: CURRENT_TD_ARN,
+          tags: [
+            { key: 'Component', value: 'agent-harness' },
+            { key: 'ManagedBy', value: 'mission-control' },
+          ],
+        },
+      ],
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
     expect(smSendMock).not.toHaveBeenCalled()
   })
 
@@ -553,7 +602,7 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     expect(json.error).toBe('TaskDefinitionGatewayMissing')
   })
 
-  it('surfaces a hint on 502 when secrets were already written', async () => {
+  it('surfaces a safe-retry hint on 502 when secrets-write was attempted', async () => {
     ecsSendMock.mockReset()
     smSendMock.mockReset()
     mockHarnessService()
@@ -573,18 +622,48 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     expect(resp.status).toBe(502)
     const json = (await resp.json()) as { error: string; detail?: string }
     expect(json.error).toBe('ThrottlingException')
-    expect(json.detail).toContain('Secrets were written successfully')
-    expect(json.detail).toContain('retry')
+    expect(json.detail).toContain('Secrets-write was attempted')
+    expect(json.detail).toContain('retry is safe')
   })
 
-  it('does NOT surface secrets-written hint when failure is pre-secrets-write', async () => {
+  it('surfaces dangling-task-def hint when UpdateService fails after RegisterTaskDef succeeds', async () => {
+    // Round-2 audit on PR #48: when a new task-def is registered
+    // but UpdateService fails, the operator should know the prior
+    // revision is dangling (cosmetic — re-paste registers another;
+    // the dangling one is harmless but tidy operators may want to
+    // deregister it).
+    ecsSendMock.mockReset()
+    smSendMock.mockReset()
+    mockHarnessService()
+    smSendMock
+      .mockResolvedValueOnce({ ARN: 'arn:1' })
+      .mockResolvedValueOnce({ ARN: 'arn:2' })
+      .mockResolvedValueOnce({ ARN: 'arn:3' })
+    mockTaskDef()
+    ecsSendMock.mockResolvedValueOnce({
+      taskDefinition: { taskDefinitionArn: NEW_TD_ARN, revision: 6 },
+    })
+    ecsSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('throttle'), {
+        name: 'ThrottlingException',
+      }),
+    )
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.detail).toContain(NEW_TD_ARN)
+    expect(json.detail).toContain('dangling')
+  })
+
+  it('does NOT surface secrets-attempted hint when failure is pre-secrets-write', async () => {
     // DescribeServices returns no service → 404 path, no hint expected
     ecsSendMock.mockResolvedValueOnce({ services: [] })
     const POST = await importHandler()
     const resp = await POST(mkRequest(), mkParams())
     expect(resp.status).toBe(404)
     const json = (await resp.json()) as { detail?: string }
-    expect(json.detail ?? '').not.toContain('Secrets were written')
+    expect(json.detail ?? '').not.toContain('Secrets-write was attempted')
   })
 
   it('SIGNING_SECRET_RE rejects 64-char (round-1: narrowed to exactly 32)', async () => {

@@ -13270,7 +13270,7 @@
                   },
                   "signingSecret": {
                     "type": "string",
-                    "description": "Slack app signing secret (32-64 char hex)."
+                    "description": "Slack app signing secret (exactly 32 lowercase hex chars per current Slack spec)."
                   },
                   "channels": {
                     "type": "array",
