@@ -109,19 +109,27 @@ const DEFAULT_BOT_SCOPES = [
 ]
 
 /**
- * Default bot events the agent subscribes to. Keep this small —
- * each event is a wakeup; agents that subscribe to firehose-shaped
- * events (`message.channels` without a mention filter, for instance)
- * generate a lot of noise.
+ * Default bot events the agent subscribes to. Intentionally small —
+ * each event wakes up the Socket Mode WebSocket handler. Agents
+ * that subscribe to firehose-shaped events generate a lot of noise
+ * + cost (every message in every joined channel is a wakeup, even
+ * if the agent doesn't engage).
  *
- * Today's set:
+ * Today's set is mention-driven only (round-1 audit on PR #47
+ * trimmed `message.channels` from the default — operators can
+ * add it via Slack's app-config UI post-creation if they want
+ * firehose-style engagement, but defaulting OFF avoids accidental
+ * cost surprise on workspaces with high traffic):
+ *
  *   - `app_mention` — primary trigger (someone @-mentions the agent)
- *   - `message.channels` — channel messages (the agent decides
- *     whether to engage based on content; operators can opt-out per
- *     channel via the channel picker)
- *   - `message.im` — direct messages to the bot
+ *   - `message.im` — direct messages to the bot (always relevant)
+ *
+ * NOT included by default:
+ *   - `message.channels` — every channel message; high-volume.
+ *     Document in operator instructions as the "subscribe more"
+ *     path if/when an agent needs broader context.
  */
-const DEFAULT_BOT_EVENTS = ['app_mention', 'message.channels', 'message.im']
+const DEFAULT_BOT_EVENTS = ['app_mention', 'message.im']
 
 /**
  * Render a Slack app manifest for the given agent. Pure function —

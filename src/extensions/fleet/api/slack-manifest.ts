@@ -101,6 +101,23 @@ export async function GET(
         include: ['TAGS'],
       }),
     )
+    // Log any DescribeServices `failures` entries (AWS returns
+    // these alongside an empty `services[]` for not-found / IAM-
+    // shortage cases). Round-1 audit on PR #47 flagged that
+    // throttling or unusual partial-result shapes would otherwise
+    // be invisible in CloudWatch when the request resolves to a
+    // 404 here. Most common entry is `{reason: "MISSING"}` which
+    // is normal; non-MISSING reasons are worth surfacing.
+    if (describe.failures && describe.failures.length > 0) {
+      logger.warn(
+        {
+          cluster: clusterName,
+          serviceName,
+          failures: describe.failures,
+        },
+        '[fleet] slack-manifest: DescribeServices returned failures',
+      )
+    }
     const target = describe.services?.[0]
     if (!target || target.status === 'INACTIVE') {
       return NextResponse.json(
