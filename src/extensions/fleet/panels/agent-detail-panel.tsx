@@ -220,6 +220,12 @@ export function AgentDetailPanel({ agent, agentName, onClose }: Props) {
     </div>
   )
 
-  if (typeof document === 'undefined') return null
+  // 'use client' (top of file) is the correct SSR-protection
+  // mechanism — Next.js never server-renders this component.
+  // A `typeof document === 'undefined'` guard at this point
+  // would be dead code: the useEffect hooks above already
+  // reference `window.addEventListener`, so on a real server
+  // those would throw before this line was ever reached. Round-8
+  // audit on PR #50 caught the misleading guard; removed.
   return createPortal(panel, document.body)
 }
