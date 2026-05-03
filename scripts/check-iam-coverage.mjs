@@ -289,7 +289,15 @@ function main() {
 
   for (const file of files) {
     const source = fs.readFileSync(file, 'utf8')
-    const nsImports = findNamespaceImportsOfAwsSdk(source)
+    // Strip comments once and feed both the namespace-import scan and
+    // the named-import scan from the same input. Without this, a
+    // commented-out `// import * as ECS from '@aws-sdk/client-ecs'`
+    // would fail CI on the namespace-import guard while
+    // `extractCommandsFromFile` (which strips internally) would
+    // correctly ignore it. Round-4 audit on PR #46 caught the
+    // asymmetry.
+    const stripped = stripComments(source)
+    const nsImports = findNamespaceImportsOfAwsSdk(stripped)
     for (const ns of nsImports) {
       namespaceImports.push({ file: path.relative(root, file), ...ns })
     }
