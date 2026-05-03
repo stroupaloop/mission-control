@@ -13440,8 +13440,8 @@
               }
             }
           },
-          "401": { "description": "Unauthenticated — no valid session or API key." },
-          "403": { "description": "Authenticated but caller is not an admin." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "404": {
             "description": "Agent service not found, or no Slack bot token has been stored yet (run the credential-paste flow first).",
             "content": {
@@ -13475,6 +13475,21 @@
                   "required": ["error"],
                   "properties": {
                     "error": { "type": "string", "enum": ["SlackRateLimited"] },
+                    "detail": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "MC_AGENT_SECRETS_NAME_PREFIX env unset (deployment partially provisioned).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["ConfigurationError"] },
                     "detail": { "type": "string" }
                   }
                 }

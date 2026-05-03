@@ -295,9 +295,16 @@ export async function GET(
         { status: 429, headers },
       )
     }
+    // Round-6 audit on PR #49: the catch handles BOTH AWS-side
+    // (e.g. AccessDeniedException) and Slack-side (SlackNetworkError,
+    // SlackUnknownError) paths. The previous 'AWSError' fallback
+    // misled operators on Slack-side throws where `error.name` was
+    // somehow stripped. The known Slack/SM cases above already hit
+    // explicit branches; this fallback only fires if `error.name`
+    // is missing, which is unlikely but worth labeling correctly.
     return NextResponse.json(
       {
-        error: error.name || 'AWSError',
+        error: error.name || 'UnknownError',
       } satisfies SlackChannelsErrorResponse,
       { status: 502, headers: NO_STORE },
     )
