@@ -144,7 +144,17 @@ export async function listChannels(
 
   if (!body.ok) {
     const slackErr = body.error ?? 'unknown_error'
-    if (slackErr === 'invalid_auth' || slackErr === 'token_revoked' || slackErr === 'not_authed') {
+    if (
+      slackErr === 'invalid_auth' ||
+      slackErr === 'token_revoked' ||
+      slackErr === 'not_authed' ||
+      slackErr === 'token_expired'
+    ) {
+      // Round-5 audit on PR #49: added `token_expired` to the
+      // SlackAuthError cluster. Same remediation as the other
+      // three (operator re-pastes credentials), so it should
+      // surface the same actionable hint instead of falling
+      // through to the opaque SlackUnknownError.
       const e = new Error(
         `Slack rejected the bot token (${slackErr}). Operator should re-paste credentials.`,
       )

@@ -391,6 +391,19 @@ describe('GET /api/fleet/agents/:name/slack/channels — Slack-side errors', () 
     expect(json.error).toBe('SlackAuthError')
   })
 
+  it('maps token_expired to SlackAuthError (round-5 audit on PR #49)', async () => {
+    // Pre-fix, token_expired fell through to SlackUnknownError.
+    // Same remediation as invalid_auth (re-paste credentials),
+    // so it should surface the same actionable hint.
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackErr('token_expired'))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('SlackAuthError')
+  })
+
   it('maps missing_scope to 502 SlackMissingScope with reinstall hint', async () => {
     mockHarnessService()
     smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
