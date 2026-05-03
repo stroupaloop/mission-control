@@ -69,7 +69,7 @@ const NEW_TD_ARN = `arn:aws:ecs:us-east-1:398152419239:task-definition/ender-sta
 const validBody = () => ({
   appToken: 'xapp-1-A12345678-1234567890-abcdef0123456789',
   botToken: 'xoxb-12345-67890-abcdefABCDEFabcdef-extra',
-  signingSecret: 'a'.repeat(64),
+  signingSecret: 'a'.repeat(32), // Slack signing secrets are exactly 32 lowercase hex chars
   channels: ['C0123456789'],
 })
 
@@ -379,18 +379,11 @@ describe('POST /api/fleet/agents/:name/slack/credentials — token validation', 
     expect(json.fieldErrors?.signingSecret).toBeDefined()
   })
 
-  it('accepts 32-char and 64-char hex signing secrets', async () => {
+  it('accepts exactly 32-char hex signing secret (Slack spec)', async () => {
     happyPathMocks()
-    let POST = await importHandler()
-    let resp = await POST(
+    const POST = await importHandler()
+    const resp = await POST(
       mkRequest({ ...validBody(), signingSecret: 'a'.repeat(32) }),
-      mkParams(),
-    )
-    expect(resp.status).toBe(200)
-    happyPathMocks()
-    POST = await importHandler()
-    resp = await POST(
-      mkRequest({ ...validBody(), signingSecret: 'b'.repeat(64) }),
       mkParams(),
     )
     expect(resp.status).toBe(200)
@@ -459,6 +452,150 @@ describe('POST /api/fleet/agents/:name/slack/credentials — refusal paths', () 
     const json = (await resp.json()) as { error: string }
     expect(json.error).toBe('ConfigurationError')
     expect(ecsSendMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit hardening', () => {
+  it('returns 400 InvalidChannelList when channels exceed cap', async () => {
+    const POST = await importHandler()
+    const oversized = Array.from({ length: 51 }, (_, i) => `C${String(i).padStart(9, '0')}`)
+    const resp = await POST(
+      mkRequest({ ...validBody(), channels: oversized }),
+      mkParams(),
+    )
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('InvalidChannelList')
+    expect(json.detail).toContain('51')
+    // No AWS calls — bail fast
+    expect(ecsSendMock).not.toHaveBeenCalled()
+    expect(smSendMock).not.toHaveBeenCalled()
+  })
+
+  it('uses include=[TAGS] on DescribeTaskDefinition', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    await POST(mkRequest(), mkParams())
+    const describeTdCall = ecsSendMock.mock.calls.find(
+      (c) => (c[0] as { __type: string }).__type === 'DescribeTaskDefinitionCommand',
+    )
+    expect(describeTdCall).toBeDefined()
+    const input = (describeTdCall![0] as { input: Record<string, unknown> }).input
+    expect(input.include).toEqual(['TAGS'])
+  })
+
+  it('preserves tags from existing task-def when registering new revision', async () => {
+    ecsSendMock.mockReset()
+    smSendMock.mockReset()
+    mockHarnessService()
+    smSendMock
+      .mockResolvedValueOnce({ ARN: 'arn:1' })
+      .mockResolvedValueOnce({ ARN: 'arn:2' })
+      .mockResolvedValueOnce({ ARN: 'arn:3' })
+    // Task-def response includes tags at the top level (response shape)
+    ecsSendMock.mockResolvedValueOnce({
+      taskDefinition: {
+        taskDefinitionArn: CURRENT_TD_ARN,
+        family: `ender-stack-dev-companion-openclaw-${AGENT}`,
+        containerDefinitions: [
+          { name: 'gateway', image: 'foo', essential: true, environment: [] },
+        ],
+      },
+      tags: [
+        { key: 'Project', value: 'ender-stack' },
+        { key: 'Environment', value: 'dev' },
+        { key: 'AgentName', value: AGENT },
+      ],
+    })
+    ecsSendMock.mockResolvedValueOnce({
+      taskDefinition: { taskDefinitionArn: NEW_TD_ARN, revision: 6 },
+    })
+    ecsSendMock.mockResolvedValueOnce({
+      service: { deployments: [{ id: 'd1', status: 'PRIMARY' }] },
+    })
+    const POST = await importHandler()
+    await POST(mkRequest(), mkParams())
+    const registerCall = ecsSendMock.mock.calls.find(
+      (c) => (c[0] as { __type: string }).__type === 'RegisterTaskDefinitionCommand',
+    )
+    const input = (registerCall![0] as { input: Record<string, unknown> }).input
+    expect(input.tags).toEqual([
+      { key: 'Project', value: 'ender-stack' },
+      { key: 'Environment', value: 'dev' },
+      { key: 'AgentName', value: AGENT },
+    ])
+  })
+
+  it('throws TaskDefinitionGatewayMissing when no gateway container exists in task-def', async () => {
+    ecsSendMock.mockReset()
+    smSendMock.mockReset()
+    mockHarnessService()
+    smSendMock
+      .mockResolvedValueOnce({ ARN: 'arn:1' })
+      .mockResolvedValueOnce({ ARN: 'arn:2' })
+      .mockResolvedValueOnce({ ARN: 'arn:3' })
+    // Task-def with no gateway container — silent no-op pre-fix
+    ecsSendMock.mockResolvedValueOnce({
+      taskDefinition: {
+        taskDefinitionArn: CURRENT_TD_ARN,
+        family: 'fam',
+        containerDefinitions: [
+          { name: 'init-config', image: 'foo', essential: false },
+          { name: 'NOT-gateway', image: 'foo', essential: true },
+        ],
+      },
+      tags: [],
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('TaskDefinitionGatewayMissing')
+  })
+
+  it('surfaces a hint on 502 when secrets were already written', async () => {
+    ecsSendMock.mockReset()
+    smSendMock.mockReset()
+    mockHarnessService()
+    smSendMock
+      .mockResolvedValueOnce({ ARN: 'arn:1' })
+      .mockResolvedValueOnce({ ARN: 'arn:2' })
+      .mockResolvedValueOnce({ ARN: 'arn:3' })
+    mockTaskDef()
+    // RegisterTaskDefinition fails AFTER secrets were written
+    ecsSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('throttle'), {
+        name: 'ThrottlingException',
+      }),
+    )
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('ThrottlingException')
+    expect(json.detail).toContain('Secrets were written successfully')
+    expect(json.detail).toContain('retry')
+  })
+
+  it('does NOT surface secrets-written hint when failure is pre-secrets-write', async () => {
+    // DescribeServices returns no service → 404 path, no hint expected
+    ecsSendMock.mockResolvedValueOnce({ services: [] })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
+    const json = (await resp.json()) as { detail?: string }
+    expect(json.detail ?? '').not.toContain('Secrets were written')
+  })
+
+  it('SIGNING_SECRET_RE rejects 64-char (round-1: narrowed to exactly 32)', async () => {
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ ...validBody(), signingSecret: 'a'.repeat(64) }),
+      mkParams(),
+    )
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as { fieldErrors?: Record<string, string> }
+    expect(json.fieldErrors?.signingSecret).toBeDefined()
   })
 })
 

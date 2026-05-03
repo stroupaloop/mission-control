@@ -73,11 +73,27 @@ const SLACK_SIGNING_SECRET_ENV = 'SLACK_SIGNING_SECRET'
 // rejects obvious garbage (e.g., the operator pastes "xapp-…" into
 // the bot-token field). The IAM + Slack-side rejection handle the
 // rest if a malformed value slips through.
-const APP_TOKEN_RE = /^xapp-1-[A-Z0-9]+-[0-9]+-[a-zA-Z0-9]+$/
+//
+// Round-1 audit on PR #48: app-id middle segments may have mixed
+// case in some Slack workspace configurations — relaxed to
+// [A-Za-z0-9]+ to match the "not publicly stable" framing.
+const APP_TOKEN_RE = /^xapp-1-[A-Za-z0-9]+-[0-9]+-[a-zA-Z0-9]+$/
 const BOT_TOKEN_RE = /^xoxb-[0-9]+-[0-9]+-[A-Za-z0-9-]+$/
-// Signing secret: 32 hex chars per Slack docs (sometimes seen as
-// 64 in older docs — accept both lengths).
-const SIGNING_SECRET_RE = /^[a-f0-9]{32,64}$/
+// Signing secret: exactly 32 lowercase hex chars per Slack's
+// current spec. Round-1 audit on PR #48 narrowed this from {32,64}
+// to {32} — the wider range was a misread of historical docs.
+const SIGNING_SECRET_RE = /^[a-f0-9]{32}$/
+
+/**
+ * Maximum number of channels per agent paste. ECS task-def env
+ * values cap at 512 chars; with the JSON framing overhead
+ * (`{"channels":["C0XXXXXX","C0YYYYYY",...]}`), ~50 channel IDs
+ * is the practical ceiling before RegisterTaskDefinition starts
+ * 502'ing. Cap at the application layer with a clear 400 so the
+ * operator gets an actionable error instead of a cryptic AWS
+ * failure. Round-1 audit on PR #48.
+ */
+const MAX_CHANNELS_PER_AGENT = 50
 
 export interface SlackCredentialsRequest {
   appToken: string
@@ -185,6 +201,22 @@ function injectSlackIntoGateway(
   arns: SlackSecretArns,
   channelsConfigJson: string,
 ): ContainerDefinition[] {
+  // Defensive: ensure the gateway container exists before mapping.
+  // If the upstream task-def shape ever changes (e.g. a refactor
+  // renames the container) this map() would silently no-op and
+  // the credential paste would 200 with no actual injection. Loud
+  // failure here so the regression surfaces at PR-time / first
+  // dev test, not after months in prod. Round-1 Greptile P1 on
+  // PR #48.
+  const hasGateway = containers.some((c) => c.name === GATEWAY_CONTAINER_NAME)
+  if (!hasGateway) {
+    const err = new Error(
+      `Task-def has no '${GATEWAY_CONTAINER_NAME}' container — cannot inject Slack secrets. ` +
+        `Found containers: [${containers.map((c) => c.name).join(', ')}].`,
+    )
+    err.name = 'TaskDefinitionGatewayMissing'
+    throw err
+  }
   return containers.map((c) => {
     if (c.name !== GATEWAY_CONTAINER_NAME) return c
     const existingSecrets = (c.secrets ?? []).filter((s) => {
@@ -240,9 +272,15 @@ export async function POST(
   // (MC_AGENT_SECRETS_NAME_PREFIX unset). Beat 5a documented this
   // as a startup-assertable invariant; honoring it here rather
   // than letting the SecretsManager call 403/blow up later.
-  let secretsPrefix: string
+  //
+  // Round-1 audit on PR #48: the prefix is asserted here AND read
+  // again inside writeSlackSecrets. Since both calls hit the same
+  // process.env, this is just a redundant double-read — but the
+  // pattern was confusing (`void secretsPrefix` to suppress lint).
+  // Calling once and ignoring the value is now the explicit
+  // assertion; writeSlackSecrets's own call is a backstop.
   try {
-    secretsPrefix = requireSecretsPrefix()
+    requireSecretsPrefix()
   } catch (err) {
     return NextResponse.json(
       {
@@ -252,11 +290,6 @@ export async function POST(
       { status: 500 },
     )
   }
-  // The prefix is read here only for the env-var-presence assertion;
-  // the actual ARN construction happens inside writeSlackSecrets.
-  // Suppress the lint warning about an unused declaration with an
-  // explicit reference.
-  void secretsPrefix
 
   let body: unknown
   try {
@@ -286,9 +319,32 @@ export async function POST(
     )
   }
 
+  // Channel-list length cap — ECS task-def env values are capped at
+  // 512 chars; with JSON framing overhead each channel ID adds ~14
+  // chars + separators. ~50 channels is the practical ceiling.
+  // Bail with a clear 400 so an oversized list doesn't 502 deep
+  // inside RegisterTaskDefinition.
+  if ((body.channels?.length ?? 0) > MAX_CHANNELS_PER_AGENT) {
+    return NextResponse.json(
+      {
+        error: 'InvalidChannelList',
+        detail: `channels[] exceeds the ${MAX_CHANNELS_PER_AGENT}-channel cap (got ${body.channels!.length}). ECS task-def env values cap at 512 chars; reduce the channel count before pasting.`,
+      } satisfies SlackCredentialsErrorResponse,
+      { status: 400 },
+    )
+  }
+
   const fleetPrefix = resolveFleetPrefix()
   const clusterName = fleetPrefix.clusterName
   const serviceName = `${fleetPrefix.prefix}-companion-openclaw-${agentName}`
+
+  // Track whether secrets were successfully written before any
+  // post-write step fails. Used to surface a `hint` field on 502s
+  // so the operator knows a retry will succeed (the secrets are
+  // already there; they just need the task-def + service update
+  // to land). Round-1 audit on PR #48 flagged the missing
+  // signal-to-operator on partial-failure paths.
+  let secretsWritten = false
 
   try {
     // ================================================================
@@ -346,16 +402,26 @@ export async function POST(
       botToken: body.botToken,
       signingSecret: body.signingSecret,
     })
+    secretsWritten = true
 
     // ================================================================
-    // Step 3: Read live task-def
+    // Step 3: Read live task-def (with tags)
     // ================================================================
+    // `include: ['TAGS']` is load-bearing — without it
+    // DescribeTaskDefinition returns no tags, and the new revision
+    // we register would silently lose Project/Environment/AgentName
+    // labels. Round-1 audit on PR #48 caught this; the fix is the
+    // include hint + reading td.tags below. The tags from this
+    // response are returned at the top-level (not nested in
+    // taskDefinition), so destructure both.
     const describeTd = await ecsClient.send(
       new DescribeTaskDefinitionCommand({
         taskDefinition: currentTaskDefArn,
+        include: ['TAGS'],
       }),
     )
     const td = describeTd.taskDefinition
+    const existingTags = describeTd.tags ?? []
     if (!td || !td.containerDefinitions) {
       return NextResponse.json(
         {
@@ -380,13 +446,12 @@ export async function POST(
     const tdInput = stripReadOnlyFields({
       ...(td as unknown as Record<string, unknown>),
       containerDefinitions: newContainerDefs,
-      // Preserve the tags from the existing task-def so the new
-      // revision keeps the same Project/Environment/AgentName/etc.
-      // labels DescribeTaskDefinition returns the tags we want
-      // (DescribeTaskDefinition with include=['TAGS'] would expose
-      // them; we pass include here separately if needed). For now,
-      // tags are lifted off the existing td if present.
-      tags: (td as unknown as { tags?: unknown[] }).tags ?? [],
+      // Preserve the tags from the existing task-def's
+      // DescribeTaskDefinition response (read with include=['TAGS']
+      // above). Without this, the new revision would drop
+      // Project/Environment/AgentName/etc and break the resource-
+      // tag-based filtering the rest of the platform depends on.
+      tags: existingTags,
     })
 
     const registered = await ecsClient.send(
@@ -445,12 +510,22 @@ export async function POST(
         agentName,
         errorName: error.name,
         errorMessage: error.message,
+        secretsWritten,
       },
       '[fleet] slack-credentials: AWS error',
     )
+    // If secrets were already written but a downstream step
+    // (RegisterTaskDefinition / UpdateService) failed, surface a
+    // hint so the operator knows a retry is safe + cheap (the
+    // SecretsManager writes are idempotent; the retry just
+    // re-mutates the task-def). Round-1 audit on PR #48.
+    const detail = secretsWritten
+      ? 'Secrets were written successfully; retry to complete task-def registration + service redeploy.'
+      : undefined
     return NextResponse.json(
       {
         error: error.name || 'AWSError',
+        ...(detail ? { detail } : {}),
       } satisfies SlackCredentialsErrorResponse,
       { status: 502 },
     )

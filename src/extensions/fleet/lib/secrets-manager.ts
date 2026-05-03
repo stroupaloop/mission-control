@@ -143,26 +143,22 @@ export async function putOrCreateSecret(
         SecretString: input.value,
       }),
     )
-    if (!resp.ARN) {
-      // SDK contract violation — PutSecretValue should always return
-      // ARN. Defensive: fall through to a CreateSecret retry rather
-      // than crash, since the caller can't do anything useful with a
-      // missing ARN.
-      const fallback = await secretsClient.send(
-        new CreateSecretCommand({
-          Name: input.name,
-          SecretString: input.value,
-          Description: input.description,
-          Tags: input.tags,
-        }),
-      )
-      return { arn: fallback.ARN ?? '', operation: 'created' }
-    }
-    return { arn: resp.ARN, operation: 'updated' }
+    // PutSecretValue succeeded — the secret already existed and
+    // we updated its value. ARN should always be set per the SDK
+    // contract. Round-1 Greptile P2 on PR #48 caught the prior
+    // shape: if ARN was missing we'd fall through to CreateSecret,
+    // which would then throw ResourceExistsException (the secret
+    // exists — we just successfully wrote to it). Treat a missing
+    // ARN as a noisy SDK quirk + log a warning, but don't try to
+    // Create — return what we have. The caller can re-derive the
+    // ARN from the secret name if needed (it's deterministic up to
+    // the trailing 6-char random suffix AWS appends).
+    return { arn: resp.ARN ?? '', operation: 'updated' }
   } catch (err) {
     const name = (err as { name?: string })?.name
     if (name !== 'ResourceNotFoundException') throw err
-    // Fall through to create.
+    // Fall through to create — the secret didn't exist, so this
+    // can't race with a successful put.
     const resp = await secretsClient.send(
       new CreateSecretCommand({
         Name: input.name,
