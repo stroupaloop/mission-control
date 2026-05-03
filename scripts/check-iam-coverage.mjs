@@ -104,6 +104,12 @@ const GRANTED_ACTIONS = new Set([
   // ARNs only — the handler can't write anything outside that.
   // DeleteSecret intentionally omitted (cleanup-on-agent-delete is
   // a separate workflow tracked in ender-stack#270).
+  //
+  // `secretsmanager:DescribeSecret` is granted but not yet exercised
+  // by Beat 5b.2's putOrCreateSecret (which uses a Put-then-Create-
+  // on-NotFound pattern, no Describe call). Forward-looking — Beat
+  // 5b.3 (channels endpoint) may use it to surface secret-existence
+  // state to the operator without reading the value.
   'secretsmanager:CreateSecret',
   'secretsmanager:PutSecretValue',
   'secretsmanager:DescribeSecret',

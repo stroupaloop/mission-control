@@ -143,17 +143,31 @@ export async function putOrCreateSecret(
         SecretString: input.value,
       }),
     )
-    // PutSecretValue succeeded — the secret already existed and
-    // we updated its value. ARN should always be set per the SDK
-    // contract. Round-1 Greptile P2 on PR #48 caught the prior
-    // shape: if ARN was missing we'd fall through to CreateSecret,
-    // which would then throw ResourceExistsException (the secret
-    // exists — we just successfully wrote to it). Treat a missing
-    // ARN as a noisy SDK quirk + log a warning, but don't try to
-    // Create — return what we have. The caller can re-derive the
-    // ARN from the secret name if needed (it's deterministic up to
-    // the trailing 6-char random suffix AWS appends).
-    return { arn: resp.ARN ?? '', operation: 'updated' }
+    // PutSecretValue succeeded — the secret already existed and we
+    // updated its value. ARN should always be set per the SDK
+    // contract.
+    //
+    // Round-3 audit on PR #48 (P1): if ARN was missing, the prior
+    // shape returned `{ arn: '', operation: 'updated' }` — which
+    // silently propagated through writeSlackSecrets into the
+    // task-def's `secrets[].valueFrom`, causing an opaque ECS
+    // crash-loop at task-launch (the awslogs/exec path can't
+    // resolve `valueFrom: ''`). Throw loudly instead so the
+    // operator's POST returns a clear 502 + retry-is-safe hint
+    // rather than registering a broken task-def.
+    //
+    // Round-1 Greptile P2 already eliminated the worse failure of
+    // falling through to CreateSecret on missing ARN (which would
+    // throw ResourceExistsException). This change closes the
+    // remaining silent-fail path.
+    if (!resp.ARN) {
+      const err = new Error(
+        `PutSecretValue for "${input.name}" returned no ARN — refusing to register a task-def with an empty valueFrom. AWS SDK anomaly; safe to retry.`,
+      )
+      err.name = 'PutSecretValueMissingArn'
+      throw err
+    }
+    return { arn: resp.ARN, operation: 'updated' }
   } catch (err) {
     const name = (err as { name?: string })?.name
     if (name !== 'ResourceNotFoundException') throw err

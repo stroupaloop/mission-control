@@ -189,10 +189,12 @@ function validateChannelIds(channels: string[] | undefined): string | null {
 /**
  * RegisterTaskDefinition only accepts the SUBSET of fields that
  * DescribeTaskDefinition returns. Strip the read-only fields that
- * AWS adds at registration time (revision, ARN, registeredAt,
- * registeredBy, status, requiresAttributes, compatibilities) so the
- * mutated spec round-trips cleanly. Without this, RegisterTaskDef
- * 400s with InvalidParameterException naming the offending field.
+ * AWS adds at registration time (taskDefinitionArn, revision,
+ * status, requiresAttributes, compatibilities, registeredAt,
+ * registeredBy, and deregisteredAt for already-INACTIVE revisions)
+ * so the mutated spec round-trips cleanly. Without this,
+ * RegisterTaskDef 400s with InvalidParameterException naming the
+ * offending field.
  */
 function stripReadOnlyFields(
   td: Record<string, unknown>,
@@ -371,6 +373,27 @@ export async function POST(
     )
   }
 
+  // Belt-and-suspenders end-to-end size check — round-3 audit P2
+  // on PR #48 caught the worst case where 40+ valid-shape channel
+  // IDs serialize past ECS's 512-char env-value cap. The count +
+  // format checks above bound the input but don't guarantee the
+  // SERIALIZED form fits. Pre-compute + check NOW (before any AWS
+  // call) so an oversized list returns a clean 400 instead of
+  // failing deep inside RegisterTaskDefinition.
+  const channelsConfigJson = JSON.stringify({
+    channels: body.channels ?? [],
+  })
+  const ECS_ENV_VALUE_MAX = 512
+  if (channelsConfigJson.length > ECS_ENV_VALUE_MAX) {
+    return NextResponse.json(
+      {
+        error: 'InvalidChannelList',
+        detail: `channels JSON (${channelsConfigJson.length} chars) exceeds the ${ECS_ENV_VALUE_MAX}-char ECS env-value limit. Reduce the channel count.`,
+      } satisfies SlackCredentialsErrorResponse,
+      { status: 400 },
+    )
+  }
+
   const fleetPrefix = resolveFleetPrefix()
   const clusterName = fleetPrefix.clusterName
   const serviceName = `${fleetPrefix.prefix}-companion-openclaw-${agentName}`
@@ -486,9 +509,8 @@ export async function POST(
     // ================================================================
     // Step 4: Mutate gateway container + register new revision
     // ================================================================
-    const channelsConfigJson = JSON.stringify({
-      channels: body.channels ?? [],
-    })
+    // channelsConfigJson computed earlier (before AWS calls) so
+    // size-cap rejections return 400 instead of 502.
     const newContainerDefs = injectSlackIntoGateway(
       td.containerDefinitions,
       arns,
@@ -567,6 +589,23 @@ export async function POST(
       },
       '[fleet] slack-credentials: AWS error',
     )
+    // Emit a security audit event on failure paths too — round-3
+    // audit on PR #48 P2 noted that without this, an attacker
+    // probing the endpoint (or an operator repeatedly fat-fingering
+    // tokens) leaves zero security audit trail. The success-path
+    // event captures normal mutations; this captures everything
+    // that DIDN'T succeed. Token values still aren't logged
+    // (errorName + errorMessage are the AWS SDK's, no token
+    // material).
+    logSecurityEvent({
+      event_type: 'fleet.slack-credentials.failed',
+      severity: 'warning',
+      source: 'fleet',
+      agent_name: agentName,
+      detail:
+        `actor=${auth.user?.id} error=${error.name ?? 'AWSError'} ` +
+        `secretsAttempted=${secretsAttempted} taskDefRegistered=${newTaskDefArnIfRegistered ? 'yes' : 'no'}`,
+    })
     // Hint the operator about retry safety + dangling state.
     // PutSecretValue/CreateSecret are idempotent (round-1 audit
     // pattern), so a retry after ANY secrets-attempted failure is

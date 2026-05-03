@@ -666,6 +666,49 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     expect(json.detail ?? '').not.toContain('Secrets-write was attempted')
   })
 
+  it('throws PutSecretValueMissingArn when SDK returns no ARN (round-3 P1 — silent crash-loop guard)', async () => {
+    // Pre-fix: an empty ARN propagated through writeSlackSecrets to
+    // the task-def's secrets[].valueFrom, causing ECS to crash-loop
+    // at task-launch with an opaque error. Round-3 P1 fix throws
+    // loudly so the operator sees a clean 502 + safe-retry hint
+    // instead of a registered-but-broken task-def.
+    ecsSendMock.mockReset()
+    smSendMock.mockReset()
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ ARN: undefined }) // SDK anomaly
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('PutSecretValueMissingArn')
+    // Hint should fire — secrets-write was attempted (even if 1 of
+    // the 3 returned a quirky response).
+    expect(json.detail).toContain('Secrets-write was attempted')
+  })
+
+  it('returns 400 when serialized channels JSON exceeds 512-char ECS env limit (round-3 P2)', async () => {
+    // Worst case: 50 channels × ~15 chars + framing = ~814 chars,
+    // which exceeds the ECS env-value cap. The count + format
+    // checks bound the input shape but don't guarantee the
+    // serialized form fits. Final length check before
+    // RegisterTaskDefinition catches it cleanly.
+    const POST = await importHandler()
+    // 40 valid 13-char channel IDs would serialize to >512 chars.
+    const channels = Array.from(
+      { length: 40 },
+      (_, i) =>
+        `C${String(i).padStart(12, 'A').slice(0, 12).toUpperCase()}`,
+    )
+    const resp = await POST(
+      mkRequest({ ...validBody(), channels }),
+      mkParams(),
+    )
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('InvalidChannelList')
+    expect(json.detail).toContain('512-char')
+  })
+
   it('SIGNING_SECRET_RE rejects 64-char (round-1: narrowed to exactly 32)', async () => {
     const POST = await importHandler()
     const resp = await POST(
