@@ -1,0 +1,435 @@
+import { describe, expect, it, vi, beforeEach } from 'vitest'
+
+const ecsSendMock = vi.fn()
+const smSendMock = vi.fn()
+const fetchMock = vi.fn()
+
+vi.mock('@aws-sdk/client-ecs', () => ({
+  ECSClient: vi.fn().mockImplementation(() => ({ send: ecsSendMock })),
+  DescribeServicesCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DescribeServicesCommand',
+    input,
+  })),
+}))
+
+vi.mock('@aws-sdk/client-secrets-manager', () => ({
+  SecretsManagerClient: vi.fn().mockImplementation(() => ({ send: smSendMock })),
+  CreateSecretCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'CreateSecretCommand',
+    input,
+  })),
+  PutSecretValueCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'PutSecretValueCommand',
+    input,
+  })),
+  GetSecretValueCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'GetSecretValueCommand',
+    input,
+  })),
+}))
+
+vi.mock('@/lib/logger', () => ({
+  logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+}))
+
+vi.mock('@/lib/auth', () => ({
+  requireRole: vi.fn(() => ({ user: { id: 'test', role: 'admin' } })),
+}))
+
+const logSecurityEventMock = vi.fn()
+vi.mock('@/lib/security-events', () => ({
+  logSecurityEvent: logSecurityEventMock,
+}))
+
+const importHandler = async () => {
+  const mod = await import('../api/slack-channels')
+  return mod.GET
+}
+
+const setRequiredEnv = () => {
+  process.env.AWS_REGION = 'us-east-1'
+  process.env.MC_FLEET_CLUSTER_NAME = 'ender-stack-dev'
+  process.env.MC_FLEET_PROJECT_NAME = 'ender-stack'
+  process.env.MC_FLEET_ENVIRONMENT = 'dev'
+  process.env.MC_AGENT_SECRETS_NAME_PREFIX = 'ender-stack/dev/companion-openclaw'
+}
+
+const AGENT = 'hello-bot'
+const SERVICE_ARN = `arn:aws:ecs:us-east-1:398152419239:service/ender-stack-dev/ender-stack-dev-companion-openclaw-${AGENT}`
+const BOT_TOKEN = 'xoxb-test-token-NEVER-LOG-THIS'
+
+const mkRequest = () =>
+  ({
+    url: `http://localhost/api/fleet/agents/${AGENT}/slack/channels`,
+  }) as unknown as Parameters<Awaited<ReturnType<typeof importHandler>>>[0]
+
+const mkParams = (name: string = AGENT) => ({
+  params: Promise.resolve({ name }),
+})
+
+const mockHarnessService = () =>
+  ecsSendMock.mockResolvedValueOnce({
+    services: [
+      {
+        serviceArn: SERVICE_ARN,
+        status: 'ACTIVE',
+        tags: [
+          { key: 'Component', value: 'agent-harness' },
+          { key: 'ManagedBy', value: 'mission-control' },
+        ],
+      },
+    ],
+  })
+
+const slackOk = (channels: unknown[], nextCursor = '') => ({
+  ok: true,
+  status: 200,
+  headers: new Headers(),
+  json: async () => ({
+    ok: true,
+    channels,
+    response_metadata: { next_cursor: nextCursor },
+  }),
+})
+
+const slackErr = (code: string, status = 200) => ({
+  ok: status === 200,
+  status,
+  headers: new Headers(),
+  json: async () => ({ ok: false, error: code }),
+})
+
+beforeEach(() => {
+  setRequiredEnv()
+  ecsSendMock.mockReset()
+  smSendMock.mockReset()
+  fetchMock.mockReset()
+  logSecurityEventMock.mockReset()
+  vi.stubGlobal('fetch', fetchMock)
+})
+
+describe('GET /api/fleet/agents/:name/slack/channels — happy path', () => {
+  it('returns channels list with normalized field shape', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(
+      slackOk([
+        { id: 'C012ABCDEF', name: 'general', is_private: false, num_members: 42 },
+        { id: 'G987654321', name: 'private-team', is_private: true, num_members: 5 },
+      ]),
+    )
+
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      ok: boolean
+      agentName: string
+      channels: Array<{ id: string; name: string; isPrivate: boolean; numMembers?: number }>
+      truncated: boolean
+    }
+    expect(json.ok).toBe(true)
+    expect(json.agentName).toBe(AGENT)
+    expect(json.truncated).toBe(false)
+    expect(json.channels).toEqual([
+      { id: 'C012ABCDEF', name: 'general', isPrivate: false, numMembers: 42 },
+      { id: 'G987654321', name: 'private-team', isPrivate: true, numMembers: 5 },
+    ])
+  })
+
+  it('marks truncated=true when Slack returns a non-empty next_cursor', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(
+      slackOk([{ id: 'C0123456789', name: 'general', is_private: false }], 'cursor-abc'),
+    )
+
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as { truncated: boolean }
+    expect(json.truncated).toBe(true)
+  })
+
+  it('passes the bot token as Bearer auth on the Slack call', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackOk([]))
+
+    const GET = await importHandler()
+    await GET(mkRequest(), mkParams())
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(String(url)).toMatch(/^https:\/\/slack\.com\/api\/conversations\.list\?/)
+    expect(String(url)).toContain('limit=100')
+    expect(String(url)).toContain('types=public_channel%2Cprivate_channel')
+    expect(String(url)).toContain('exclude_archived=true')
+    expect((init as RequestInit).headers).toMatchObject({
+      Authorization: `Bearer ${BOT_TOKEN}`,
+    })
+  })
+
+  it('emits a security event with channel count + truncated flag, never the token', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(
+      slackOk([
+        { id: 'C0123456789', name: 'general', is_private: false },
+        { id: 'C9876543210', name: 'random', is_private: false },
+      ]),
+    )
+
+    const GET = await importHandler()
+    await GET(mkRequest(), mkParams())
+    expect(logSecurityEventMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event_type: 'fleet.slack-channels.listed',
+        agent_name: AGENT,
+        detail: expect.stringContaining('channels=2'),
+      }),
+    )
+    const callArgs = logSecurityEventMock.mock.calls[0]
+    const detail = (callArgs[0] as { detail: string }).detail
+    expect(detail).not.toContain(BOT_TOKEN)
+    expect(detail).toContain('truncated=false')
+  })
+})
+
+describe('GET /api/fleet/agents/:name/slack/channels — service-scope guard', () => {
+  it('returns 400 InvalidAgentName for malformed name', async () => {
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams('Invalid_Name'))
+    expect(resp.status).toBe(400)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('InvalidAgentName')
+    expect(ecsSendMock).not.toHaveBeenCalled()
+    expect(smSendMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 ServiceNotFoundException for missing service', async () => {
+    ecsSendMock.mockResolvedValueOnce({ services: [] })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('ServiceNotFoundException')
+    expect(smSendMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 (not 403) for non-MC-managed service to avoid enumeration', async () => {
+    ecsSendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn: SERVICE_ARN,
+          status: 'ACTIVE',
+          tags: [{ key: 'Component', value: 'litellm' }],
+        },
+      ],
+    })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('ServiceNotFoundException')
+  })
+
+  it('returns 404 for INACTIVE service', async () => {
+    ecsSendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn: SERVICE_ARN,
+          status: 'INACTIVE',
+          tags: [
+            { key: 'Component', value: 'agent-harness' },
+            { key: 'ManagedBy', value: 'mission-control' },
+          ],
+        },
+      ],
+    })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
+  })
+})
+
+describe('GET /api/fleet/agents/:name/slack/channels — bot-token paths', () => {
+  it('returns 404 SlackBotTokenNotFound when secret does not exist', async () => {
+    mockHarnessService()
+    smSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('not found'), {
+        name: 'ResourceNotFoundException',
+      }),
+    )
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('SlackBotTokenNotFound')
+    expect(json.detail).toContain('credential-paste')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 502 SlackBotTokenMalformed when SM returns no SecretString', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: undefined })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('SlackBotTokenMalformed')
+  })
+
+  it('returns 502 (not 404) on AccessDeniedException — IAM grant misconfigured', async () => {
+    mockHarnessService()
+    smSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('access denied'), {
+        name: 'AccessDeniedException',
+      }),
+    )
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('AccessDeniedException')
+  })
+})
+
+describe('GET /api/fleet/agents/:name/slack/channels — Slack-side errors', () => {
+  it('maps invalid_auth to 502 SlackAuthError with re-paste hint', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackErr('invalid_auth'))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('SlackAuthError')
+    expect(json.detail).toContain('Re-paste credentials')
+  })
+
+  it('maps token_revoked to SlackAuthError', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackErr('token_revoked'))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('SlackAuthError')
+  })
+
+  it('maps missing_scope to 502 SlackMissingScope with reinstall hint', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackErr('missing_scope'))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('SlackMissingScope')
+    expect(json.detail).toContain('Reinstall')
+  })
+
+  it('maps HTTP 429 to 429 SlackRateLimited with Retry-After header', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      headers: new Headers({ 'retry-after': '30' }),
+      json: async () => ({}),
+    })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(429)
+    expect(resp.headers.get('Retry-After')).toBe('30')
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('SlackRateLimited')
+  })
+
+  it('maps unknown Slack error to 502 SlackUnknownError', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackErr('account_inactive'))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('SlackUnknownError')
+  })
+
+  it('maps non-200 HTTP responses to SlackNetworkError', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      headers: new Headers(),
+      json: async () => ({}),
+    })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('SlackNetworkError')
+  })
+
+  it('maps fetch throw to SlackNetworkError', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockRejectedValueOnce(new Error('ECONNRESET'))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('SlackNetworkError')
+  })
+})
+
+describe('GET /api/fleet/agents/:name/slack/channels — token-non-leak', () => {
+  it('does not include the bot token in any 200-path response field', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackOk([{ id: 'C0123456789', name: 'g', is_private: false }]))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const text = JSON.stringify(await resp.json())
+    expect(text).not.toContain(BOT_TOKEN)
+  })
+
+  it('does not include the bot token in any error-path response field (Slack auth)', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackErr('invalid_auth'))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const text = JSON.stringify(await resp.json())
+    expect(text).not.toContain(BOT_TOKEN)
+  })
+
+  it('does not include the bot token in any error-path response field (network error)', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockRejectedValueOnce(new Error(`Failed to fetch with token=${BOT_TOKEN}`))
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const text = JSON.stringify(await resp.json())
+    // Even if a future fetch implementation echoed the token in
+    // the error message, our wrapper sanitizes it before
+    // surfacing to the caller. SlackNetworkError's message is
+    // generic; raw fetch error doesn't reach the response.
+    expect(text).not.toContain(BOT_TOKEN)
+  })
+
+  it('does not include the bot token in any security-event detail', async () => {
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ SecretString: BOT_TOKEN })
+    fetchMock.mockResolvedValueOnce(slackErr('invalid_auth'))
+    const GET = await importHandler()
+    await GET(mkRequest(), mkParams())
+    const allDetails = logSecurityEventMock.mock.calls
+      .map((c) => (c[0] as { detail: string }).detail)
+      .join(' ')
+    expect(allDetails).not.toContain(BOT_TOKEN)
+  })
+})

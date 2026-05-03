@@ -210,6 +210,7 @@ const fleetExtension: ExtensionManifest = {
     // own Slack tokens. Round-6 audit on PR #48 flagged the MCP
     // gap; this comment documents the deliberate omission.
     { path: '/fleet/agents/:name/slack/credentials', methods: ['POST'] },
+    { path: '/fleet/agents/:name/slack/channels', methods: ['GET'] },
     { path: '/fleet/harness-defaults', methods: ['GET'] },
   ],
   panels: [
