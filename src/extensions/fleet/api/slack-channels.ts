@@ -231,6 +231,22 @@ export async function GET(
       detail: `actor=${auth.user.id} error=${error.name ?? 'AWSError'}`,
     })
 
+    // Round-7 audit on PR #49: `getSlackBotToken` calls
+    // `requireSecretsPrefix()` internally as a defense-in-depth
+    // backstop. If the env var were deleted mid-request (unlikely
+    // but possible), the inner ConfigurationError would have
+    // fallen through to the generic 502 below — wrong status
+    // class for a server-config fault. Surface 500 here for
+    // parity with the upfront pre-check.
+    if (error.name === 'ConfigurationError') {
+      return NextResponse.json(
+        {
+          error: 'ConfigurationError',
+          detail: error.message,
+        } satisfies SlackChannelsErrorResponse,
+        { status: 500, headers: NO_STORE },
+      )
+    }
     if (error.name === 'SlackBotTokenNotFound') {
       return NextResponse.json(
         {

@@ -34,8 +34,9 @@ vi.mock('@/lib/logger', () => ({
   logger: { error: loggerErrorMock, warn: loggerWarnMock, info: vi.fn() },
 }))
 
+const requireRoleMock = vi.fn(() => ({ user: { id: 'test', role: 'admin' } }))
 vi.mock('@/lib/auth', () => ({
-  requireRole: vi.fn(() => ({ user: { id: 'test', role: 'admin' } })),
+  requireRole: requireRoleMock,
 }))
 
 const logSecurityEventMock = vi.fn()
@@ -121,6 +122,9 @@ beforeEach(() => {
   logSecurityEventMock.mockReset()
   loggerErrorMock.mockReset()
   loggerWarnMock.mockReset()
+  // Reset auth mock to the default authenticated-admin shape;
+  // individual tests override for 401/403 assertions.
+  requireRoleMock.mockReturnValue({ user: { id: 'test', role: 'admin' } })
   vi.stubGlobal('fetch', fetchMock)
 })
 
@@ -207,6 +211,36 @@ describe('GET /api/fleet/agents/:name/slack/channels — happy path', () => {
     const detail = (callArgs[0] as { detail: string }).detail
     expect(detail).not.toContain(BOT_TOKEN)
     expect(detail).toContain('truncated=false')
+  })
+})
+
+describe('GET /api/fleet/agents/:name/slack/channels — auth gate (round-7 audit on PR #49)', () => {
+  // The other sibling handler test files don't exercise the
+  // requireRole branches; the auditor flagged this as a
+  // nice-to-have insurance against accidentally removing the
+  // `if ('error' in auth)` branch without a build break. Cheap.
+  it('returns 401 when requireRole rejects with Unauthenticated', async () => {
+    requireRoleMock.mockReturnValueOnce({
+      error: 'Authentication required',
+      status: 401,
+    } as never)
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(401)
+    expect(ecsSendMock).not.toHaveBeenCalled()
+    expect(smSendMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('returns 403 when requireRole rejects with insufficient role', async () => {
+    requireRoleMock.mockReturnValueOnce({
+      error: 'Forbidden',
+      status: 403,
+    } as never)
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(403)
+    expect(ecsSendMock).not.toHaveBeenCalled()
   })
 })
 
@@ -351,6 +385,33 @@ describe('GET /api/fleet/agents/:name/slack/channels — bot-token paths', () =>
     const json = (await resp.json()) as { error: string; detail?: string }
     expect(json.error).toBe('SlackBotTokenMalformed')
     expect(json.detail).toContain('Re-paste credentials')
+  })
+
+  it('returns 500 ConfigurationError if it surfaces from getSlackBotToken (round-7 audit on PR #49)', async () => {
+    // Defensive branch: the upfront pre-check already returns
+    // 500 if MC_AGENT_SECRETS_NAME_PREFIX is unset. But
+    // getSlackBotToken calls requireSecretsPrefix internally as
+    // a backstop — if the env var were deleted mid-request
+    // (vanishingly unlikely but possible), the inner
+    // ConfigurationError would land in the step-2 catch and
+    // pre-fix would have surfaced as 502 (wrong status class
+    // for a server-config fault). The new explicit branch
+    // returns 500 instead. We simulate by throwing a synthetic
+    // ConfigurationError from the SM mock — getSlackBotToken's
+    // own catch re-throws non-RNFE errors, so it lands in the
+    // handler's step-2 catch.
+    mockHarnessService()
+    smSendMock.mockRejectedValueOnce(
+      Object.assign(
+        new Error('MC_AGENT_SECRETS_NAME_PREFIX is not set'),
+        { name: 'ConfigurationError' },
+      ),
+    )
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('ConfigurationError')
   })
 
   it('returns 502 (not 404) on AccessDeniedException — IAM grant misconfigured', async () => {
