@@ -123,7 +123,11 @@ export async function GET(
       )
     }
     const target = describe.services?.[0]
-    if (!target || target.status === 'INACTIVE') {
+    // ender-stack#277: tightened from `=== 'INACTIVE'` to
+    // `!== 'ACTIVE'` so DRAINING services (mid-stop / mid-deploy)
+    // are also rejected. Same shape as PR #48 round-2 + PR #49
+    // round-2 fixes for the credentials + channels handlers.
+    if (!target || target.status !== 'ACTIVE') {
       return NextResponse.json(
         {
           error: 'ServiceNotFoundException',
