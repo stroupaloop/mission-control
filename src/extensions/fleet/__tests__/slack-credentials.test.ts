@@ -678,6 +678,13 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     expect(json.error).toBe('TaskDefinitionInitMissing')
     expect(json.detail).toContain('Non-retriable')
     expect(json.detail).toContain("'init-config' container")
+    // Round-1 audit on PR #52: detail must clarify that the
+    // task-def was NOT updated — operator could otherwise read
+    // "secrets written" + "next paste will overwrite" as
+    // "gateway is configured-but-incomplete," when actually
+    // the live revision has zero references to the secrets.
+    expect(json.detail).toContain('task-def was NOT updated')
+    expect(json.detail).toContain('will not resolve')
     expect(json.detail).toContain('templates/openclaw.ts')
   })
 

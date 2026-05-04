@@ -31,10 +31,18 @@ import {
  *   3. Write the three secrets into AWS Secrets Manager via the
  *      Put-or-Create idempotent wrapper.
  *   4. Read the agent's live task-def (DescribeTaskDefinition).
- *   5. Mutate the gateway container's `secrets:` array (3 entries
- *      pointing at the SM ARNs from step 3) + push
- *      `OPENCLAW_SLACK_CONFIG_JSON` into the env block (channels
- *      payload from the request).
+ *   5. Mutate two containers in-place (split per ender-stack#286):
+ *      - **gateway**: add 3 secrets[] entries pointing at the SM
+ *        ARNs from step 3 (the runtime Slack plugin reads tokens
+ *        via process.env.SLACK_*).
+ *      - **init-config**: add OPENCLAW_SLACK_CONFIG_JSON to the env
+ *        block (init-config.sh consumes it once at boot to template
+ *        openclaw.json into the EFS config mount; the gateway then
+ *        reads the rendered file).
+ *      Channel list never reaches the gateway env; secret values
+ *      never reach the init container. Each mutation throws a
+ *      distinct error if its target container is missing
+ *      (TaskDefinitionGatewayMissing / TaskDefinitionInitMissing).
  *   6. RegisterTaskDefinition with the mutated spec → new revision.
  *   7. UpdateService(forceNewDeployment=true, taskDefinition=newArn)
  *      → ECS rolls the agent onto the new task-def.
@@ -713,12 +721,21 @@ export async function POST(
       // container; if it's missing, no retry will fix it
       // until the templates/openclaw.ts container shape is
       // realigned. Secrets may have already been added to
-      // the gateway, but we threw before RegisterTaskDefinition
-      // so the in-memory mutation never landed.
+      // the gateway in-memory, but we threw before
+      // RegisterTaskDefinition so neither the env nor the
+      // secrets[] entries landed on the live task-def.
+      //
+      // Round-1 audit on PR #52: tightened the detail string
+      // from "secrets will be overwritten on next paste" —
+      // that wording suggested the gateway was "configured
+      // but incomplete," when the actual state is: SM has
+      // the secret values, the live task-def has zero
+      // references to them.
       detail =
         "Non-retriable: the task-def has no 'init-config' container. " +
         'Check container names in templates/openclaw.ts vs. the registered task-def. ' +
-        'Secrets were written (idempotent) and will be overwritten on the next successful paste.'
+        'Secret values were written to Secrets Manager (idempotent) but the task-def was NOT updated — ' +
+        'the gateway will not resolve SLACK_APP_TOKEN / SLACK_BOT_TOKEN / SLACK_SIGNING_SECRET at runtime until a successful paste registers a new revision.'
     } else if (secretsAttempted) {
       detail =
         'Secrets-write was attempted (idempotent); retry is safe.'
