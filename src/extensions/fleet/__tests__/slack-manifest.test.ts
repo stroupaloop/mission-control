@@ -231,6 +231,14 @@ describe('GET /api/fleet/agents/:name/slack/manifest — refusal paths', () => {
     expect(resp.status).toBe(404)
   })
 
+  it('sets Cache-Control: no-store on the 404 (ender-stack#278 — sweep)', async () => {
+    ecsSendMock.mockResolvedValueOnce({ services: [] })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
+    expect(resp.headers.get('Cache-Control')).toBe('no-store')
+  })
+
   it('returns 404 when service status is DRAINING (ender-stack#277 — !== ACTIVE tightening)', async () => {
     // Pre-fix: `=== 'INACTIVE'` would let DRAINING services
     // through. Post-fix: any non-ACTIVE state is rejected.

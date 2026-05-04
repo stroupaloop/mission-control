@@ -455,6 +455,12 @@ describe('POST /api/fleet/agents/:name/slack/credentials — token validation', 
       mkParams(),
     )
     expect(resp.status).toBe(400)
+    const json = (await resp.json()) as {
+      error: string
+      fieldErrors?: Record<string, string>
+    }
+    expect(json.error).toBe('InvalidTokenShape')
+    expect(json.fieldErrors?.botToken).toContain('500-char limit')
   })
 
   it('returns 400 InvalidTokenShape when signingSecret exceeds 500-char limit', async () => {
@@ -465,6 +471,12 @@ describe('POST /api/fleet/agents/:name/slack/credentials — token validation', 
       mkParams(),
     )
     expect(resp.status).toBe(400)
+    const json = (await resp.json()) as {
+      error: string
+      fieldErrors?: Record<string, string>
+    }
+    expect(json.error).toBe('InvalidTokenShape')
+    expect(json.fieldErrors?.signingSecret).toContain('500-char limit')
   })
 })
 
