@@ -711,10 +711,17 @@ export async function POST(
     // pre-RegisterTaskDefinition).
     let detail: string | undefined
     if (error.name === 'TaskDefinitionGatewayMissing') {
+      // Round-2 audit on PR #52: aligned wording with
+      // TaskDefinitionInitMissing for operator clarity. The
+      // prior "secrets will be overwritten on next paste"
+      // phrasing was vague — both gateway-missing and
+      // init-missing throw BEFORE RegisterTaskDefinition, so
+      // the live task-def is unchanged in either case.
       detail =
         "Non-retriable: the task-def has no 'gateway' container. " +
         'Check container names in templates/openclaw.ts vs. the registered task-def. ' +
-        'Secrets were written (idempotent) and will be overwritten on the next successful paste.'
+        'Secret values were written to Secrets Manager (idempotent) but the task-def was NOT updated — ' +
+        'the gateway will not resolve SLACK_APP_TOKEN / SLACK_BOT_TOKEN / SLACK_SIGNING_SECRET at runtime until a successful paste registers a new revision.'
     } else if (error.name === 'TaskDefinitionInitMissing') {
       // ender-stack#286: same shape as gateway-missing.
       // Channel-config injection target is the init-config

@@ -646,6 +646,12 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     expect(json.detail).toContain('Non-retriable')
     expect(json.detail).toContain('templates/openclaw.ts')
     expect(json.detail).not.toContain('retry is safe')
+    // Round-2 audit on PR #52: GatewayMissing detail aligned
+    // with InitMissing wording — both throw before
+    // RegisterTaskDefinition, both leave the task-def
+    // unchanged. Wording must be consistent.
+    expect(json.detail).toContain('task-def was NOT updated')
+    expect(json.detail).toContain('will not resolve')
   })
 
   it('throws TaskDefinitionInitMissing when no init-config container exists (ender-stack#286)', async () => {
