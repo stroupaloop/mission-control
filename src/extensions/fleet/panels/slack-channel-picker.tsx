@@ -498,7 +498,7 @@ function SlackChannelMultiSelect({
               data-testid={`slack-channel-pill-${c.id}`}
             >
               <span className="font-mono">
-                {c.isPrivate ? '🔒' : '#'}
+                {c.isPrivate ? '🔒 ' : '# '}
                 {c.name}
               </span>
               <button
@@ -520,6 +520,7 @@ function SlackChannelMultiSelect({
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Search channels…"
+        aria-label="Search channels"
         data-testid="slack-channel-picker-search"
         className="w-full text-sm rounded-md border border-border bg-background px-2 py-1"
       />
@@ -533,7 +534,7 @@ function SlackChannelMultiSelect({
             className="text-xs text-muted-foreground p-2"
             data-testid="slack-channel-picker-no-matches"
           >
-            No channels match &ldquo;{query}&rdquo;.
+            No channels match &ldquo;{query.trim()}&rdquo;.
           </div>
         ) : (
           filtered.map((c) => {
