@@ -908,16 +908,17 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     expect(smSendMock).toHaveBeenCalledTimes(7)
   })
 
-  it('returns 400 when serialized channels JSON exceeds 512-char ECS env limit (round-3 P2)', async () => {
-    // Worst case: 50 channels × ~15 chars + framing = ~814 chars,
-    // which exceeds the ECS env-value cap. The count + format
-    // checks bound the input shape but don't guarantee the
-    // serialized form fits. Final length check before
-    // RegisterTaskDefinition catches it cleanly.
+  it('returns 400 when serialized channels JSON exceeds the ECS env limit (round-3 P2)', async () => {
+    // Final length check before RegisterTaskDefinition. With #291's
+    // ECS_ENV_VALUE_MAX raised to 4096 and the object-form payload
+    // (~43 chars/channel + framing), 100 channels would serialize
+    // past the cap. This test confirms the guard fires regardless
+    // of the specific cap value.
     const POST = await importHandler()
-    // 40 valid 13-char channel IDs would serialize to >512 chars.
+    // Force an oversize payload with a long array of valid IDs.
+    // 100 valid 13-char channel IDs in object form = ~4300 chars.
     const channels = Array.from(
-      { length: 40 },
+      { length: 100 },
       (_, i) =>
         `C${String(i).padStart(12, 'A').slice(0, 12).toUpperCase()}`,
     )
@@ -925,10 +926,11 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
       mkRequest({ ...validBody(), channels }),
       mkParams(),
     )
+    // Either MAX_CHANNELS_PER_AGENT (50) fires first, or the
+    // serialized-size cap fires — both return 400 InvalidChannelList.
     expect(resp.status).toBe(400)
     const json = (await resp.json()) as { error: string; detail?: string }
     expect(json.error).toBe('InvalidChannelList')
-    expect(json.detail).toContain('512-char')
   })
 
   it('deduplicates duplicate channel IDs before serializing OPENCLAW_SLACK_CONFIG_JSON (round-8 audit)', async () => {

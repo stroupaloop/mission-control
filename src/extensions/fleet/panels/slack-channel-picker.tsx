@@ -426,6 +426,13 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
         </div>
       ) : (
         <SlackChannelMultiSelect
+          // Round-1 audit on PR #57 (claude-bot P3): force remount
+          // on context switch so the local search query state
+          // doesn't survive an agent change or credentials refresh.
+          // Without this, an operator who saved a query like
+          // "alpha" then switched agents would see a partially
+          // filtered list with no obvious cause.
+          key={`${agentName}:${reloadKey}`}
           channels={state.channels}
           selected={selected}
           onToggle={toggleChannel}

@@ -56,8 +56,22 @@ export const MAX_CHANNELS_PER_AGENT = 50
  */
 export const CHANNEL_ID_RE = /^[CGD][A-Z0-9]{8,12}$/
 
-/** ECS task-def env-value cap. */
-export const ECS_ENV_VALUE_MAX = 512
+/**
+ * App-level cap on serialized OPENCLAW_SLACK_CONFIG_JSON length.
+ * AWS ECS env values hard-cap much higher (~32 KiB); the
+ * conservative app-level limit gives an operator-actionable 400
+ * instead of a deep RegisterTaskDefinition failure.
+ *
+ * Round-1 audit on PR #57 (greptile P1, claude-bot P1): the
+ * object-form payload (#291) is ~3× larger per channel
+ * (`{"id":"C0123456789","requireMention":true}` ≈ 42 chars vs.
+ * `"C0123456789"` ≈ 13 chars). At the prior 512-char cap the new
+ * shape capped operators at ~11 channels — well below
+ * MAX_CHANNELS_PER_AGENT=50, making the UI cap effectively dead
+ * code. Raised to 4096 so 50 channels in object form fit with
+ * headroom (50 × ~43 + 14 framing ≈ 2164 chars).
+ */
+export const ECS_ENV_VALUE_MAX = 4096
 
 /**
  * Per-channel config (ender-stack#291). Today carries reply-mode
@@ -200,9 +214,22 @@ export interface SerializedChannelInputs {
 
 /**
  * Dedupe + normalize + serialize the new ChannelInput list (#291).
- * Dedup keys on `id` so a string + an object form for the same
- * channel collapse to one entry; the object form wins (richer
- * config). The on-the-wire shape is
+ * Dedup keys on `id`. Resolution rules when the same id appears
+ * more than once:
+ *   - Object form always wins over string form (object carries
+ *     explicit operator intent for requireMention; string is the
+ *     mention-gated default).
+ *   - Object + Object: last-writer-wins (operator's later choice
+ *     overrides the earlier one — matches the in-memory Map
+ *     semantics on the picker side and keeps the dedup
+ *     deterministic).
+ *
+ * Round-1 audit on PR #57 (greptile P2, claude-bot P2): simplified
+ * the skip clause — the prior `existing.requireMention !== undefined`
+ * was always true since normalizeChannelInput sets it to a
+ * concrete boolean.
+ *
+ * The on-the-wire shape is
  *   {"channels":[{"id":"C123","requireMention":true},...]}
  * which init-config.sh's normalizeChannelInput accepts.
  */
@@ -212,13 +239,11 @@ export function serializeChannelInputs(
   const byId = new Map<string, ChannelConfig>()
   for (const c of rawChannels ?? []) {
     const normalized = normalizeChannelInput(c)
-    // Object form wins over a prior string form (richer config).
-    const existing = byId.get(normalized.id)
-    if (
-      existing &&
-      typeof c === 'string' &&
-      existing.requireMention !== undefined
-    ) {
+    // Skip a string entry when the id is already in the map —
+    // the existing entry came from either an earlier string
+    // (first-writer wins on string+string) or an earlier object
+    // form (object wins). Object entries always overwrite.
+    if (byId.has(normalized.id) && typeof c === 'string') {
       continue
     }
     byId.set(normalized.id, normalized)
