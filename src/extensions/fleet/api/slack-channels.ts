@@ -683,14 +683,29 @@ export async function PUT(
       '[fleet] slack-channels PUT: AWS error',
     )
 
-    logSecurityEvent({
-      event_type: 'fleet.slack-channels.update-failed',
-      severity:
-        error.name === 'AccessDeniedException' ? 'warning' : 'info',
-      source: 'fleet',
-      agent_name: agentName,
-      detail: `actor=${auth.user.id} error=${error.name ?? 'AWSError'} taskDefRegistered=${newTaskDefArnIfRegistered ? 'yes' : 'no'}`,
-    })
+    // Round-2 audit on PR #55 (claude-bot): same isolation as
+    // the success path — an unguarded throw here would produce
+    // a framework 500 (no Cache-Control: no-store, no
+    // dangling-revision detail) instead of the structured 502.
+    try {
+      logSecurityEvent({
+        event_type: 'fleet.slack-channels.update-failed',
+        severity:
+          error.name === 'AccessDeniedException' ? 'warning' : 'info',
+        source: 'fleet',
+        agent_name: agentName,
+        detail: `actor=${auth.user.id} error=${error.name ?? 'AWSError'} taskDefRegistered=${newTaskDefArnIfRegistered ? 'yes' : 'no'}`,
+      })
+    } catch (logErr) {
+      logger.error(
+        {
+          agentName,
+          errorName: (logErr as Error).name,
+          errorMessage: (logErr as Error).message,
+        },
+        '[fleet] slack-channels PUT: failure-audit-log write failed',
+      )
+    }
 
     if (error.name === 'TaskDefinitionInitMissing') {
       return NextResponse.json(
