@@ -519,6 +519,19 @@ export async function PUT(
         include: ['TAGS'],
       }),
     )
+    // Round-1 audit on PR #55 (claude-bot): mirror GET handler's
+    // failures diagnostic so a surprising 404 has log context
+    // (cluster-not-found, IAM issue, etc.).
+    if (describe.failures && describe.failures.length > 0) {
+      logger.warn(
+        {
+          cluster: clusterName,
+          serviceName,
+          failures: describe.failures,
+        },
+        '[fleet] slack-channels PUT: DescribeServices returned failures',
+      )
+    }
     const target = describe.services?.[0]
     if (!target || target.status !== 'ACTIVE') {
       return NextResponse.json(
@@ -543,7 +556,21 @@ export async function PUT(
 
     // Step 2: read the live task-def (with TAGS so the new
     // revision preserves Project/Environment/AgentName/etc).
-    const liveTaskDefArn = target.taskDefinition!
+    // Round-1 audits on PR #55 (claude-bot + greptile): an ACTIVE
+    // service should always have a taskDefinition ARN, but the
+    // ECS Service type models it as optional. A defensive guard
+    // surfaces the surprise as a descriptive 502 instead of a
+    // generic AWS error from passing undefined to DescribeTaskDef.
+    const liveTaskDefArn = target.taskDefinition
+    if (!liveTaskDefArn) {
+      return NextResponse.json(
+        {
+          error: 'ServiceTaskDefinitionMissing',
+          detail: `Service "${agentName}" is ACTIVE but has no current task definition ARN`,
+        } satisfies SlackChannelsErrorResponse,
+        { status: 502, headers: NO_STORE },
+      )
+    }
     const tdResp = await ecsClient.send(
       new DescribeTaskDefinitionCommand({
         taskDefinition: liveTaskDefArn,

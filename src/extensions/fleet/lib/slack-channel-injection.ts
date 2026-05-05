@@ -45,6 +45,14 @@ export const MAX_CHANNELS_PER_AGENT = 50
  * `G[A-Z0-9]{8,10}` for private groups, `D[A-Z0-9]{8,10}` for DMs.
  * 9-13 chars total. The picker only surfaces public + private
  * (DMs aren't useful to subscribe to as a channel-list entry).
+ *
+ * Uppercase-only assumption (round-1 audit on PR #55, claude-bot):
+ * Slack returns all-uppercase channel IDs in the conversations.list
+ * v2 response. If a future workspace API ever returns lowercase
+ * IDs, the picker would display them but PUT /channels would
+ * reject them on Save — a confusing UX failure with no operator
+ * action. If that happens, broaden to `[A-Za-z0-9]` here and
+ * mirror the change in the openapi.json `pattern`.
  */
 export const CHANNEL_ID_RE = /^[CGD][A-Z0-9]{8,12}$/
 

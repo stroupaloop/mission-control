@@ -13615,7 +13615,7 @@
             }
           },
           "502": {
-            "description": "AWS-side error. TaskDefinitionInitMissing = task-def has no init-config container (non-retriable). Other names (RegisterTaskDefinitionFailed, AccessDeniedException, ThrottlingException, etc.) are bundled as a prose description; if a new revision was registered before UpdateService failed, the detail will note the dangling revision.",
+            "description": "AWS-side error. TaskDefinitionInitMissing = task-def has no init-config container (non-retriable). ServiceTaskDefinitionMissing = ACTIVE service has no current task-def ARN (defensive — should never happen in practice). Other names (RegisterTaskDefinitionFailed, AccessDeniedException, ThrottlingException, etc.) are bundled as a prose description; if a new revision was registered before UpdateService failed, the detail will note the dangling revision.",
             "content": {
               "application/json": {
                 "schema": {

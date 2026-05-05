@@ -78,6 +78,29 @@ type SaveState =
       body: SlackChannelsErrorResponse
     }
 
+/**
+ * Pure helper: prune a selection Set to the intersection with
+ * the given channel list. Returns the same Set ref when no
+ * pruning is needed so React skips a re-render.
+ *
+ * Round-1 audits on PR #55 (claude-bot + greptile, ender-stack#283):
+ * extracted from the inline fetch-success setState branch so the
+ * filter logic is unit-testable. The inline call site is
+ * defensive code today (no operator-reachable path bumps
+ * retryKey while selections are non-empty), but lives in the
+ * pipeline so future refresh paths inherit the safety.
+ */
+export function pruneSelectedToChannels(
+  selected: Set<string>,
+  channels: Array<{ id: string } | string>,
+): Set<string> {
+  const validIds = new Set(
+    channels.map((c) => (typeof c === 'string' ? c : c.id)),
+  )
+  const filtered = new Set([...selected].filter((id) => validIds.has(id)))
+  return filtered.size === selected.size ? selected : filtered
+}
+
 export function SlackChannelPicker({ agentName, reloadKey }: Props) {
   const [state, setState] = useState<FetchState>({ kind: 'idle' })
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -157,15 +180,7 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
             // because PUT returned 501; post-#283 the stale IDs
             // would PUT to the server. Filter to the
             // intersection at the success boundary.
-            setSelected((prev) => {
-              const validIds = new Set(body.channels.map((c) => c.id))
-              const filtered = new Set(
-                [...prev].filter((id) => validIds.has(id)),
-              )
-              // Stable ref if unchanged so React doesn't re-render
-              // the checkbox grid for a no-op change.
-              return filtered.size === prev.size ? prev : filtered
-            })
+            setSelected((prev) => pruneSelectedToChannels(prev, body.channels))
           }
           return
         }

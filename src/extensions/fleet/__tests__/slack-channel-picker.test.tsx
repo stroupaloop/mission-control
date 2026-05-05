@@ -1,6 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { SlackChannelPicker } from '../panels/slack-channel-picker'
+import {
+  SlackChannelPicker,
+  pruneSelectedToChannels,
+} from '../panels/slack-channel-picker'
 
 const fetchMock = vi.fn()
 
@@ -264,46 +267,48 @@ describe('<SlackChannelPicker />', () => {
     )
   })
 
-  it('ghost-selection filter — selections drop when channels disappear after a refetch (#283 cleanup)', async () => {
-    // First fetch returns 2 channels. Operator picks both.
-    // Reload (e.g., credentials refresh) returns only 1 of them
-    // (the other got deleted in Slack). Selection prunes to the
-    // intersection — pre-#283 this was benign because PUT 501;
-    // post-#283 stale IDs would PUT to the server.
-    fetchMock
-      .mockResolvedValueOnce(okResp(sampleChannels))
-      .mockResolvedValueOnce(
-        okResp({
-          ...sampleChannels,
-          channels: [sampleChannels.channels[0]],
-        }),
-      )
-    const { rerender } = render(
-      <SlackChannelPicker agentName={AGENT} reloadKey={0} />,
-    )
-    await screen.findByTestId('slack-channel-checkbox-C0123456789')
-    fireEvent.click(
-      screen.getByTestId('slack-channel-checkbox-C0123456789'),
-    )
-    fireEvent.click(screen.getByTestId('slack-channel-checkbox-G987654321'))
+  it('ghost-selection filter — pruneSelectedToChannels prunes stale IDs to intersection (#283 cleanup)', () => {
+    // Round-1 audits on PR #55 (claude-bot + greptile): the
+    // ghost-filter at the fetch-success setState boundary only
+    // matters on the retryKey path (reloadKey clears
+    // unconditionally via the separate effect at
+    // panels/slack-channel-picker.tsx:111-113). The retryKey
+    // path is only operator-reachable by clicking the Retry
+    // button in the error UI — and that error UI doesn't show
+    // checkboxes, so the operator can't have selected anything
+    // yet. Today the inline filter is defensive code without a
+    // live trigger path.
+    //
+    // The PURE prune function exported from the picker module
+    // is unit-tested here so a regression in the filter
+    // expression itself is caught. If a future refresh path is
+    // added (e.g. a "Refresh channel list" button without a
+    // corresponding clear), the inline call site becomes
+    // operator-reachable and the integration coverage will
+    // need to follow.
     expect(
-      screen.getByTestId('slack-channel-picker').textContent,
-    ).toContain('Selected: 2')
-    // Reload — bumps reloadKey, normally clears selection. To
-    // exercise the ghost-filter we instead bump retryKey-style
-    // (use the Retry path by faking an error first). Skip the
-    // reloadKey path since it clears unconditionally.
-    // The simpler test: assert that on a fresh fetch where one
-    // selected channel is missing, the prune logic runs.
-    rerender(<SlackChannelPicker agentName={AGENT} reloadKey={1} />)
-    // reloadKey reset → 0, but in our success branch we also
-    // run the ghost-filter; assert size matches the new channel
-    // list intersection.
-    await waitFor(() =>
-      expect(
-        screen.getByTestId('slack-channel-picker').textContent,
-      ).toContain('Selected: 0'),
-    )
+      pruneSelectedToChannels(
+        new Set(['C0123456789', 'G987654321']),
+        ['C0123456789'],
+      ),
+    ).toEqual(new Set(['C0123456789']))
+
+    // No-op when intersection equals input — same Set ref returned.
+    const noOpInput = new Set(['C0123456789'])
+    expect(
+      pruneSelectedToChannels(noOpInput, ['C0123456789', 'G987654321']),
+    ).toBe(noOpInput)
+
+    // All stale → empty result.
+    expect(
+      pruneSelectedToChannels(new Set(['C0123456789']), ['G987654321']),
+    ).toEqual(new Set())
+
+    // Empty input → empty result, same ref.
+    const emptyInput = new Set<string>()
+    expect(
+      pruneSelectedToChannels(emptyInput, ['C0123456789']),
+    ).toBe(emptyInput)
   })
 
   it('Save button shows ✓ on success', async () => {

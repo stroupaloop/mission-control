@@ -82,12 +82,16 @@ const mkParams = (name: string = AGENT) => ({
   params: Promise.resolve({ name }),
 })
 
+const TASK_DEF_ARN_OLD =
+  'arn:aws:ecs:us-east-1:398152419239:task-definition/ender-stack-dev-companion-openclaw-hello-bot:7'
+
 const mockHarnessService = () =>
   ecsSendMock.mockResolvedValueOnce({
     services: [
       {
         serviceArn: SERVICE_ARN,
         status: 'ACTIVE',
+        taskDefinition: TASK_DEF_ARN_OLD,
         tags: [
           { key: 'Component', value: 'agent-harness' },
           { key: 'ManagedBy', value: 'mission-control' },
@@ -881,8 +885,6 @@ describe('PUT /api/fleet/agents/:name/slack/channels — channels-only update (#
     return mod.PUT
   }
 
-  const TASK_DEF_ARN_OLD =
-    'arn:aws:ecs:us-east-1:398152419239:task-definition/ender-stack-dev-companion-openclaw-hello-bot:7'
   const TASK_DEF_ARN_NEW =
     'arn:aws:ecs:us-east-1:398152419239:task-definition/ender-stack-dev-companion-openclaw-hello-bot:8'
 
