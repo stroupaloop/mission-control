@@ -147,6 +147,25 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
               channels: body.channels,
               truncated: body.truncated,
             })
+            // Round-5 audit on PR #51 (#283 cleanup item):
+            // ghost-selection filter. The picker preserves
+            // `selected` across transient-error retries (correct
+            // UX). But if the retry yields a different channel
+            // list (a channel was deleted or un-invited between
+            // fetch + retry), `selected` retains IDs no longer
+            // in `state.channels`. Pre-#283 this was benign
+            // because PUT returned 501; post-#283 the stale IDs
+            // would PUT to the server. Filter to the
+            // intersection at the success boundary.
+            setSelected((prev) => {
+              const validIds = new Set(body.channels.map((c) => c.id))
+              const filtered = new Set(
+                [...prev].filter((id) => validIds.has(id)),
+              )
+              // Stable ref if unchanged so React doesn't re-render
+              // the checkbox grid for a no-op change.
+              return filtered.size === prev.size ? prev : filtered
+            })
           }
           return
         }
@@ -403,20 +422,6 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
           {saveState.body.detail ? (
             <div className="mt-1">
               <code>{saveState.body.detail}</code>
-            </div>
-          ) : null}
-          {/*
-            TODO(ender-stack#283): when the real PUT handler
-            ships, remove this entire 501 branch. The
-            corresponding test in slack-channel-picker.test.tsx
-            (`Save button surfaces 501 with ender-stack#283
-            hint`) and the slack-channels.ts PUT stub need to
-            move in the same PR.
-          */}
-          {saveState.status === 501 ? (
-            <div className="mt-1">
-              Channels-update endpoint isn&apos;t implemented yet —
-              tracked as ender-stack#283.
             </div>
           ) : null}
         </div>
