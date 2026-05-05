@@ -203,12 +203,18 @@ export function SlackManifestDisplay({ agentName }: Props) {
     // Fallback: legacy execCommand. The Clipboard API requires a
     // secure context (HTTPS/localhost). MC is served over the
     // internal ALB which can be HTTP; without this fallback the
-    // copy button silently failed for every operator. document
-    // .execCommand('copy') is deprecated but still universally
-    // supported and works in plain HTTP contexts.
+    // copy button silently failed for every operator.
+    // document.execCommand('copy') is deprecated but still
+    // universally supported and works in plain HTTP contexts.
+    //
+    // Round-1 audits on PR #58 (greptile P1 + claude-bot): the
+    // textarea cleanup MUST be in a finally block — if
+    // execCommand throws, the prior try/catch left the hidden
+    // textarea attached to <body> on every failed copy attempt
+    // (DOM leak).
     if (!success && typeof document !== 'undefined') {
+      const ta = document.createElement('textarea')
       try {
-        const ta = document.createElement('textarea')
         ta.value = text
         ta.setAttribute('readonly', '')
         ta.style.position = 'fixed'
@@ -218,9 +224,10 @@ export function SlackManifestDisplay({ agentName }: Props) {
         document.body.appendChild(ta)
         ta.select()
         success = document.execCommand('copy')
-        document.body.removeChild(ta)
       } catch {
         success = false
+      } finally {
+        if (ta.parentNode) ta.parentNode.removeChild(ta)
       }
     }
 
