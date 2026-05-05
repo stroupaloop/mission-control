@@ -64,17 +64,17 @@ describe('<SlackChannelPicker />', () => {
     expect(list.textContent).toContain('#')
   })
 
-  it('toggles row aria-pressed state on click', async () => {
+  it('toggles row aria-selected state on click (listbox semantic)', async () => {
     fetchMock.mockResolvedValueOnce(okResp(sampleChannels))
     render(<SlackChannelPicker agentName={AGENT} reloadKey={0} />)
     const row = await screen.findByTestId(
       'slack-channel-row-C0123456789',
     )
-    expect(row.getAttribute('aria-pressed')).toBe('false')
+    expect(row.getAttribute('aria-selected')).toBe('false')
     fireEvent.click(row)
-    expect(row.getAttribute('aria-pressed')).toBe('true')
+    expect(row.getAttribute('aria-selected')).toBe('true')
     fireEvent.click(row)
-    expect(row.getAttribute('aria-pressed')).toBe('false')
+    expect(row.getAttribute('aria-selected')).toBe('false')
   })
 
   it('Save button disabled until at least one channel selected', async () => {

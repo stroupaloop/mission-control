@@ -521,11 +521,18 @@ function SlackChannelMultiSelect({
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Search channels…"
         aria-label="Search channels"
+        role="combobox"
+        aria-expanded={filtered.length > 0}
+        aria-controls="slack-channel-filtered-list"
         data-testid="slack-channel-picker-search"
         className="w-full text-sm rounded-md border border-border bg-background px-2 py-1"
       />
 
       <div
+        id="slack-channel-filtered-list"
+        role="listbox"
+        aria-multiselectable="true"
+        aria-label="Channels"
         className="max-h-64 overflow-y-auto border border-border rounded-md bg-secondary divide-y divide-border"
         data-testid="slack-channel-picker-filtered-list"
       >
@@ -544,7 +551,8 @@ function SlackChannelMultiSelect({
                 key={c.id}
                 type="button"
                 onClick={() => onToggle(c.id)}
-                aria-pressed={isSelected}
+                role="option"
+                aria-selected={isSelected}
                 data-testid={`slack-channel-row-${c.id}`}
                 className={`w-full flex items-center gap-2 text-xs text-left px-2 py-1 hover:bg-background/50 ${
                   isSelected ? 'bg-primary/5' : ''
