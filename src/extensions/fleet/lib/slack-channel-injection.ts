@@ -60,6 +60,45 @@ export const CHANNEL_ID_RE = /^[CGD][A-Z0-9]{8,12}$/
 export const ECS_ENV_VALUE_MAX = 512
 
 /**
+ * Per-channel config (ender-stack#291). Today carries reply-mode
+ * preference; the type is intentionally extensible if OpenClaw
+ * surfaces more per-channel knobs (visibleReplies override,
+ * customSystemPrompt, etc.).
+ */
+export interface ChannelConfig {
+  id: string
+  /**
+   * If true (default): respond only on explicit @bot mentions
+   * (matches OpenClaw's mention-gated default). If false:
+   * respond to all messages in the channel.
+   */
+  requireMention: boolean
+}
+
+/**
+ * Caller-supplied channel reference. Accepts either the legacy
+ * string-ID form (treated as `{id, requireMention: true}`) or
+ * the new explicit object form. Both encode through serialize-
+ * ChannelInputs into the same on-the-wire shape that
+ * init-config.sh consumes (ender-stack#291).
+ */
+export type ChannelInput = string | ChannelConfig
+
+/**
+ * Normalize ChannelInput -> ChannelConfig with mention-gated
+ * default. Strings become `{id, requireMention: true}` (the
+ * OpenClaw default for safety; opt-in to always-reply).
+ */
+export function normalizeChannelInput(c: ChannelInput): ChannelConfig {
+  if (typeof c === 'string') return { id: c, requireMention: true }
+  return {
+    id: c.id,
+    requireMention:
+      typeof c.requireMention === 'boolean' ? c.requireMention : true,
+  }
+}
+
+/**
  * Validate every channel ID matches the Slack format. Returns
  * a human-readable error message if any item fails, or null if
  * the list is acceptable. Round-2 audit on PR #48: per-item
@@ -84,6 +123,40 @@ export function validateChannelIds(
   return null
 }
 
+/**
+ * Validate a list of ChannelInput entries (#291). Same per-item
+ * format check as validateChannelIds, but accepts the object
+ * form too; rejects malformed shapes (non-string id, non-boolean
+ * requireMention).
+ */
+export function validateChannelInputs(
+  channels: ChannelInput[] | undefined,
+): string | null {
+  if (!channels || channels.length === 0) return null
+  for (const c of channels) {
+    if (typeof c === 'string') {
+      if (!CHANNEL_ID_RE.test(c)) {
+        return `Channel ID "${c.slice(0, 30)}" doesn't match Slack format ([CGD] + 8-12 alphanumerics)`
+      }
+      continue
+    }
+    if (!c || typeof c !== 'object' || typeof c.id !== 'string') {
+      return `Channel entry must be a string or { id, requireMention? } object`
+    }
+    if (!CHANNEL_ID_RE.test(c.id)) {
+      return `Channel ID "${c.id.slice(0, 30)}" doesn't match Slack format ([CGD] + 8-12 alphanumerics)`
+    }
+    if (
+      'requireMention' in c &&
+      c.requireMention !== undefined &&
+      typeof c.requireMention !== 'boolean'
+    ) {
+      return `Channel "${c.id}".requireMention must be a boolean if provided`
+    }
+  }
+  return null
+}
+
 export interface SerializedChannels {
   /** The JSON string written into OPENCLAW_SLACK_CONFIG_JSON. */
   json: string
@@ -101,6 +174,9 @@ export interface SerializedChannels {
  * message if the serialized form exceeds ECS_ENV_VALUE_MAX
  * (catches the case where 40+ valid-shape 13-char IDs serialize
  * past 512 chars even with the count + format checks in place).
+ *
+ * String-only legacy form. New code should use serializeChannelInputs
+ * to round-trip per-channel requireMention (#291).
  */
 export function serializeChannels(
   rawChannels: string[] | undefined,
@@ -113,6 +189,48 @@ export function serializeChannels(
     }
   }
   return { json, channels: dedupedChannels }
+}
+
+export interface SerializedChannelInputs {
+  /** The JSON string written into OPENCLAW_SLACK_CONFIG_JSON. */
+  json: string
+  /** Deduped, normalized config objects (one per unique channel ID). */
+  channels: ChannelConfig[]
+}
+
+/**
+ * Dedupe + normalize + serialize the new ChannelInput list (#291).
+ * Dedup keys on `id` so a string + an object form for the same
+ * channel collapse to one entry; the object form wins (richer
+ * config). The on-the-wire shape is
+ *   {"channels":[{"id":"C123","requireMention":true},...]}
+ * which init-config.sh's normalizeChannelInput accepts.
+ */
+export function serializeChannelInputs(
+  rawChannels: ChannelInput[] | undefined,
+): SerializedChannelInputs | { error: string } {
+  const byId = new Map<string, ChannelConfig>()
+  for (const c of rawChannels ?? []) {
+    const normalized = normalizeChannelInput(c)
+    // Object form wins over a prior string form (richer config).
+    const existing = byId.get(normalized.id)
+    if (
+      existing &&
+      typeof c === 'string' &&
+      existing.requireMention !== undefined
+    ) {
+      continue
+    }
+    byId.set(normalized.id, normalized)
+  }
+  const channels = [...byId.values()]
+  const json = JSON.stringify({ channels })
+  if (json.length > ECS_ENV_VALUE_MAX) {
+    return {
+      error: `channels JSON (${json.length} chars) exceeds the ${ECS_ENV_VALUE_MAX}-char ECS env-value limit. Reduce the channel count.`,
+    }
+  }
+  return { json, channels }
 }
 
 /**

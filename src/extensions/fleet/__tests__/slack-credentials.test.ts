@@ -958,10 +958,15 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
       (e) => e.name === 'OPENCLAW_SLACK_CONFIG_JSON',
     )
     expect(slackConfigEnv).toBeDefined()
-    const parsed = JSON.parse(slackConfigEnv!.value) as { channels: string[] }
-    // Set preserves first-occurrence order: dedupe of
-    // [a, b, a] → [a, b], not [b, a].
-    expect(parsed.channels).toEqual(['C0123456789', 'C9876543210'])
+    const parsed = JSON.parse(slackConfigEnv!.value) as {
+      channels: Array<{ id: string; requireMention: boolean }>
+    }
+    // ender-stack#291: object form on the wire; first-occurrence
+    // order preserved through dedupe.
+    expect(parsed.channels).toEqual([
+      { id: 'C0123456789', requireMention: true },
+      { id: 'C9876543210', requireMention: true },
+    ])
   })
 
   it('SIGNING_SECRET_RE rejects 64-char (round-1: narrowed to exactly 32)', async () => {
