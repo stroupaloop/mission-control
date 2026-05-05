@@ -632,13 +632,33 @@ export async function PUT(
       (d) => d.status === 'PRIMARY',
     )?.id
 
-    logSecurityEvent({
-      event_type: 'fleet.slack-channels.updated',
-      severity: 'info',
-      source: 'fleet',
-      agent_name: agentName,
-      detail: `actor=${auth.user.id} channels=${dedupedChannels.length} taskDef=${newTaskDefArn}`,
-    })
+    // Round-1 audit on PR #55 (pr-agent): isolate audit-log
+    // failures from the response. logSecurityEvent calls
+    // db.prepare().run() which can throw on SQLite errors (disk
+    // full, lock contention). Without this guard, a successful
+    // UpdateService followed by a failing audit-log write would
+    // surface as a 502 with dangling-revision detail — misleading
+    // because the service was already updated. Best-effort log;
+    // a missing audit row is preferable to a wrong response.
+    try {
+      logSecurityEvent({
+        event_type: 'fleet.slack-channels.updated',
+        severity: 'info',
+        source: 'fleet',
+        agent_name: agentName,
+        detail: `actor=${auth.user.id} channels=${dedupedChannels.length} taskDef=${newTaskDefArn}`,
+      })
+    } catch (logErr) {
+      logger.error(
+        {
+          agentName,
+          newTaskDefArn,
+          errorName: (logErr as Error).name,
+          errorMessage: (logErr as Error).message,
+        },
+        '[fleet] slack-channels PUT: audit-log write failed after successful deploy (response unaffected)',
+      )
+    }
 
     return NextResponse.json(
       {
