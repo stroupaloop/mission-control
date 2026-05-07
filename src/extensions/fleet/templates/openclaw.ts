@@ -366,7 +366,16 @@ export function renderTaskDefinition(
             // 'No API key found for provider openai'. Running the
             // bundled script as node ensures rendered config files
             // are owned by the gateway's runtime user (uid 1000).
-            `su node -c /usr/local/bin/init-config.sh`,
+            //
+            // ⚠️ -m / --preserve-environment is LOAD-BEARING.
+            // Without it, `su` strips OPENCLAW_SLACK_CONFIG_JSON,
+            // LITELLM_BASE_URL, and LITELLM_VIRTUAL_KEY from the
+            // child process — init-config.sh would render the same
+            // 'apiKey: ""' / no-Slack-channels output that this
+            // PR is meant to fix (greptile P1 audit on PR #59).
+            // `su -m` is portable across util-linux (Debian/
+            // Ubuntu) and coreutils variants.
+            `su -m node -c /usr/local/bin/init-config.sh`,
           ].join(' && '),
         ],
         environment: commonEnv,
