@@ -113,6 +113,16 @@ describe('renderTaskDefinition', () => {
       '/home/node/.openclaw/workspace/.openclaw/canvas',
     )
     expect(script).toContain('rm -f /home/node/.openclaw/openclaw.json')
+    // Beat 5e: the inline shell drops to `node` and runs the
+    // bundled init-config.sh — this is the load-bearing step
+    // that templates openclaw.json with Slack channels + LiteLLM
+    // provider config. -m preserves env vars (OPENCLAW_SLACK_CONFIG_JSON,
+    // LITELLM_BASE_URL, LITELLM_VIRTUAL_KEY) through the user
+    // switch; without it, the rendered config would be empty
+    // and the gateway would silently boot --allow-unconfigured.
+    expect(script).toContain(
+      'su -m node -c /usr/local/bin/init-config.sh',
+    )
   })
 
   it('passes the common env vars (AGENT_NAME, OPENCLAW_AGENT_NAME, OPENCLAW_STATE_DIR) on both containers', () => {
