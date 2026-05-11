@@ -9,10 +9,9 @@ import urllib.request
 from pathlib import Path
 
 LITELLM_URL = "http://localhost:4000/v1/chat/completions"
-LITELLM_KEY = os.environ.get(
-    "LITELLM_KEY",
-    "sk-ender-litellm-5c5afff22830e664ee2733e2ef3db731",
-)
+LITELLM_KEY = os.environ.get("LITELLM_KEY")
+if not LITELLM_KEY:
+    raise SystemExit("LITELLM_KEY env var is required (no default fallback — set it before running this script)")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MESSAGES_DIR = REPO_ROOT / "src" / "extensions" / "i18n" / "locales"

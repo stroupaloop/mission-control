@@ -16,9 +16,16 @@
  *   3. Use it from your panel: `useTranslations('yourNamespace')`.
  */
 
+import { locales } from '@/i18n/config'
+
 export type ExtensionMessages = Record<string, Record<string, string>>
 
 export async function loadExtensionMessages(locale: string): Promise<ExtensionMessages> {
+  // Defensive: even though the current call site (src/i18n/request.ts) validates
+  // locale against the allowlist before passing it in, exporting this function
+  // means any future caller could pass an unvalidated string. Re-validate here so
+  // a path-traversal attempt or unknown-locale string fails closed.
+  if (!(locales as readonly string[]).includes(locale)) return {}
   try {
     const mod = await import(`./locales/${locale}.json`)
     return (mod.default ?? mod) as ExtensionMessages
