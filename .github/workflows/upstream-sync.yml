@@ -21,6 +21,15 @@ on:
     - cron: '0 10 * * 1'  # Monday 10:00 UTC
   workflow_dispatch: {}
 
+# Prevent TOCTOU on the PR/issue dedup checks: if a Monday cron run is still
+# in-flight when a manual `workflow_dispatch` (or a drifted cron) starts,
+# queue the second run rather than letting both pass the dedup gates and
+# create duplicate PRs / issues. `cancel-in-progress: false` favors queueing
+# over cancellation — we don't want to abort a mid-merge step.
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: write
@@ -71,7 +80,10 @@ jobs:
         if: steps.divergence.outputs.behind == '0'
         run: |
           echo "::notice::Fork is already current with upstream/main — nothing to do"
-          exit 0
+          # No `exit 0` here: every downstream step is already gated by the
+          # `steps.divergence.outputs.behind != '0'` condition, so an explicit
+          # exit would be misleading (it would only exit THIS step, not the
+          # job). The `if:` chain is what actually skips the work below.
 
       - name: Check for existing open auto-sync PR (dedup)
         id: existing_pr
