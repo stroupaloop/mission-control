@@ -147,11 +147,14 @@ jobs:
             echo "::notice::Auto-merge succeeded on branch $BRANCH"
           else
             CONFLICTING=$(git diff --name-only --diff-filter=U)
-            # Write conflict list to step output as a multiline string
+            # Write conflict list to step output as a multiline string.
+            # Use a collision-resistant delimiter — a filename literally named
+            # `EOF` would prematurely terminate a generic heredoc-style block.
+            DELIM="__UPSTREAM_SYNC_CONFLICTS_$(date +%s%N)__"
             {
-              echo 'conflicting<<EOF'
+              echo "conflicting<<$DELIM"
               echo "$CONFLICTING"
-              echo 'EOF'
+              echo "$DELIM"
             } >> "$GITHUB_OUTPUT"
             echo "status=conflict" >> "$GITHUB_OUTPUT"
             echo "::warning::Auto-merge failed; conflicting files:"
