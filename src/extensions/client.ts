@@ -75,6 +75,13 @@ for (const ext of clientExtensions) {
 // would duplicate every nav item. `Symbol.for` is keyed on the global symbol
 // registry so it survives module re-evaluation. This keeps the dedup logic
 // out of `src/lib/plugins.ts` and lets that upstream file stay byte-clean.
+//
+// IMPORTANT: this guard only protects this call site. If a future extension
+// or upstream consumer calls `registerNavItems` from somewhere else, that
+// caller is responsible for its own dedup (upstream's implementation is
+// append-blind). When adding new extension nav items, route them through
+// this file's `navItems` collection so they participate in the single guarded
+// call; do not call `registerNavItems` directly from elsewhere.
 const FORK_NAV_REGISTERED = Symbol.for('@stroupaloop/mc-fork:nav-registered')
 type GlobalWithFlag = typeof globalThis & { [FORK_NAV_REGISTERED]?: boolean }
 const _globalWithFlag = globalThis as GlobalWithFlag

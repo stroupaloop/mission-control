@@ -118,10 +118,14 @@ async function extensionTick(): Promise<void> {
     if (now - task.lastRun < task.intervalMs) continue
     task.running = true
     task.lastRun = now
+    const startedAt = Date.now()
     try {
       const result = await task.fn()
-      if (!result.ok) {
-        console.warn(`[extensions] task ${task.id} returned not-ok: ${result.message}`)
+      const durationMs = Date.now() - startedAt
+      if (result.ok) {
+        console.info(`[extensions] task ${task.id} ok in ${durationMs}ms: ${result.message}`)
+      } else {
+        console.warn(`[extensions] task ${task.id} returned not-ok in ${durationMs}ms: ${result.message}`)
       }
     } catch (err: any) {
       console.error(`[extensions] task ${task.id} threw:`, err?.message ?? err)

@@ -29,12 +29,17 @@ export function ClientBoot(): null {
     if (useMissionControl.getState().showOnboarding) {
       useMissionControl.getState().setShowOnboarding(false)
     }
-    // Pin showOnboarding to false for the page lifetime. Returning the
-    // unsubscribe handle so React cleans up on unmount (effectively never
-    // for ClientBoot, but correct for the contract).
-    const unsubscribe = useMissionControl.subscribe((state) => {
-      if (state.showOnboarding) state.setShowOnboarding(false)
-    })
+    // Pin showOnboarding to false for the page lifetime. Use the selector
+    // form of subscribe (enabled by `subscribeWithSelector` middleware in
+    // src/store/index.ts) so the callback only fires on actual transitions
+    // of showOnboarding — not on every unrelated store mutation (agent
+    // heartbeats, task updates, etc.).
+    const unsubscribe = useMissionControl.subscribe(
+      (state) => state.showOnboarding,
+      (showOnboarding) => {
+        if (showOnboarding) useMissionControl.getState().setShowOnboarding(false)
+      },
+    )
     return unsubscribe
   }, [])
 

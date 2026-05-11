@@ -11,7 +11,15 @@ describe('getOpenclawWorkspaceDir', () => {
   })
 
   afterEach(() => {
-    process.env = { ...originalEnv }
+    // Don't replace process.env with a plain object — that would sever the
+    // OS-environment binding for the rest of the worker (subsequent tests
+    // that read PATH, NODE_ENV, etc. would see stale values). Delete keys
+    // added by this test, then restore originals via Object.assign so the
+    // backing-store reference is preserved.
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key]
+    }
+    Object.assign(process.env, originalEnv)
     vi.resetModules()
   })
 
