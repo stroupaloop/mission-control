@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Translate oapApprovals + litellmUsage namespaces from en.json into target locales.
 
+Reads/writes from `src/extensions/i18n/{locale}.json` — extension translations live
+in the fork-only directory so upstream `messages/*.json` stays byte-clean (#319).
+
 Uses the LiteLLM proxy at localhost:4000.
 
 Non-destructive: preserves all other keys in each locale JSON.
@@ -26,7 +29,7 @@ LITELLM_KEY = os.environ.get(
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MESSAGES_DIR = REPO_ROOT / "messages"
+MESSAGES_DIR = REPO_ROOT / "src" / "extensions" / "i18n" / "locales"
 
 NAMESPACES = ["oapApprovals", "litellmUsage"]
 
