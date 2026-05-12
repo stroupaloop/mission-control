@@ -13,8 +13,8 @@
  * Co-located with `manifest-registration.test.ts` (panel/nav registration)
  * and `fork-contract.test.ts` (upstream byte-clean check, ships separately).
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, render } from '@testing-library/react'
 
 // Side-effect import in ClientBoot.tsx triggers panel + nav registration.
 // Stub it so this test stays focused on the onboarding subscriber and does
@@ -29,6 +29,12 @@ describe('ClientBoot — onboarding suppression', () => {
   beforeEach(() => {
     useMissionControl.setState({ showOnboarding: false })
   })
+
+  // Defensive subscriber cleanup: if an assertion throws before a test's
+  // explicit `unmount()` runs, the Zustand subscriber from the rendered
+  // ClientBoot would survive into the next test. RTL's `cleanup` is
+  // idempotent — safe to pair with the explicit unmount calls below.
+  afterEach(cleanup)
 
   it('flips showOnboarding back to false when upstream sets it true post-mount', () => {
     const { unmount } = render(<ClientBoot />)
