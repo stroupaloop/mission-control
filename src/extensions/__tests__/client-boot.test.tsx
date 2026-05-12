@@ -13,7 +13,7 @@
  * Co-located with `manifest-registration.test.ts` (panel/nav registration)
  * and `fork-contract.test.ts` (upstream byte-clean check, ships separately).
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from '@testing-library/react'
 
 // Side-effect import in ClientBoot.tsx triggers panel + nav registration.
@@ -27,10 +27,6 @@ import { useMissionControl } from '@/store'
 
 describe('ClientBoot — onboarding suppression', () => {
   beforeEach(() => {
-    useMissionControl.setState({ showOnboarding: false })
-  })
-
-  afterEach(() => {
     useMissionControl.setState({ showOnboarding: false })
   })
 

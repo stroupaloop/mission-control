@@ -11,6 +11,7 @@
  * `fork-contract.test.ts` (upstream byte-clean check, ships separately).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { FORK_NAV_REGISTERED } from '../client'
 
 // ── Server-side: scheduled task contract ─────────────────────────────────────
 //
@@ -63,17 +64,29 @@ describe('extensions.config — scheduled task manifest', () => {
     }
   })
 
-  it('every scheduled task fn resolves without throwing under happy-path mocks', async () => {
-    // Catches "task body throws synchronously on import" regressions —
-    // the kind that would leave the task wedged in `running=true` after
-    // one tick and silently stop firing forever.
+  it('every scheduled task fn invokes its declared inner function (no empty bodies)', async () => {
+    // Catches two regression classes at once:
+    //   1. Task body throws synchronously → we'd see this as a rejection here.
+    //   2. Task body is silently emptied (e.g., `async () => {}` after a
+    //      refactor that orphaned the inner call) → we'd see this as the
+    //      mock not being called. Without this assertion, an empty body
+    //      would pass `resolves.not.toThrow` trivially.
     const { extensions } = await import('../extensions.config')
+    const telemetry = await import('../resolver/telemetry')
+    const cacheMetrics = await import('../litellm/cache-metrics')
+    const innerByTaskId: Record<string, ReturnType<typeof vi.fn>> = {
+      'resolver:resolver_telemetry_ingest': telemetry.ingestResolverTelemetry as unknown as ReturnType<typeof vi.fn>,
+      'resolver:resolver_metrics_rollup': telemetry.rebuildResolverDailyMetrics as unknown as ReturnType<typeof vi.fn>,
+      'litellm:litellm_cache_rollup': cacheMetrics.rollupCacheMetrics as unknown as ReturnType<typeof vi.fn>,
+    }
     for (const ext of extensions) {
       for (const task of ext.scheduledTasks ?? []) {
-        await expect(
-          task.fn(),
-          `${ext.id}:${task.name} threw under happy-path mocks`,
-        ).resolves.not.toThrow()
+        const id = `${ext.id}:${task.name}`
+        const inner = innerByTaskId[id]
+        expect(inner, `no inner-fn mapping for ${id}`).toBeDefined()
+        inner.mockClear()
+        await expect(task.fn(), `${id} threw under happy-path mocks`).resolves.not.toThrow()
+        expect(inner, `${id} did not invoke its inner function`).toHaveBeenCalled()
       }
     }
   })
@@ -95,8 +108,6 @@ describe('extensions.config — scheduled task manifest', () => {
 // client.ts populates the upstream plugin registry via `registerNavItems` /
 // `registerPanel`. The Symbol-keyed one-time guard prevents re-registration
 // across HMR / React Strict Mode. Verify both shapes here.
-
-const FORK_NAV_REGISTERED = Symbol.for('@stroupaloop/mc-fork:nav-registered')
 
 // vi.mock factories are hoisted above top-level const declarations, so the
 // mock fns must be initialized inside `vi.hoisted` to avoid a TDZ error.
@@ -124,9 +135,14 @@ describe('client.ts — nav + panel registration', () => {
     delete (globalThis as Record<symbol, unknown>)[FORK_NAV_REGISTERED]
   })
 
-  it('registers the expected 5 panels (one per UI extension)', async () => {
-    const { __clientExtensionsRegistered } = await import('../client')
-    expect(__clientExtensionsRegistered.panels.sort()).toEqual(
+  it('registers the expected 5 panels via registerPanel (one per UI extension)', async () => {
+    // Assert the actual registration receipt — not the static componentMap
+    // shape. A regression that drops the registerPanel loop would still
+    // leave componentMap intact, so reading registerPanelMock.calls is the
+    // load-bearing check.
+    await import('../client')
+    const registeredIds = registerPanelMock.mock.calls.map((c) => c[0] as string).sort()
+    expect(registeredIds).toEqual(
       ['fleet', 'litellm-usage', 'oap-approvals', 'oap-audit', 'resolver-intelligence'],
     )
   })
