@@ -38,6 +38,16 @@ jobs:
           git config --global user.email "ci@mission-control.dev"
           git config --global user.name "CI"
 
+      - name: Fetch upstream/main for fork-contract test
+        # The fork-contract.test.ts byte-clean assertion compares
+        # the PR head against upstream/main to catch modifications
+        # outside the 5 FORK.md-approved touch points. The test
+        # self-skips if upstream/main isn't fetched, so this step
+        # is what makes the gate active in CI.
+        run: |
+          git remote add upstream https://github.com/builderz-labs/mission-control.git
+          git fetch upstream main --depth=50
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
