@@ -197,15 +197,17 @@ describe('POST /api/fleet/agents/:name/slack/credentials — happy path', () => 
     happyPathMocks()
     const POST = await importHandler()
     await POST(mkRequest(), mkParams())
+    const prefix = process.env.MC_AGENT_SECRETS_NAME_PREFIX!
+    const expected = [
+      `${prefix}-${AGENT}-slack-app-token`,
+      `${prefix}-${AGENT}-slack-bot-token`,
+      `${prefix}-${AGENT}-slack-signing-secret`,
+    ].sort()
     const putNames = smSendMock.mock.calls
       .filter((c) => (c[0] as { __type: string }).__type === 'PutSecretValueCommand')
       .map((c) => (c[0] as { input: { SecretId?: string } }).input.SecretId)
       .sort()
-    expect(putNames).toEqual([
-      'ender-stack/dev/companion-openclaw-hello-bot-slack-app-token',
-      'ender-stack/dev/companion-openclaw-hello-bot-slack-bot-token',
-      'ender-stack/dev/companion-openclaw-hello-bot-slack-signing-secret',
-    ])
+    expect(putNames).toEqual(expected)
   })
 
   it('falls back to CreateSecret when PutSecretValue throws ResourceNotFoundException', async () => {

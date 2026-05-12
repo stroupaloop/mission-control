@@ -98,8 +98,12 @@ describe('extensions.config — scheduled task manifest', () => {
 
 const FORK_NAV_REGISTERED = Symbol.for('@stroupaloop/mc-fork:nav-registered')
 
-const registerNavItemsMock = vi.fn()
-const registerPanelMock = vi.fn()
+// vi.mock factories are hoisted above top-level const declarations, so the
+// mock fns must be initialized inside `vi.hoisted` to avoid a TDZ error.
+const { registerNavItemsMock, registerPanelMock } = vi.hoisted(() => ({
+  registerNavItemsMock: vi.fn(),
+  registerPanelMock: vi.fn(),
+}))
 
 vi.mock('@/lib/plugins', () => ({
   registerNavItems: (items: unknown[]) => registerNavItemsMock(items),
@@ -121,7 +125,6 @@ describe('client.ts — nav + panel registration', () => {
   })
 
   it('registers the expected 5 panels (one per UI extension)', async () => {
-    await import('../client')
     const { __clientExtensionsRegistered } = await import('../client')
     expect(__clientExtensionsRegistered.panels.sort()).toEqual(
       ['fleet', 'litellm-usage', 'oap-approvals', 'oap-audit', 'resolver-intelligence'],
