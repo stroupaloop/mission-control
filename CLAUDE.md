@@ -134,6 +134,7 @@ Never rebase a branch that already has an open PR without first checking for con
 - **better-sqlite3**: Native addon -- needs rebuild when switching Node versions (`pnpm rebuild better-sqlite3`)
 - **AUTH_PASS with `#`**: Quote it (`AUTH_PASS="my#pass"`) or use `AUTH_PASS_B64` (base64-encoded)
 - **Gateway optional**: Set `NEXT_PUBLIC_GATEWAY_OPTIONAL=true` for standalone deployments without gateway connectivity
+
 ## Test Discipline (HARD RULE)
 
 Every PR must leave test coverage **equal or better** than it found it. The quality-gate CI enforces lint, typecheck, unit tests, build, and E2E on every PR — no merge without green.
@@ -160,13 +161,7 @@ Every PR must leave test coverage **equal or better** than it found it. The qual
 
 ### Test commands
 
-```bash
-pnpm test             # unit tests (vitest) — includes fork-regression suite
-pnpm test:e2e         # end-to-end (playwright)
-pnpm typecheck        # tsc --noEmit
-pnpm lint             # eslint
-pnpm test:all         # full suite: lint + typecheck + test + build + e2e
-```
+_See [Tests](#tests) above._ Use `pnpm test:all` for the full gate locally.
 
 ### Test inventory (keep current)
 
