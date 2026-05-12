@@ -21,6 +21,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history needed by fork-contract.test.ts so
+          # `git merge-base upstream/main HEAD` resolves. Default
+          # shallow clone has no shared ancestor with upstream/main.
+          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
