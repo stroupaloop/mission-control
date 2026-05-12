@@ -8,8 +8,8 @@
  * (see ender-stack#331).
  *
  * To find any bucket's surface area:
- *   git grep "documented fork override" tools/...    # bucket 1
- *   git grep "intentional fork addition" tools/...   # bucket 2
+ *   git grep "documented fork override" .            # bucket 1
+ *   git grep "intentional fork addition" .           # bucket 2
  *   git grep "LEGACY DEBT" .                         # bucket 3
  *
  * When a bucket-3 file is cleaned up (relocated to src/extensions/,

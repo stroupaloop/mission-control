@@ -50,9 +50,24 @@ function modifiedSrcFilesVsUpstream(): string[] {
   //     working tree — picks up uncommitted/unstaged edits too. CI sees
   //     no difference; local devs get caught pre-commit instead of seeing
   //     a false-green from `git diff <ref>...HEAD` (committed only).
-  const mergeBase = execSync(`git merge-base ${UPSTREAM_REF} HEAD`, {
-    encoding: 'utf-8',
-  }).trim()
+  //
+  // Scope is intentionally limited to src/. Root-level upstream files
+  // (package.json, next.config.js, .nvmrc, etc.) aren't watched — those
+  // need a separate gate if drift becomes a problem.
+  let mergeBase: string
+  try {
+    mergeBase = execSync(`git merge-base ${UPSTREAM_REF} HEAD`, {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+    }).trim()
+  } catch (err) {
+    throw new Error(
+      `git merge-base ${UPSTREAM_REF} HEAD failed. Likely causes: ` +
+        `(1) shallow CI checkout — set fetch-depth: 0 on actions/checkout, ` +
+        `(2) upstream fetched too shallow — drop --depth from the upstream fetch step. ` +
+        `Underlying error: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
   const out = execSync(
     `git diff --name-only --diff-filter=M ${mergeBase} -- src/`,
     { encoding: 'utf-8' },
@@ -71,17 +86,16 @@ describe('fork-contract — upstream byte-clean', () => {
     : null
 
   it.skipIf(skipReason)(
-    'only the 5 FORK.md-approved paths are modified relative to upstream/main',
+    'only allowlisted paths are modified relative to upstream/main',
     () => {
       const modified = modifiedSrcFilesVsUpstream()
       const approved = new Set<string>(APPROVED_UPSTREAM_TOUCH_PATHS)
       const violations = modified.filter((f) => !approved.has(f))
       expect(
         violations,
-        `Files modified outside the 5 approved upstream-touch points (FORK.md):\n` +
+        `Files modified outside the approved upstream-touch allowlist ` +
+          `(see src/extensions/__tests__/fixtures/approved-upstream-paths.ts):\n` +
           violations.map((v) => `  - ${v}`).join('\n') +
-          `\n\nApproved touch points:\n` +
-          APPROVED_UPSTREAM_TOUCH_PATHS.map((p) => `  - ${p}`).join('\n') +
           `\n\nIf you need to touch additional upstream files, update FORK.md AND ` +
           `src/extensions/__tests__/fixtures/approved-upstream-paths.ts in the same PR.`,
       ).toEqual([])

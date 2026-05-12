@@ -46,12 +46,19 @@ jobs:
       - name: Fetch upstream/main for fork-contract test
         # The fork-contract.test.ts byte-clean assertion compares
         # the PR head against upstream/main to catch modifications
-        # outside the 5 FORK.md-approved touch points. The test
+        # outside FORK.md's approved touch points. The test
         # self-skips if upstream/main isn't fetched, so this step
         # is what makes the gate active in CI.
+        # IMPORTANT: do NOT set SKIP_FORK_CONTRACT in CI — that
+        # env var is the local emergency-rebase escape hatch only.
         run: |
-          git remote add upstream https://github.com/builderz-labs/mission-control.git
-          git fetch upstream main --depth=50
+          # Idempotent — survives a retry on a transient downstream failure.
+          git remote get-url upstream >/dev/null 2>&1 \
+            || git remote add upstream https://github.com/builderz-labs/mission-control.git
+          # No --depth: a shallow upstream fetch can miss the merge-base if
+          # the fork's last rebase point falls outside the fetched window.
+          # Full clone is cheap relative to one CI minute.
+          git fetch upstream main
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
