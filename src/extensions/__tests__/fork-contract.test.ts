@@ -2,16 +2,23 @@
  * Fork-contract: upstream byte-clean assertion.
  *
  * Catches the regression class where a PR (or a rebase merge-conflict
- * resolution) accidentally modifies an upstream file outside the five
- * approved touch points listed in FORK.md. Without this gate, the only
- * line of defense was reviewer attention, which scaled poorly as the
- * extension footprint grew (PRs #61–#64).
+ * resolution) accidentally modifies an upstream file outside the
+ * approved touch points listed in FORK.md (plus the legacy-debt
+ * grandfathered set in approved-upstream-paths.ts). Without this gate,
+ * the only line of defense was reviewer attention, which scaled poorly
+ * as the extension footprint grew (PRs #61–#64).
  *
  * Behaviour:
  *   - Lists files MODIFIED relative to `upstream/main` under `src/`
- *   - --diff-filter=M excludes additions (everything in src/extensions/
- *     is "added" relative to upstream, not "modified") and renames
- *     (handled separately as A+D, ignored)
+ *   - --diff-filter=M is intentional scope: deletions (D) and renames
+ *     (R, emitted as D+A) of upstream files are NOT flagged. Rationale:
+ *     fork-side deletion of an unused upstream file is a legitimate
+ *     cleanup (mc-fork#331 burndown class), and the typecheck step
+ *     catches any deletion that breaks an upstream import chain. If a
+ *     PR deletes an ALLOWLISTED file, the second assertion below
+ *     ("every approved path must exist") fires loudly.
+ *   - Additions (A) under src/extensions/ are the entire fork-extension
+ *     surface — they're "added" relative to upstream, not "modified".
  *   - Compares the modified set against APPROVED_UPSTREAM_TOUCH_PATHS
  *   - Fails if any file outside the allowlist is modified
  *
