@@ -27,11 +27,11 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('LiteLLMManagementClient.generateKey', () => {
+describe('LiteLLMManagementClient.generateKeyWithRotation', () => {
   it('POSTs key_alias + models + max_budget with Bearer auth, returns the new key', async () => {
     fetchMock.mockResolvedValueOnce(mkResponse(200, { key: 'sk-virtual-abc' }))
     const client = new LiteLLMManagementClient(BASE, MASTER)
-    const out = await client.generateKey({
+    const out = await client.generateKeyWithRotation({
       alias: 'ender-stack-dev-hello-bot',
       models: ['openai/smart-router', 'anthropic/claude-haiku-4-5'],
       maxBudget: 50,
@@ -54,16 +54,20 @@ describe('LiteLLMManagementClient.generateKey', () => {
   it('trims a trailing slash on baseUrl so the path joins cleanly', async () => {
     fetchMock.mockResolvedValueOnce(mkResponse(200, { key: 'sk-x' }))
     const client = new LiteLLMManagementClient(`${BASE}/`, MASTER)
-    await client.generateKey({ alias: 'a', models: ['m'], maxBudget: 1 })
+    await client.generateKeyWithRotation({
+      alias: 'a',
+      models: ['m'],
+      maxBudget: 1,
+    })
     const [url] = fetchMock.mock.calls[0] as [string]
     expect(url).toBe(`${BASE}/key/generate`)
   })
 
-  it('throws LiteLLMManagementError(retriable=false) on a 4xx', async () => {
+  it('throws LiteLLMManagementError(retriable=false) on a non-duplicate 4xx', async () => {
     fetchMock.mockResolvedValueOnce(mkResponse(400, { detail: 'bad models' }))
     const client = new LiteLLMManagementClient(BASE, MASTER)
     await expect(
-      client.generateKey({ alias: 'a', models: ['x'], maxBudget: 1 }),
+      client.generateKeyWithRotation({ alias: 'a', models: ['x'], maxBudget: 1 }),
     ).rejects.toMatchObject({
       name: 'LiteLLMManagementError',
       status: 400,
@@ -75,7 +79,7 @@ describe('LiteLLMManagementClient.generateKey', () => {
     fetchMock.mockResolvedValueOnce(mkResponse(503, 'upstream busy'))
     const client = new LiteLLMManagementClient(BASE, MASTER)
     await expect(
-      client.generateKey({ alias: 'a', models: ['x'], maxBudget: 1 }),
+      client.generateKeyWithRotation({ alias: 'a', models: ['x'], maxBudget: 1 }),
     ).rejects.toMatchObject({
       name: 'LiteLLMManagementError',
       status: 503,
@@ -87,7 +91,7 @@ describe('LiteLLMManagementClient.generateKey', () => {
     fetchMock.mockResolvedValueOnce(mkResponse(200, { not_a_key: true }))
     const client = new LiteLLMManagementClient(BASE, MASTER)
     await expect(
-      client.generateKey({ alias: 'a', models: ['x'], maxBudget: 1 }),
+      client.generateKeyWithRotation({ alias: 'a', models: ['x'], maxBudget: 1 }),
     ).rejects.toMatchObject({
       name: 'LiteLLMManagementError',
       status: 200,
@@ -99,7 +103,7 @@ describe('LiteLLMManagementClient.generateKey', () => {
     fetchMock.mockRejectedValueOnce(new TypeError('failed to fetch'))
     const client = new LiteLLMManagementClient(BASE, MASTER)
     await expect(
-      client.generateKey({ alias: 'a', models: ['x'], maxBudget: 1 }),
+      client.generateKeyWithRotation({ alias: 'a', models: ['x'], maxBudget: 1 }),
     ).rejects.toMatchObject({
       name: 'LiteLLMManagementError',
       status: 0,
@@ -199,6 +203,25 @@ describe('LiteLLMManagementClient.generateKeyWithRotation (#354 round-2)', () =>
       client.generateKeyWithRotation({
         alias: 'a',
         models: [],
+        maxBudget: 1,
+      }),
+    ).rejects.toMatchObject({ name: 'LiteLLMManagementError', status: 400 })
+    expect(fetchMock).toHaveBeenCalledTimes(1) // no rotate
+  })
+
+  it('does NOT rotate on unrelated "already exists" 400s (round-3 audit, regex tightened)', async () => {
+    // Regression guard: prior regex `already exists` arm would have
+    // matched this and silently rotated a valid key.
+    fetchMock.mockResolvedValueOnce(
+      mkResponse(400, {
+        detail: 'model openai/gpt-5 already exists in the allowlist',
+      }),
+    )
+    const client = new LiteLLMManagementClient(BASE, MASTER)
+    await expect(
+      client.generateKeyWithRotation({
+        alias: 'a',
+        models: ['openai/gpt-5'],
         maxBudget: 1,
       }),
     ).rejects.toMatchObject({ name: 'LiteLLMManagementError', status: 400 })

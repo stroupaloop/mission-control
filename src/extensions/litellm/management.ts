@@ -64,16 +64,12 @@ export class LiteLLMManagementClient {
     if (!masterKey) throw new Error('LiteLLMManagementClient: masterKey required')
   }
 
-  async generateKey(input: GenerateKeyInput): Promise<GenerateKeyResult> {
-    return this.generateKeyOnce(input)
-  }
-
   /**
    * Mint a key with retry-on-duplicate-alias semantics — round-2
    * audit on PR #68 (Greptile P1 + Claude "undefined behavior"):
    * a create-agent retry after a partial AWS failure re-runs step
    * 0.5 with the same deterministic `key_alias`. LiteLLM rejects
-   * duplicate aliases by default, so the bare /key/generate would
+   * duplicate aliases by default, so a bare /key/generate would
    * 400 and the retry would be unrecoverable.
    *
    * On a duplicate-alias error this method calls /key/delete for
@@ -85,6 +81,11 @@ export class LiteLLMManagementClient {
    * Only one rotation is attempted per call. A second consecutive
    * duplicate-alias error propagates as a hard failure (would
    * indicate LiteLLM internal state inconsistency).
+   *
+   * Round-3 audit on PR #68: this is the only public mint method.
+   * The bare-mint variant was made private to remove the footgun
+   * (a future caller reaching for "just give me a key" would get
+   * the unsafe shape).
    */
   async generateKeyWithRotation(
     input: GenerateKeyInput,
@@ -199,12 +200,18 @@ function truncate(s: string): string {
 /**
  * Detect LiteLLM's "key_alias already exists" error. LiteLLM uses
  * 400 for this with a message that mentions the alias; no
- * structured error code is exposed. Loose match on the documented
- * phrasings — narrow enough to avoid swallowing unrelated 400s.
+ * structured error code is exposed.
+ *
+ * Round-3 audit on PR #68: pattern tightened to require the word
+ * "alias" or "key_alias" in the match. The earlier loose middle
+ * arm (`already exists`) would have matched unrelated 400s like
+ * "model already exists in the allowlist" and silently rotated a
+ * valid key. Each arm here is anchored to alias-specific
+ * vocabulary.
  */
 function isDuplicateAliasError(err: LiteLLMManagementError): boolean {
   if (err.status !== 400) return false
-  return /key alias already exists|already exists|duplicate.*alias/i.test(
+  return /key[_ ]alias.*already exists|duplicate.*key[_ ]alias|key[_ ]alias.*duplicate/i.test(
     err.bodySnippet,
   )
 }

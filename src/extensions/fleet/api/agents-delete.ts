@@ -535,27 +535,41 @@ export async function DELETE(
     // if step 11 warns — the AWS surface is gone, the SM-side
     // leftover is bounded and recoverable.
     if (litellmKeyRevoked) {
-      try {
-        const result = await deleteAgentLiteLLMKey(agentName)
-        deleted.litellmSecretName = result.secretName
-        if (result.alreadyDeleted) {
-          warnings.push({
-            code: 'litellm-secret-already-deleted',
-            message: `LiteLLM virtual-key secret for ${agentName} was already gone`,
-          })
-        }
-      } catch (err) {
-        const errName = (err as { name?: string })?.name ?? 'UnknownError'
+      // Round-3 audit: short-circuit if MC_AGENT_SECRETS_NAME_PREFIX
+      // is unset. deleteAgentLiteLLMKey would throw ConfigurationError
+      // which surfaces as an opaque "litellm-secret-delete-failed
+      // (ConfigurationError)" warning. Catch the misconfig up-front
+      // with a clearer code.
+      if (!process.env.MC_AGENT_SECRETS_NAME_PREFIX) {
         warnings.push({
-          code: 'litellm-secret-delete-failed',
+          code: 'litellm-secret-delete-skipped-no-prefix',
           message:
-            `Could not schedule deletion of LiteLLM virtual-key secret for ${agentName} (${errName}). ` +
-            `Run \`aws secretsmanager delete-secret --secret-id <name>\` manually to finish cleanup.`,
+            'MC_AGENT_SECRETS_NAME_PREFIX is unset — no per-agent SM secret can be located. ' +
+            'If a litellm-key secret exists for this agent under a different prefix, delete it manually.',
         })
-        logger.warn(
-          { agentName, errorName: errName },
-          '[fleet] delete-agent: SM DeleteSecret for litellm key failed (continuing)',
-        )
+      } else {
+        try {
+          const result = await deleteAgentLiteLLMKey(agentName)
+          deleted.litellmSecretName = result.secretName
+          if (result.alreadyDeleted) {
+            warnings.push({
+              code: 'litellm-secret-already-deleted',
+              message: `LiteLLM virtual-key secret for ${agentName} was already gone`,
+            })
+          }
+        } catch (err) {
+          const errName = (err as { name?: string })?.name ?? 'UnknownError'
+          warnings.push({
+            code: 'litellm-secret-delete-failed',
+            message:
+              `Could not schedule deletion of LiteLLM virtual-key secret for ${agentName} (${errName}). ` +
+              `Run \`aws secretsmanager delete-secret --secret-id <name>\` manually to finish cleanup.`,
+          })
+          logger.warn(
+            { agentName, errorName: errName },
+            '[fleet] delete-agent: SM DeleteSecret for litellm key failed (continuing)',
+          )
+        }
       }
     } else {
       warnings.push({

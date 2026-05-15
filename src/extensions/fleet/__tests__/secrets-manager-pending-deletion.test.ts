@@ -192,3 +192,28 @@ describe('deleteAgentLiteLLMKey — PendingDeletion idempotency (#354 round-2)',
     })
   })
 })
+
+describe('putOrCreateSecret — PendingDeletion recursion depth guard (#354 round-3)', () => {
+  it('refuses to recurse past depth 1 if SM keeps returning PendingDeletion after RestoreSecret', async () => {
+    // Pathological case: every Put returns PendingDeletion, and
+    // RestoreSecret keeps "succeeding" without flipping the state.
+    // Without the depth guard this would stack-overflow.
+    smSendMock
+      .mockRejectedValueOnce(pendingDeletionError('put')) // depth 0: Put → pending
+      .mockResolvedValueOnce({}) // RestoreSecret
+      .mockRejectedValueOnce(pendingDeletionError('put')) // depth 1: Put → pending
+      .mockResolvedValueOnce({}) // RestoreSecret
+      // Test would attempt depth 2 here — but the guard throws first.
+    const putOrCreate = await importPutOrCreate()
+    await expect(
+      putOrCreate({
+        name: 'ender-stack/dev/companion-openclaw-loop-litellm-key',
+        value: 'sk-virtual',
+        description: 'test',
+        tags: [],
+      }),
+    ).rejects.toMatchObject({
+      name: 'PutOrCreatePendingDeletionRetryExhausted',
+    })
+  })
+})

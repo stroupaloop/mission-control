@@ -154,15 +154,44 @@ function isPendingDeletionError(err: unknown): boolean {
   )
 }
 
+/**
+ * Internal entry point — accepts a recursion depth counter so the
+ * PendingDeletion-restore-and-retry branches can't loop unbounded
+ * if SM returns PendingDeletion AFTER a successful RestoreSecret
+ * (an SM-side race that shouldn't happen but is cheap to defend
+ * against — round-3 audit on PR #68 Medium).
+ */
+const PUT_OR_CREATE_MAX_DEPTH = 1
+
+async function putOrCreateSecretInner(
+  input: PutOrCreateInput,
+  depth: number,
+): Promise<PutOrCreateResult> {
+  if (depth > PUT_OR_CREATE_MAX_DEPTH) {
+    const err = new Error(
+      `putOrCreateSecret: PendingDeletion recursion exceeded depth ${PUT_OR_CREATE_MAX_DEPTH} for "${input.name}". RestoreSecret may have failed silently or SM is in an inconsistent state — give up and surface the failure rather than recurse.`,
+    )
+    err.name = 'PutOrCreatePendingDeletionRetryExhausted'
+    throw err
+  }
+  return putOrCreateSecretBody(input, depth)
+}
+
 export async function putOrCreateSecret(
   input: PutOrCreateInput,
+): Promise<PutOrCreateResult> {
+  return putOrCreateSecretInner(input, 0)
+}
+
+async function putOrCreateSecretBody(
+  input: PutOrCreateInput,
+  depth: number,
 ): Promise<PutOrCreateResult> {
   // #354: SM keeps deleted secret names reserved for the 7-day
   // recovery window. A recreate-within-window of the same agent
   // would otherwise 400 here. Detect PendingDeletion on both
-  // Put and Create paths, call RestoreSecret first, then retry.
-  // RestoreSecret is idempotent on an already-restored secret,
-  // so the recursion is safe.
+  // Put and Create paths, call RestoreSecret first, then retry
+  // (bounded by PUT_OR_CREATE_MAX_DEPTH).
   try {
     const resp = await secretsClient.send(
       new PutSecretValueCommand({
@@ -202,7 +231,7 @@ export async function putOrCreateSecret(
       await secretsClient.send(
         new RestoreSecretCommand({ SecretId: input.name }),
       )
-      return putOrCreateSecret(input)
+      return putOrCreateSecretInner(input, depth + 1)
     }
     const name = (err as { name?: string })?.name
     if (name !== 'ResourceNotFoundException') throw err
@@ -246,7 +275,7 @@ export async function putOrCreateSecret(
         await secretsClient.send(
           new RestoreSecretCommand({ SecretId: input.name }),
         )
-        return putOrCreateSecret(input)
+        return putOrCreateSecretInner(input, depth + 1)
       }
       const createName = (createErr as { name?: string })?.name
       if (createName !== 'ResourceExistsException') throw createErr
