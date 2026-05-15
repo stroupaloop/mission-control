@@ -110,6 +110,32 @@ describe('LiteLLMManagementClient.generateKeyWithRotation', () => {
       retriable: true,
     })
   })
+
+  it('maps AbortError (5s timeout firing) → LiteLLMManagementError(retriable=true) (round-7 audit gap)', async () => {
+    // The 5s timer mechanics are implementation detail — the
+    // behavior under test is the error-mapping branch in post()'s
+    // catch: an AbortError-shaped rejection must produce
+    // LiteLLMManagementError(status=0, retriable=true), same as a
+    // network-failure rejection. Simulate the AbortError directly
+    // rather than driving fake timers — keeps the test scoped to
+    // the mapping logic and avoids the cross-test cleanup hazards
+    // of fake-timer Aborts.
+    const abortErr = new Error('The operation was aborted.')
+    abortErr.name = 'AbortError'
+    fetchMock.mockRejectedValueOnce(abortErr)
+    const client = new LiteLLMManagementClient(BASE, MASTER)
+    await expect(
+      client.generateKeyWithRotation({
+        alias: 'a',
+        models: ['x'],
+        maxBudget: 1,
+      }),
+    ).rejects.toMatchObject({
+      name: 'LiteLLMManagementError',
+      status: 0,
+      retriable: true,
+    })
+  })
 })
 
 describe('LiteLLMManagementClient.deleteKey', () => {

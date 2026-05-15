@@ -598,16 +598,26 @@ export async function POST(request: NextRequest) {
     )
     // http:// is intentional — internal-only ALB (private subnets,
     // internal=true, no ACM cert). The master key rides this as a
-    // Bearer token but AWS encrypts inter-AZ VPC traffic between
-    // ECS tasks and the internal ALB; the credential never leaves
-    // the VPC perimeter. Mitigating IAM control: only the MC task
-    // role has `SecretsManagerReadLiteLLMMasterKey` (ender-stack
-    // PR #355) — a compromised companion-agent task cannot read
-    // the master key, even if it could observe traffic on the
-    // same subnet via traffic mirroring. Future ACM Private CA
-    // work flips this to https://; coordinate with the matching
-    // change in agents-delete.ts step 10 and the `LITELLM_BASE_URL`
-    // comment in templates/openclaw.ts so all three flip together.
+    // Bearer token. Threat model:
+    //   - Primary mitigation (IAM): only the MC task role has
+    //     `SecretsManagerReadLiteLLMMasterKey` (ender-stack PR
+    //     #355). A compromised companion-agent task cannot read
+    //     the master key — even if it could observe raw subnet
+    //     traffic, it has no way to obtain the credential from
+    //     SM to use it.
+    //   - Secondary mitigation (network reach): the internal ALB
+    //     is not reachable from outside the VPC, so any attacker
+    //     would already need a same-VPC foothold.
+    //   - Round-7 audit correction: an earlier revision of this
+    //     comment claimed "AWS encrypts inter-AZ VPC traffic" as a
+    //     blanket mitigation; that's only true for specific
+    //     Nitro-instance pairs and is not guaranteed for ECS/
+    //     Fargate→ALB paths. The IAM + network-reach pair is the
+    //     load-bearing protection, NOT VPC-layer encryption.
+    // Future ACM Private CA work flips this to https://; coordinate
+    // with the matching change in agents-delete.ts step 10 and the
+    // `LITELLM_BASE_URL` comment in templates/openclaw.ts so all
+    // three flip together.
     const litellmClient = new LiteLLMManagementClient(
       `http://${resolved.litellmAlbDnsName}`,
       masterKey,
