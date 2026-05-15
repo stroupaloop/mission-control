@@ -167,10 +167,6 @@ describe('renderTaskDefinition', () => {
 
     for (const env of [initEnv, gatewayEnv]) {
       expect(env).toContainEqual({ name: 'AGENT_ROLE', value: 'Says hello' })
-      // Legacy name must be fully purged.
-      expect(
-        env.find((e) => e?.name === 'OPENCLAW_ROLE_DESCRIPTION'),
-      ).toBeUndefined()
       // LITELLM_BASE_URL: present on both (Beat 5e).
       expect(env).toContainEqual({
         name: 'LITELLM_BASE_URL',
@@ -179,6 +175,19 @@ describe('renderTaskDefinition', () => {
       // LITELLM_API_BASE: legacy alias, must be gone.
       expect(env.find((e) => e?.name === 'LITELLM_API_BASE')).toBeUndefined()
     }
+
+    // OPENCLAW_ROLE_DESCRIPTION: kept as a gateway-side backward-compat
+    // alias so the gateway runtime (OpenClaw upstream reads this name)
+    // sees the role description even before ender-stack#361 merges and
+    // re-points init-config to read AGENT_ROLE instead. Bot R2 medium
+    // on PR #69. Init container does NOT receive it — only AGENT_ROLE.
+    expect(gatewayEnv).toContainEqual({
+      name: 'OPENCLAW_ROLE_DESCRIPTION',
+      value: 'Says hello',
+    })
+    expect(
+      initEnv.find((e) => e?.name === 'OPENCLAW_ROLE_DESCRIPTION'),
+    ).toBeUndefined()
   })
 
   it('#357 Phase-2: optional persona fields are emitted on both containers when provided (commonEnv)', () => {

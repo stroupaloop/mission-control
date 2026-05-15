@@ -295,11 +295,20 @@ export function renderTaskDefinition(
       : []),
   ]
 
-  // gatewayOnlyEnv intentionally empty post-Phase-2 — all persona/role
-  // env vars are now commonEnv. Kept as a placeholder for future
-  // gateway-runtime-only env additions; the spread below is a no-op
-  // when the array is empty.
-  const gatewayOnlyEnv: { name: string; value: string }[] = []
+  // OPENCLAW_ROLE_DESCRIPTION kept as a gateway-side alias for the
+  // role description. The init container reads AGENT_ROLE from
+  // commonEnv to template IDENTITY.md; the gateway runtime (OpenClaw
+  // upstream) historically reads OPENCLAW_ROLE_DESCRIPTION as part of
+  // its system-prompt assembly. Keeping the legacy name on the gateway
+  // closes the functional gap window flagged by Claude bot R2 medium
+  // on PR #69: agents created after THIS PR merges but BEFORE
+  // ender-stack#361 merges would otherwise run with an empty role in
+  // the gateway prompt. The alias has zero cost (one extra env entry)
+  // and can be removed in a future cleanup PR once upstream openclaw
+  // standardizes on AGENT_ROLE end-to-end.
+  const gatewayOnlyEnv: { name: string; value: string }[] = [
+    { name: 'OPENCLAW_ROLE_DESCRIPTION', value: input.roleDescription },
+  ]
 
   // #354: secrets[] entries common to both containers.
   // LITELLM_VIRTUAL_KEY is the agent's per-agent LiteLLM virtual

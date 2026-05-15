@@ -1069,7 +1069,8 @@ function FormBody({
             </span>{' '}
             Prepended to SOUL.md as an Operator-Supplied Persona section
             above the canonical openclaw character framing. Markdown
-            allowed (H1/H2 stripped to prevent section-hijack).
+            allowed; ATX headings (any <code>#</code> level) are stripped
+            at boot time to prevent section-hijack.
           </p>
         </div>
       </div>
