@@ -73,8 +73,12 @@ export function secretName(
 export function requireSecretsPrefix(): string {
   const prefix = process.env.MC_AGENT_SECRETS_NAME_PREFIX
   if (!prefix) {
+    // Round-4 audit (Claude C3): error message generalized — the
+    // function is now called from both Slack credentials and the
+    // LiteLLM virtual-key flow. Earlier Slack-specific message was
+    // actively misleading in the LiteLLM context.
     const err = new Error(
-      'MC_AGENT_SECRETS_NAME_PREFIX is not set. Slack credentials cannot be stored without it.',
+      'MC_AGENT_SECRETS_NAME_PREFIX is not set. Per-agent secrets (Slack credentials, LiteLLM virtual keys) cannot be located without it.',
     )
     err.name = 'ConfigurationError'
     throw err

@@ -40,7 +40,6 @@ import { resolveFleetPrefix } from '@/extensions/fleet/lib/fleet-prefix'
 import {
   getLiteLLMMasterKey,
   writeAgentLiteLLMKey,
-  deleteAgentLiteLLMKey,
   requireSecretsPrefix,
 } from '@/extensions/fleet/lib/secrets-manager'
 import {

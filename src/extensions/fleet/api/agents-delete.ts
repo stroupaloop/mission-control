@@ -514,18 +514,42 @@ export async function DELETE(
           '[fleet] delete-agent: LiteLLM /key/delete failed (continuing, secret retained)',
         )
       }
-    } else {
-      // Env unset: this MC instance manages no LiteLLM keys. The
-      // per-agent secret (if it exists) is orphaned from a different
-      // MC configuration and safe to delete. Skip revoke, allow
-      // step 11.
+    } else if (!litellmMasterKeyArn && !litellmAlbDnsName) {
+      // Both unset: this MC instance manages no LiteLLM keys at all.
+      // The per-agent secret (if it exists) is orphaned from a
+      // different MC configuration and safe to delete. Skip revoke,
+      // allow step 11 to clean up.
       litellmKeyRevoked = true
       warnings.push({
         code: 'litellm-key-revoke-skipped',
         message:
-          'Skipped LiteLLM /key/delete (MC_LITELLM_MASTER_KEY_SECRET_ARN or MC_LITELLM_ALB_DNS_NAME unset). ' +
-          `Revoke key alias '${litellmKeyAlias}' manually if needed.`,
+          'Skipped LiteLLM /key/delete (both MC_LITELLM_MASTER_KEY_SECRET_ARN and MC_LITELLM_ALB_DNS_NAME are unset). ' +
+          'This MC instance does not manage LiteLLM keys.',
       })
+    } else {
+      // Round-4 audit (Claude C2): asymmetric env-var configuration —
+      // exactly one of the two is set. Treat this as a misconfig and
+      // PRESERVE the SM secret (litellmKeyRevoked stays false so
+      // step 11 skips deletion). Without this branch, the prior
+      // shape destroyed the secret here without revoking the key —
+      // losing the operator's recovery path.
+      const which = !litellmMasterKeyArn
+        ? 'MC_LITELLM_MASTER_KEY_SECRET_ARN'
+        : 'MC_LITELLM_ALB_DNS_NAME'
+      warnings.push({
+        code: 'litellm-key-revoke-config-incomplete',
+        message:
+          `LiteLLM revoke skipped: ${which} is unset while the other LiteLLM env var is set. ` +
+          `Per-agent secret retained — fix the env, then re-run DELETE or revoke key alias '${litellmKeyAlias}' manually.`,
+      })
+      logger.warn(
+        {
+          cluster: clusterName,
+          serviceName,
+          missingEnv: which,
+        },
+        '[fleet] delete-agent: LiteLLM env partially configured; preserving SM secret',
+      )
     }
 
     // ================================================================

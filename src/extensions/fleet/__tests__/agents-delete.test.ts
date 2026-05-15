@@ -969,8 +969,9 @@ describe('DELETE /api/fleet/agents/:name — per-agent LiteLLM virtual key (#354
     )
   })
 
-  it('emits a warning + skips /key/delete when MC_LITELLM_MASTER_KEY_SECRET_ARN is unset (best-effort cleanup)', async () => {
+  it('emits a warning + skips /key/delete when BOTH MC_LITELLM_MASTER_KEY_SECRET_ARN and MC_LITELLM_ALB_DNS_NAME are unset (best-effort cleanup)', async () => {
     delete process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN
+    delete process.env.MC_LITELLM_ALB_DNS_NAME
     // SM still gets the DeleteSecret call for step 10.
     smSendMock.mockResolvedValueOnce({})
 
@@ -1112,5 +1113,69 @@ describe('DELETE /api/fleet/agents/:name — per-agent LiteLLM virtual key (#354
     const codes = json.warnings.map((w) => w.code)
     expect(codes).toContain('litellm-key-revoke-failed')
     expect(codes).toContain('litellm-secret-delete-skipped')
+  })
+
+  it('PRESERVES the SM secret when only one of the two LiteLLM env vars is set (#354 round-4 audit C2)', async () => {
+    // Asymmetric config: master-key ARN present, ALB DNS unset.
+    // Without the C2 fix, the prior shape would have skipped revoke
+    // AND deleted the SM secret — operator loses the recovery path
+    // (read secret → manually revoke). Now preserved; warning code
+    // litellm-key-revoke-config-incomplete signals the misconfig.
+    delete process.env.MC_LITELLM_ALB_DNS_NAME
+    // Note: MC_LITELLM_MASTER_KEY_SECRET_ARN stays set from setRequiredEnv.
+
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ taskDefinitionArns: [] })
+      .mockResolvedValueOnce({})
+    elbv2SendMock
+      .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
+      .mockResolvedValueOnce({ Listeners: [{ ListenerArn: LISTENER_ARN }] })
+      .mockResolvedValueOnce({
+        Rules: [
+          {
+            RuleArn: RULE_ARN,
+            Conditions: [
+              { Field: 'path-pattern', Values: [`/agent/${AGENT}`] },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ TargetGroups: [{ TargetGroupArn: TG_ARN }] })
+      .mockResolvedValueOnce({})
+    logsSendMock.mockResolvedValueOnce({})
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+
+    // /key/delete was NOT called (skip path).
+    expect(fetchMock).not.toHaveBeenCalled()
+    // SM DeleteSecret was NOT called (litellmKeyRevoked=false → step 11 skips).
+    const smCommands = smSendMock.mock.calls.map(
+      (c) => (c[0] as { __type: string }).__type,
+    )
+    expect(smCommands).not.toContain('DeleteSecretCommand')
+    // Warning explicitly names the missing env var so operators can fix.
+    const json = (await resp.json()) as { warnings: Array<{ code: string; message: string }> }
+    const codes = json.warnings.map((w) => w.code)
+    expect(codes).toContain('litellm-key-revoke-config-incomplete')
+    const incompleteMsg = json.warnings.find(
+      (w) => w.code === 'litellm-key-revoke-config-incomplete',
+    )!.message
+    expect(incompleteMsg).toContain('MC_LITELLM_ALB_DNS_NAME')
   })
 })
