@@ -44,14 +44,30 @@ export interface DeleteKeyInput {
 }
 
 export class LiteLLMManagementError extends Error {
+  // Round-11 audit (Claude): `bodySnippet` made non-enumerable via
+  // Object.defineProperty (instead of the `public readonly` shorthand
+  // which produces an enumerable own-property). This closes the
+  // `{ ...err }`-spread leak path that round-10 documented as a
+  // limitation: spread, Object.keys, Object.entries, and JSON-encoder
+  // middleware that walks own-properties all skip non-enumerable
+  // fields. Direct property access (`err.bodySnippet`) still works —
+  // used by `isDuplicateAliasError` in the same module.
+  declare readonly bodySnippet: string
+
   constructor(
     message: string,
     public readonly status: number,
-    public readonly bodySnippet: string,
+    bodySnippet: string,
     public readonly retriable: boolean,
   ) {
     super(message)
     this.name = 'LiteLLMManagementError'
+    Object.defineProperty(this, 'bodySnippet', {
+      value: bodySnippet,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    })
   }
 
   /**

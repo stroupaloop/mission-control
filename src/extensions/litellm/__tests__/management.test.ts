@@ -325,12 +325,14 @@ describe('LiteLLMManagementError serialization (#354 round-9 audit)', () => {
     expect(err.bodySnippet).toBe('{"detail":"key_alias already exists"}')
   })
 
-  it("structured-clone path doesn't surface bodySnippet via spread or Object.keys", () => {
-    // Round-10 audit follow-up: explicit assertions that the
-    // common "shallow-copy the error for logging" patterns also
-    // exclude bodySnippet. Defends against logging middleware
-    // that does `{ ...err }` or `Object.fromEntries(Object.entries(err))`
-    // BEFORE serializing.
+  it("spread, Object.keys, and Object.entries all skip bodySnippet (round-11 non-enumerable upgrade)", () => {
+    // Round-10 documented this as a limitation; round-11 closes it
+    // by making bodySnippet non-enumerable via Object.defineProperty.
+    // Spread / Object.keys / Object.entries all walk enumerable
+    // own-properties only — so the field that holds raw LiteLLM
+    // response text no longer reaches downstream loggers via the
+    // "shallow-copy then stringify" pattern (sentry, datadog,
+    // winston adapters, structured-clone, etc.).
     const sensitiveBody = 'sk-future-leak-NEVER-LOG'
     const err = new LiteLLMManagementError(
       'test',
@@ -338,21 +340,18 @@ describe('LiteLLMManagementError serialization (#354 round-9 audit)', () => {
       sensitiveBody,
       false,
     )
-    // The spread-and-stringify path: pino-pretty and some
-    // log-shipper SDKs reshape errors this way.
-    const reshapedJson = JSON.stringify({ ...err })
-    // bodySnippet IS enumerable, so spread DOES copy it. The
-    // protection is the toJSON path that JSON.stringify itself
-    // takes, not the spread shape. Documenting this honestly: a
-    // logger that does `{ ...err }` THEN stringifies the wrapper
-    // object will NOT see toJSON kick in on the inner spread
-    // result. This is a documented limitation; the project's
-    // current logger config (pino-std-serializers) does not do
-    // this. Test pinned so the divergence is visible if a
-    // contributor later switches to a logger that does.
-    expect(reshapedJson).toContain('bodySnippet')
-    // But `JSON.stringify(err)` directly — the path pino takes
-    // when it sees a custom toJSON — does NOT leak.
+    // Spread no longer copies the field.
+    const spread = { ...err }
+    expect('bodySnippet' in spread).toBe(false)
+    expect(JSON.stringify(spread)).not.toContain(sensitiveBody)
+    // Object.keys / Object.entries don't enumerate it either.
+    expect(Object.keys(err)).not.toContain('bodySnippet')
+    expect(Object.entries(err).map(([k]) => k)).not.toContain('bodySnippet')
+    // Direct read still works — `isDuplicateAliasError` and tests
+    // depend on this.
+    expect(err.bodySnippet).toBe(sensitiveBody)
+    // JSON.stringify path also safe (toJSON narrows + non-enumerable
+    // makes it doubly safe).
     expect(JSON.stringify(err)).not.toContain(sensitiveBody)
     expect(JSON.stringify(err)).not.toContain('bodySnippet')
   })

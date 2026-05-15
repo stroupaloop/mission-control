@@ -825,6 +825,14 @@ export async function POST(request: NextRequest) {
           targetGroupArn,
           listenerRuleArn,
           actor,
+          // #354 round-11 audit: include the per-agent LiteLLM
+          // resources for audit symmetry with the delete event
+          // (which carries `litellmKeyAlias` + `litellmSecretName`
+          // in its `deletedResources` detail). The key alias is
+          // deterministic so a reviewer correlating create + delete
+          // events for the same agent can match them up.
+          litellmKeyAlias,
+          litellmSecretArn: partial.litellmSecretArn,
         }),
       })
     } catch (auditErr) {

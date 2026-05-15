@@ -127,20 +127,6 @@ interface PutOrCreateResult {
 }
 
 /**
- * Put-or-Create idempotent write. Attempts `PutSecretValue` first
- * (cheaper path for the common case where the operator is rotating
- * existing tokens). On `ResourceNotFoundException`, falls through
- * to `CreateSecret` with tags.
- *
- * Why not describe-first: that would have a TOCTOU window where
- * two concurrent paste requests both see "not exists" and both
- * call CreateSecret, with one throwing ResourceExistsException.
- * Put-then-create flips the race so the safer call (Put) is the
- * default, and only an explicit not-found triggers the create
- * branch. Round-3 audit on ender-stack#268 explicitly flagged this
- * pattern preference.
- */
-/**
  * Detect AWS SM's "secret is scheduled for deletion" / "pending
  * deletion" InvalidRequestException — the recovery path is
  * RestoreSecret, not retry. AWS does not give us a structured
@@ -181,6 +167,22 @@ async function putOrCreateSecretInner(
   return putOrCreateSecretBody(input, depth)
 }
 
+/**
+ * Put-or-Create idempotent write. Attempts `PutSecretValue` first
+ * (cheaper path for the common case where the operator is rotating
+ * existing tokens). On `ResourceNotFoundException`, falls through
+ * to `CreateSecret` with tags. On `InvalidRequestException` with a
+ * "scheduled for deletion" / "pending deletion" message, calls
+ * `RestoreSecret` and recurses (bounded by `PUT_OR_CREATE_MAX_DEPTH`).
+ *
+ * Why not describe-first: that would have a TOCTOU window where
+ * two concurrent paste requests both see "not exists" and both
+ * call CreateSecret, with one throwing ResourceExistsException.
+ * Put-then-create flips the race so the safer call (Put) is the
+ * default, and only an explicit not-found triggers the create
+ * branch. Round-3 audit on ender-stack#268 explicitly flagged this
+ * pattern preference.
+ */
 export async function putOrCreateSecret(
   input: PutOrCreateInput,
 ): Promise<PutOrCreateResult> {
