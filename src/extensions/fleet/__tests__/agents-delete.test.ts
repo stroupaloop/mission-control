@@ -1115,6 +1115,76 @@ describe('DELETE /api/fleet/agents/:name — per-agent LiteLLM virtual key (#354
     expect(codes).toContain('litellm-secret-delete-skipped')
   })
 
+  it('suppresses `deleted.litellmSecretName` when the SM secret was already gone (round-6 audit, semantic alignment)', async () => {
+    // Aligned with `deleted.litellmKeyAlias` semantics: the field
+    // signals "this call did the cleanup", not "the resource is
+    // now gone". When DeleteSecret returns ResourceNotFoundException,
+    // the suppression + `litellm-secret-already-deleted` warning
+    // is the operator-visible signal.
+    ecsSendMock.mockReset()
+    elbv2SendMock.mockReset()
+    logsSendMock.mockReset()
+    smSendMock.mockReset()
+    fetchMock.mockReset()
+
+    smSendMock
+      .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' }) // master read for /key/delete
+      .mockRejectedValueOnce(
+        Object.assign(new Error('not found'), {
+          name: 'ResourceNotFoundException',
+        }),
+      ) // DeleteSecret on step 11 → already gone
+    fetchMock.mockResolvedValueOnce(mkLiteLLMDeleteResponse(200))
+
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ taskDefinitionArns: [] })
+      .mockResolvedValueOnce({})
+    elbv2SendMock
+      .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
+      .mockResolvedValueOnce({ Listeners: [{ ListenerArn: LISTENER_ARN }] })
+      .mockResolvedValueOnce({
+        Rules: [
+          {
+            RuleArn: RULE_ARN,
+            Conditions: [
+              { Field: 'path-pattern', Values: [`/agent/${AGENT}`] },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ TargetGroups: [{ TargetGroupArn: TG_ARN }] })
+      .mockResolvedValueOnce({})
+    logsSendMock.mockResolvedValueOnce({})
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      deletedResources: { litellmSecretName?: string; litellmKeyAlias?: string }
+      warnings: Array<{ code: string }>
+    }
+    // Field suppressed because the secret was already gone.
+    expect(json.deletedResources.litellmSecretName).toBeUndefined()
+    // Warning carries the signal instead.
+    expect(json.warnings.map((w) => w.code)).toContain(
+      'litellm-secret-already-deleted',
+    )
+  })
+
   it('PRESERVES the SM secret when only one of the two LiteLLM env vars is set (#354 round-4 audit C2)', async () => {
     // Asymmetric config: master-key ARN present, ALB DNS unset.
     // Without the C2 fix, the prior shape would have skipped revoke

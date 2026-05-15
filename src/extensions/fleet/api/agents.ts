@@ -600,10 +600,14 @@ export async function POST(request: NextRequest) {
     // internal=true, no ACM cert). The master key rides this as a
     // Bearer token but AWS encrypts inter-AZ VPC traffic between
     // ECS tasks and the internal ALB; the credential never leaves
-    // the VPC perimeter. Future ACM Private CA work flips this to
-    // https://; coordinate with the matching change in
-    // agents-delete.ts step 10 and the `LITELLM_BASE_URL` comment
-    // in templates/openclaw.ts so all three flip together.
+    // the VPC perimeter. Mitigating IAM control: only the MC task
+    // role has `SecretsManagerReadLiteLLMMasterKey` (ender-stack
+    // PR #355) — a compromised companion-agent task cannot read
+    // the master key, even if it could observe traffic on the
+    // same subnet via traffic mirroring. Future ACM Private CA
+    // work flips this to https://; coordinate with the matching
+    // change in agents-delete.ts step 10 and the `LITELLM_BASE_URL`
+    // comment in templates/openclaw.ts so all three flip together.
     const litellmClient = new LiteLLMManagementClient(
       `http://${resolved.litellmAlbDnsName}`,
       masterKey,

@@ -211,13 +211,15 @@ function truncate(s: string): string {
  *
  * Version sensitivity: LiteLLM's error message text is not part
  * of a stable contract. The three alternations were validated
- * against the LiteLLM proxy version Ender Stack is currently
- * pinned to (services/litellm/config/litellm-config.aws.yaml).
- * If a proxy upgrade ships a new message format, this regex
- * stops matching → duplicate-alias 400s propagate to the create-
- * agent handler as a hard 502 (no silent silent-failure).
- * Operator workaround: revoke the orphaned alias via the LiteLLM
- * dashboard, then retry create-agent. Add the new format here.
+ * against LiteLLM proxy version `v1.83.14.rc.1` (the version
+ * pinned in `services/litellm/Dockerfile` in ender-stack at the
+ * time this regex was authored). If a proxy upgrade ships a new
+ * message format, this regex stops matching → duplicate-alias
+ * 400s propagate to the create-agent handler as a hard 502 (no
+ * silent failure). Operator workaround: revoke the orphaned
+ * alias via the LiteLLM dashboard, then retry create-agent. When
+ * adding the new format, bump the version comment above so a
+ * future reviewer can cross-check what's known-good.
  */
 function isDuplicateAliasError(err: LiteLLMManagementError): boolean {
   if (err.status !== 400) return false

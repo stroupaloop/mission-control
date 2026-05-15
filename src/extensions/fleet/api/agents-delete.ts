@@ -475,7 +475,10 @@ export async function DELETE(
       try {
         const masterKey = await getLiteLLMMasterKey(litellmMasterKeyArn)
         // http:// is intentional — internal-only ALB; see
-        // matching comment in agents.ts step 0.5.
+        // matching comment in agents.ts step 0.5 (which also
+        // documents the IAM mitigating control:
+        // SecretsManagerReadLiteLLMMasterKey is on the MC task
+        // role only, not on companion-agent tasks).
         const litellmClient = new LiteLLMManagementClient(
           `http://${litellmAlbDnsName}`,
           masterKey,
@@ -590,12 +593,18 @@ export async function DELETE(
       } else {
         try {
           const result = await deleteAgentLiteLLMKey(agentName)
-          deleted.litellmSecretName = result.secretName
+          // Aligned with step 10's `deleted.litellmKeyAlias` suppression
+          // (round-3 audit) + the AWS-resource already-deleted pattern
+          // (rule / TG / log group): present in deletedResources ⇒
+          // this call did the delete; absent + `litellm-secret-
+          // already-deleted` warning ⇒ secret was already gone.
           if (result.alreadyDeleted) {
             warnings.push({
               code: 'litellm-secret-already-deleted',
               message: `LiteLLM virtual-key secret for ${agentName} was already gone`,
             })
+          } else {
+            deleted.litellmSecretName = result.secretName
           }
         } catch (err) {
           const errName = (err as { name?: string })?.name ?? 'UnknownError'
