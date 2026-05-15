@@ -1018,4 +1018,97 @@ describe('DELETE /api/fleet/agents/:name — per-agent LiteLLM virtual key (#354
       'litellm-key-revoke-skipped',
     )
   })
+
+  it('runs /key/delete AFTER DeleteService + DeleteLogGroup, not between TG and task-def deregister (#354 round-2)', async () => {
+    // Greptile P1 "Key revoked too early": revoke must happen
+    // after the agent's AWS surface is verified gone, so a
+    // partial-failure in DeleteService doesn't leave an agent
+    // alive with a revoked key.
+    happyPathMocks()
+    const DELETE = await importHandler()
+    await DELETE(mkRequest(), mkParams())
+
+    const fetchOrder = fetchMock.mock.invocationCallOrder[0]
+    const deleteServiceOrder = ecsSendMock.mock.invocationCallOrder[
+      ecsSendMock.mock.calls.findIndex(
+        (c) =>
+          (c[0] as { __type: string }).__type === 'DeleteServiceCommand',
+      )
+    ]
+    const deleteLogGroupOrder =
+      logsSendMock.mock.invocationCallOrder[
+        logsSendMock.mock.calls.findIndex(
+          (c) =>
+            (c[0] as { __type: string }).__type === 'DeleteLogGroupCommand',
+        )
+      ]
+    expect(fetchOrder).toBeGreaterThan(deleteServiceOrder)
+    expect(fetchOrder).toBeGreaterThan(deleteLogGroupOrder)
+  })
+
+  it('does NOT delete the per-agent SM secret when /key/delete fails (preserves recovery path) (#354 round-2)', async () => {
+    // Greptile P1 "Secret deleted after failed revoke": a
+    // failed LiteLLM revoke leaves the key live, so the secret
+    // must survive — operators read it to revoke manually.
+    ecsSendMock.mockReset()
+    elbv2SendMock.mockReset()
+    logsSendMock.mockReset()
+    smSendMock.mockReset()
+    fetchMock.mockReset()
+
+    // Master read OK → /key/delete 5xx (fails).
+    smSendMock.mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
+    fetchMock.mockResolvedValueOnce(mkLiteLLMDeleteResponse(503))
+
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ taskDefinitionArns: [] })
+      .mockResolvedValueOnce({})
+    elbv2SendMock
+      .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
+      .mockResolvedValueOnce({ Listeners: [{ ListenerArn: LISTENER_ARN }] })
+      .mockResolvedValueOnce({
+        Rules: [
+          {
+            RuleArn: RULE_ARN,
+            Conditions: [
+              { Field: 'path-pattern', Values: [`/agent/${AGENT}`] },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ TargetGroups: [{ TargetGroupArn: TG_ARN }] })
+      .mockResolvedValueOnce({})
+    logsSendMock.mockResolvedValueOnce({})
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      deletedResources: { litellmSecretName?: string }
+      warnings: Array<{ code: string }>
+    }
+    // Crucially: NO DeleteSecret was called on the per-agent secret.
+    const smCommands = smSendMock.mock.calls.map(
+      (c) => (c[0] as { __type: string }).__type,
+    )
+    expect(smCommands).toEqual(['GetSecretValueCommand']) // only master read; no DeleteSecret
+    expect(json.deletedResources.litellmSecretName).toBeUndefined()
+    const codes = json.warnings.map((w) => w.code)
+    expect(codes).toContain('litellm-key-revoke-failed')
+    expect(codes).toContain('litellm-secret-delete-skipped')
+  })
 })

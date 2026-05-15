@@ -128,3 +128,67 @@ describe('putOrCreateSecret — PendingDeletion recovery (#354)', () => {
     expect(calls).toEqual(['PutSecretValueCommand'])
   })
 })
+
+describe('deleteAgentLiteLLMKey — PendingDeletion idempotency (#354 round-2)', () => {
+  const importDelete = async () => {
+    process.env.MC_AGENT_SECRETS_NAME_PREFIX =
+      'ender-stack/dev/companion-openclaw'
+    const mod = await import('../lib/secrets-manager')
+    return mod.deleteAgentLiteLLMKey
+  }
+
+  it('returns alreadyDeleted=true when SM returns InvalidRequestException for already-pending-deletion', async () => {
+    // SM returns InvalidRequestException on a second DeleteSecret
+    // call for an already-scheduled secret (Greptile P2). The
+    // handler must treat that as idempotent so retry-of-DELETE
+    // doesn't surface a spurious failure warning.
+    smSendMock.mockRejectedValueOnce(
+      Object.assign(
+        new Error(
+          'You can\'t perform this operation on the secret because it was marked for deletion.',
+        ),
+        { name: 'InvalidRequestException' },
+      ),
+    )
+    const deleteKey = await importDelete()
+    const out = await deleteKey('foo')
+    expect(out.alreadyDeleted).toBe(true)
+    expect(out.secretName).toBe(
+      'ender-stack/dev/companion-openclaw-foo-litellm-key',
+    )
+  })
+
+  it('returns alreadyDeleted=true (with secretName) on ResourceNotFoundException', async () => {
+    smSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('not found'), {
+        name: 'ResourceNotFoundException',
+      }),
+    )
+    const deleteKey = await importDelete()
+    const out = await deleteKey('bar')
+    expect(out.alreadyDeleted).toBe(true)
+    expect(out.secretName).toBe(
+      'ender-stack/dev/companion-openclaw-bar-litellm-key',
+    )
+  })
+
+  it('returns alreadyDeleted=false (+ secretName) on a clean delete', async () => {
+    smSendMock.mockResolvedValueOnce({})
+    const deleteKey = await importDelete()
+    const out = await deleteKey('baz')
+    expect(out.alreadyDeleted).toBe(false)
+    expect(out.secretName).toBe(
+      'ender-stack/dev/companion-openclaw-baz-litellm-key',
+    )
+  })
+
+  it('propagates non-PendingDeletion InvalidRequestException', async () => {
+    smSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('unrelated'), { name: 'InvalidRequestException' }),
+    )
+    const deleteKey = await importDelete()
+    await expect(deleteKey('quux')).rejects.toMatchObject({
+      name: 'InvalidRequestException',
+    })
+  })
+})

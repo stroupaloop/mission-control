@@ -29,7 +29,6 @@ import { isAgentHarness } from '@/extensions/fleet/lib/ecs-guards'
 import {
   getLiteLLMMasterKey,
   deleteAgentLiteLLMKey,
-  LITELLM_KEY_SECRET_SUFFIX,
 } from '@/extensions/fleet/lib/secrets-manager'
 import {
   LiteLLMManagementClient,
@@ -342,81 +341,6 @@ export async function DELETE(
     }
 
     // ================================================================
-    // Step 6.5: Revoke per-agent LiteLLM virtual key (#354)
-    // ================================================================
-    // Sequence:
-    //   a. Resolve master key from Secrets Manager (MC's task role
-    //      grant `SecretsManagerReadLiteLLMMasterKey`).
-    //   b. POST /key/delete on the LiteLLM proxy with the
-    //      deterministic alias `{prefix}-{agent}` — same alias used
-    //      at create-agent time so the delete identifies the key
-    //      without reading the per-agent secret first.
-    //   c. 404 / network failure / missing master key → warning,
-    //      continue. Matches the rule/TG already-deleted posture:
-    //      the agent's AWS footprint is being torn down regardless,
-    //      and leaving a dangling LiteLLM key is a lesser harm than
-    //      blocking the delete on a transient LiteLLM proxy hiccup.
-    //      The operator can clean up dangling keys via the LiteLLM
-    //      dashboard if step 6.5 warned.
-    //
-    // Env vars (MC_LITELLM_MASTER_KEY_SECRET_ARN, MC_LITELLM_ALB_DNS_NAME)
-    // are NOT validated upfront like in the create-agent path —
-    // a delete should still proceed and clean up AWS resources
-    // even if the LiteLLM proxy is misconfigured / offline.
-    const litellmKeyAlias = `${prefix}-${agentName}`
-    const litellmMasterKeyArn = process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN
-    const litellmAlbDnsName = process.env.MC_LITELLM_ALB_DNS_NAME
-    if (litellmMasterKeyArn && litellmAlbDnsName) {
-      try {
-        const masterKey = await getLiteLLMMasterKey(litellmMasterKeyArn)
-        const litellmClient = new LiteLLMManagementClient(
-          `http://${litellmAlbDnsName}`,
-          masterKey,
-        )
-        const result = await litellmClient.deleteKey({
-          alias: litellmKeyAlias,
-        })
-        deleted.litellmKeyAlias = litellmKeyAlias
-        if (result.alreadyDeleted) {
-          warnings.push({
-            code: 'litellm-key-already-deleted',
-            message: `LiteLLM virtual key with alias '${litellmKeyAlias}' was already gone`,
-          })
-        }
-      } catch (err) {
-        // Non-fatal — surface the failure as a warning + continue
-        // with AWS-side cleanup. The dangling key has bounded blast
-        // radius (the budget cap + model allowlist still apply) and
-        // operators can revoke manually via the LiteLLM dashboard.
-        const errName = (err as { name?: string })?.name ?? 'UnknownError'
-        const isLiteLLMErr = err instanceof LiteLLMManagementError
-        warnings.push({
-          code: 'litellm-key-revoke-failed',
-          message:
-            `Could not revoke LiteLLM virtual key '${litellmKeyAlias}' (${errName}` +
-            (isLiteLLMErr ? ` status=${err.status}` : '') +
-            '). Agent AWS resources will still be cleaned up; revoke the key manually via the LiteLLM dashboard.',
-        })
-        logger.warn(
-          {
-            cluster: clusterName,
-            serviceName,
-            litellmKeyAlias,
-            errorName: errName,
-          },
-          '[fleet] delete-agent: LiteLLM /key/delete failed (continuing)',
-        )
-      }
-    } else {
-      warnings.push({
-        code: 'litellm-key-revoke-skipped',
-        message:
-          'Skipped LiteLLM /key/delete (MC_LITELLM_MASTER_KEY_SECRET_ARN or MC_LITELLM_ALB_DNS_NAME unset). ' +
-          `Revoke key alias '${litellmKeyAlias}' manually if needed.`,
-      })
-    }
-
-    // ================================================================
     // Step 7: Deregister all ACTIVE task-def revisions
     // ================================================================
     // `familyPrefix` is a PREFIX match, not an exact family name —
@@ -506,43 +430,140 @@ export async function DELETE(
     }
 
     // ================================================================
-    // Step 10: Schedule deletion of per-agent LiteLLM secret (#354)
+    // Step 10: Revoke per-agent LiteLLM virtual key (#354)
+    // ================================================================
+    // Order matters (round-2 audit, Greptile P1 "Key revoked too
+    // early"): revoke AFTER the AWS surface is verified gone. If
+    // /key/delete ran before DeleteService and DeleteService then
+    // failed, the agent would remain partially alive with a revoked
+    // model key — unable to recover.
+    //
+    // Sequence:
+    //   a. Resolve master key from Secrets Manager (MC's task role
+    //      grant `SecretsManagerReadLiteLLMMasterKey`).
+    //   b. POST /key/delete on the LiteLLM proxy with the
+    //      deterministic alias `{prefix}-{agent}` — same alias used
+    //      at create-agent time so the delete identifies the key
+    //      without reading the per-agent secret first.
+    //   c. 404 / network failure / missing master key → warning,
+    //      continue. The agent's AWS footprint is already gone;
+    //      leaving a dangling LiteLLM key is a lesser harm than
+    //      blocking the delete response on a transient proxy hiccup.
+    //
+    // The boolean `litellmKeyRevoked` gates step 11 (SM secret
+    // deletion): if revoke fails the secret must survive so an
+    // operator can read the key value and revoke manually (round-2
+    // audit, Greptile P1 "Secret deleted after failed revoke").
+    //
+    // Env vars (MC_LITELLM_MASTER_KEY_SECRET_ARN,
+    // MC_LITELLM_ALB_DNS_NAME) are NOT validated upfront like in
+    // the create-agent path — a delete should still proceed and
+    // clean up AWS resources even if the LiteLLM proxy is
+    // misconfigured / offline.
+    const litellmKeyAlias = `${prefix}-${agentName}`
+    const litellmMasterKeyArn = process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN
+    const litellmAlbDnsName = process.env.MC_LITELLM_ALB_DNS_NAME
+    let litellmKeyRevoked = false
+    if (litellmMasterKeyArn && litellmAlbDnsName) {
+      try {
+        const masterKey = await getLiteLLMMasterKey(litellmMasterKeyArn)
+        const litellmClient = new LiteLLMManagementClient(
+          `http://${litellmAlbDnsName}`,
+          masterKey,
+        )
+        const result = await litellmClient.deleteKey({
+          alias: litellmKeyAlias,
+        })
+        deleted.litellmKeyAlias = litellmKeyAlias
+        litellmKeyRevoked = true
+        if (result.alreadyDeleted) {
+          warnings.push({
+            code: 'litellm-key-already-deleted',
+            message: `LiteLLM virtual key with alias '${litellmKeyAlias}' was already gone`,
+          })
+        }
+      } catch (err) {
+        // Non-fatal — surface the failure as a warning + continue.
+        // litellmKeyRevoked stays false so step 11 skips secret
+        // deletion. Operators can read the key value from the
+        // surviving secret and revoke manually via the LiteLLM
+        // dashboard.
+        const errName = (err as { name?: string })?.name ?? 'UnknownError'
+        const isLiteLLMErr = err instanceof LiteLLMManagementError
+        warnings.push({
+          code: 'litellm-key-revoke-failed',
+          message:
+            `Could not revoke LiteLLM virtual key '${litellmKeyAlias}' (${errName}` +
+            (isLiteLLMErr ? ` status=${err.status}` : '') +
+            '). Per-agent secret left in place so operators can revoke manually via the LiteLLM dashboard.',
+        })
+        logger.warn(
+          {
+            cluster: clusterName,
+            serviceName,
+            litellmKeyAlias,
+            errorName: errName,
+          },
+          '[fleet] delete-agent: LiteLLM /key/delete failed (continuing, secret retained)',
+        )
+      }
+    } else {
+      // Env unset: this MC instance manages no LiteLLM keys. The
+      // per-agent secret (if it exists) is orphaned from a different
+      // MC configuration and safe to delete. Skip revoke, allow
+      // step 11.
+      litellmKeyRevoked = true
+      warnings.push({
+        code: 'litellm-key-revoke-skipped',
+        message:
+          'Skipped LiteLLM /key/delete (MC_LITELLM_MASTER_KEY_SECRET_ARN or MC_LITELLM_ALB_DNS_NAME unset). ' +
+          `Revoke key alias '${litellmKeyAlias}' manually if needed.`,
+      })
+    }
+
+    // ================================================================
+    // Step 11: Schedule deletion of per-agent LiteLLM secret (#354)
     // ================================================================
     // Uses a 7-day recovery window — an accidental delete can be
-    // restored before SM permanently destroys the secret. The
-    // dangling secret value (now orphaned of any agent) is harmless
-    // while pending deletion because the LiteLLM key it held was
-    // already revoked in step 6.5.
+    // restored before SM permanently destroys the secret. Gated on
+    // step 10 success: if the LiteLLM key revoke failed, the secret
+    // is retained so operators can read its value to revoke
+    // manually (round-2 audit, Greptile P1).
     //
-    // ResourceNotFoundException → warning + continue. Non-404
-    // failures propagate as 502 — at this point the agent's AWS
-    // surface is gone but the leftover secret keeps showing up in
-    // SM until the operator cleans it up manually.
-    try {
-      const result = await deleteAgentLiteLLMKey(agentName)
-      // Mirror the secret-name shape `deleteAgentLiteLLMKey` constructs
-      // (MC_AGENT_SECRETS_NAME_PREFIX + agentName + LITELLM_KEY_SECRET_SUFFIX)
-      // so operators can copy-paste the name into AWS CLI for recovery.
-      const secretsPrefix = process.env.MC_AGENT_SECRETS_NAME_PREFIX ?? ''
-      deleted.litellmSecretName = `${secretsPrefix}-${agentName}-${LITELLM_KEY_SECRET_SUFFIX}`
-      if (result.alreadyDeleted) {
+    // All failures (including PendingDeletion idempotent-second-
+    // delete) → warning + continue. The handler returns 200 even
+    // if step 11 warns — the AWS surface is gone, the SM-side
+    // leftover is bounded and recoverable.
+    if (litellmKeyRevoked) {
+      try {
+        const result = await deleteAgentLiteLLMKey(agentName)
+        deleted.litellmSecretName = result.secretName
+        if (result.alreadyDeleted) {
+          warnings.push({
+            code: 'litellm-secret-already-deleted',
+            message: `LiteLLM virtual-key secret for ${agentName} was already gone`,
+          })
+        }
+      } catch (err) {
+        const errName = (err as { name?: string })?.name ?? 'UnknownError'
         warnings.push({
-          code: 'litellm-secret-already-deleted',
-          message: `LiteLLM virtual-key secret for ${agentName} was already gone`,
+          code: 'litellm-secret-delete-failed',
+          message:
+            `Could not schedule deletion of LiteLLM virtual-key secret for ${agentName} (${errName}). ` +
+            `Run \`aws secretsmanager delete-secret --secret-id <name>\` manually to finish cleanup.`,
         })
+        logger.warn(
+          { agentName, errorName: errName },
+          '[fleet] delete-agent: SM DeleteSecret for litellm key failed (continuing)',
+        )
       }
-    } catch (err) {
-      const errName = (err as { name?: string })?.name ?? 'UnknownError'
+    } else {
       warnings.push({
-        code: 'litellm-secret-delete-failed',
+        code: 'litellm-secret-delete-skipped',
         message:
-          `Could not schedule deletion of LiteLLM virtual-key secret for ${agentName} (${errName}). ` +
-          `Run \`aws secretsmanager delete-secret --secret-id <name>\` manually to finish cleanup.`,
+          `LiteLLM virtual-key secret for ${agentName} was retained because the /key/delete revoke failed. ` +
+          'After revoking the key manually via the LiteLLM dashboard, delete the secret with `aws secretsmanager delete-secret`.',
       })
-      logger.warn(
-        { agentName, errorName: errName },
-        '[fleet] delete-agent: SM DeleteSecret for litellm key failed (continuing)',
-      )
     }
 
     logSecurityEvent({

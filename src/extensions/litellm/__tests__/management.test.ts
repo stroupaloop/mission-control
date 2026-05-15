@@ -137,6 +137,88 @@ describe('LiteLLMManagementClient.deleteKey', () => {
   })
 })
 
+describe('LiteLLMManagementClient.generateKeyWithRotation (#354 round-2)', () => {
+  it('returns the new key directly when no alias conflict', async () => {
+    fetchMock.mockResolvedValueOnce(mkResponse(200, { key: 'sk-fresh' }))
+    const client = new LiteLLMManagementClient(BASE, MASTER)
+    const out = await client.generateKeyWithRotation({
+      alias: 'a',
+      models: ['m'],
+      maxBudget: 1,
+    })
+    expect(out.key).toBe('sk-fresh')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('on duplicate-alias 400, calls /key/delete then retries /key/generate', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        mkResponse(400, { detail: 'key_alias already exists for this user' }),
+      )
+      .mockResolvedValueOnce(mkResponse(200, { deleted: 1 })) // /key/delete
+      .mockResolvedValueOnce(mkResponse(200, { key: 'sk-rotated' }))
+    const client = new LiteLLMManagementClient(BASE, MASTER)
+    const out = await client.generateKeyWithRotation({
+      alias: 'ender-stack-dev-hello-bot',
+      models: ['m'],
+      maxBudget: 1,
+    })
+    expect(out.key).toBe('sk-rotated')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const paths = fetchMock.mock.calls.map(
+      (c) => (c[0] as string).replace(BASE, ''),
+    )
+    expect(paths).toEqual(['/key/generate', '/key/delete', '/key/generate'])
+  })
+
+  it('only retries ONCE — second consecutive duplicate-alias error propagates', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        mkResponse(400, { detail: 'duplicate key_alias detected' }),
+      )
+      .mockResolvedValueOnce(mkResponse(200, { deleted: 1 }))
+      .mockResolvedValueOnce(
+        mkResponse(400, { detail: 'key_alias already exists' }),
+      )
+    const client = new LiteLLMManagementClient(BASE, MASTER)
+    await expect(
+      client.generateKeyWithRotation({
+        alias: 'a',
+        models: ['m'],
+        maxBudget: 1,
+      }),
+    ).rejects.toMatchObject({ name: 'LiteLLMManagementError', status: 400 })
+  })
+
+  it('propagates non-duplicate-alias 400s without rotating', async () => {
+    fetchMock.mockResolvedValueOnce(
+      mkResponse(400, { detail: 'models field is required' }),
+    )
+    const client = new LiteLLMManagementClient(BASE, MASTER)
+    await expect(
+      client.generateKeyWithRotation({
+        alias: 'a',
+        models: [],
+        maxBudget: 1,
+      }),
+    ).rejects.toMatchObject({ name: 'LiteLLMManagementError', status: 400 })
+    expect(fetchMock).toHaveBeenCalledTimes(1) // no rotate
+  })
+
+  it('propagates 5xx without rotating', async () => {
+    fetchMock.mockResolvedValueOnce(mkResponse(503, 'upstream busy'))
+    const client = new LiteLLMManagementClient(BASE, MASTER)
+    await expect(
+      client.generateKeyWithRotation({
+        alias: 'a',
+        models: ['m'],
+        maxBudget: 1,
+      }),
+    ).rejects.toMatchObject({ name: 'LiteLLMManagementError', status: 503 })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('LiteLLMManagementClient constructor', () => {
   it('rejects empty baseUrl', () => {
     expect(() => new LiteLLMManagementClient('', MASTER)).toThrow(/baseUrl/)

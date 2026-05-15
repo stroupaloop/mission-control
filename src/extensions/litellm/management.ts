@@ -65,6 +65,45 @@ export class LiteLLMManagementClient {
   }
 
   async generateKey(input: GenerateKeyInput): Promise<GenerateKeyResult> {
+    return this.generateKeyOnce(input)
+  }
+
+  /**
+   * Mint a key with retry-on-duplicate-alias semantics — round-2
+   * audit on PR #68 (Greptile P1 + Claude "undefined behavior"):
+   * a create-agent retry after a partial AWS failure re-runs step
+   * 0.5 with the same deterministic `key_alias`. LiteLLM rejects
+   * duplicate aliases by default, so the bare /key/generate would
+   * 400 and the retry would be unrecoverable.
+   *
+   * On a duplicate-alias error this method calls /key/delete for
+   * the alias first (idempotent), then re-tries /key/generate
+   * once. The old key is rotated — acceptable because the
+   * surrounding partial-failure state had already broken the
+   * old key out of the agent's lifecycle.
+   *
+   * Only one rotation is attempted per call. A second consecutive
+   * duplicate-alias error propagates as a hard failure (would
+   * indicate LiteLLM internal state inconsistency).
+   */
+  async generateKeyWithRotation(
+    input: GenerateKeyInput,
+  ): Promise<GenerateKeyResult> {
+    try {
+      return await this.generateKeyOnce(input)
+    } catch (err) {
+      if (!(err instanceof LiteLLMManagementError)) throw err
+      if (!isDuplicateAliasError(err)) throw err
+      // Same-alias collision: delete the existing key (idempotent —
+      // 404 is treated as already-gone by deleteKey), then retry.
+      await this.deleteKey({ alias: input.alias })
+      return await this.generateKeyOnce(input)
+    }
+  }
+
+  private async generateKeyOnce(
+    input: GenerateKeyInput,
+  ): Promise<GenerateKeyResult> {
     const body = await this.post('/key/generate', {
       key_alias: input.alias,
       models: input.models,
@@ -155,4 +194,17 @@ export class LiteLLMManagementClient {
 function truncate(s: string): string {
   if (s.length <= BODY_TRUNCATION_LIMIT) return s
   return `${s.slice(0, BODY_TRUNCATION_LIMIT)}…[truncated ${s.length - BODY_TRUNCATION_LIMIT} chars]`
+}
+
+/**
+ * Detect LiteLLM's "key_alias already exists" error. LiteLLM uses
+ * 400 for this with a message that mentions the alias; no
+ * structured error code is exposed. Loose match on the documented
+ * phrasings — narrow enough to avoid swallowing unrelated 400s.
+ */
+function isDuplicateAliasError(err: LiteLLMManagementError): boolean {
+  if (err.status !== 400) return false
+  return /key alias already exists|already exists|duplicate.*alias/i.test(
+    err.bodySnippet,
+  )
 }

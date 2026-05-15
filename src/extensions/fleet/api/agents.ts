@@ -594,7 +594,15 @@ export async function POST(request: NextRequest) {
       `http://${resolved.litellmAlbDnsName}`,
       masterKey,
     )
-    const { key: virtualKey } = await litellmClient.generateKey({
+    // generateKeyWithRotation handles the operator-retry-after-
+    // partial-failure case (round-2 audit, Greptile P1 #1 +
+    // Claude "undefined behavior"): if the deterministic alias
+    // is already minted on the proxy (left over from a prior
+    // failed create), revoke the old key and re-mint. One
+    // rotation attempt is sufficient — the surrounding partial-
+    // failure state had already orphaned the old key from any
+    // agent lifecycle.
+    const { key: virtualKey } = await litellmClient.generateKeyWithRotation({
       alias: litellmKeyAlias,
       models: DEFAULT_LITELLM_MODEL_ALLOWLIST,
       maxBudget: DEFAULT_LITELLM_MAX_BUDGET_USD,

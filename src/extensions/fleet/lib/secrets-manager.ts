@@ -468,23 +468,39 @@ export async function writeAgentLiteLLMKey(
  * treated as already-deleted (idempotent), matching the rule/TG
  * not-found posture of agents-delete.ts.
  */
+export interface DeleteAgentLiteLLMKeyResult {
+  /** True when SM reported "secret not found" or "already scheduled for deletion". */
+  alreadyDeleted: boolean
+  /** Fully-qualified secret name (caller doesn't have to reconstruct from env). */
+  secretName: string
+}
+
 export async function deleteAgentLiteLLMKey(
   agentName: string,
-): Promise<{ alreadyDeleted: boolean }> {
+): Promise<DeleteAgentLiteLLMKeyResult> {
   const prefix = requireSecretsPrefix()
-  const name = `${prefix}-${agentName}-${LITELLM_KEY_SECRET_SUFFIX}`
+  const secretName = `${prefix}-${agentName}-${LITELLM_KEY_SECRET_SUFFIX}`
   try {
     await secretsClient.send(
       new DeleteSecretCommand({
-        SecretId: name,
+        SecretId: secretName,
         RecoveryWindowInDays: 7,
       }),
     )
-    return { alreadyDeleted: false }
+    return { alreadyDeleted: false, secretName }
   } catch (err) {
     const errName = (err as { name?: string })?.name
     if (errName === 'ResourceNotFoundException') {
-      return { alreadyDeleted: true }
+      return { alreadyDeleted: true, secretName }
+    }
+    // #354 round-2 audit (Greptile P2): a second DeleteSecret on a
+    // secret that is already pending deletion returns
+    // InvalidRequestException with a "scheduled for deletion"
+    // message, not ResourceNotFoundException. Treat that as
+    // idempotently-already-deleted so a retried teardown doesn't
+    // surface a spurious litellm-secret-delete-failed warning.
+    if (isPendingDeletionError(err)) {
+      return { alreadyDeleted: true, secretName }
     }
     throw err
   }

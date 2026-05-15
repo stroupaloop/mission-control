@@ -946,6 +946,84 @@ describe('POST /api/fleet/agents — per-agent LiteLLM virtual key (#354)', () =
     expect(elbv2SendMock).not.toHaveBeenCalled()
   })
 
+  it('on retry, recovers a duplicate-alias /key/generate via /key/delete + re-mint (#354 round-2)', async () => {
+    // First fetch hits "alias already exists" (operator retry after
+    // partial AWS failure); rotation revokes the orphan and re-mints.
+    smSendMock
+      .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('not found'), {
+          name: 'ResourceNotFoundException',
+        }),
+      )
+      .mockResolvedValueOnce({
+        ARN: 'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/companion-openclaw-hello-bot-litellm-key-XyZ',
+      })
+    fetchMock
+      .mockResolvedValueOnce(
+        ({
+          ok: false,
+          status: 400,
+          text: async () => '{"detail":"key_alias already exists"}',
+          json: async () => ({ detail: 'key_alias already exists' }),
+        }) as unknown as Response,
+      )
+      .mockResolvedValueOnce(
+        ({
+          ok: true,
+          status: 200,
+          text: async () => '{"deleted":1}',
+          json: async () => ({ deleted: 1 }),
+        }) as unknown as Response,
+      )
+      .mockResolvedValueOnce(mkLiteLLMKeyResponse('sk-rotated-key'))
+
+    // Standard happy-path AWS responses for the rest of the create flow.
+    elbv2SendMock
+      .mockResolvedValueOnce({
+        LoadBalancers: [{ LoadBalancerArn: 'arn:lb' }],
+      })
+      .mockResolvedValueOnce({
+        Listeners: [{ ListenerArn: 'arn:lst', Protocol: 'HTTP' }],
+      })
+      .mockResolvedValueOnce({
+        TargetGroups: [
+          {
+            TargetGroupArn:
+              'arn:aws:elasticloadbalancing:us-east-1:398152419239:targetgroup/ender-stack-dev-agent-hello-bot/tg1',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ Rules: [{ Priority: 'default' }] })
+      .mockResolvedValueOnce({
+        Rules: [
+          {
+            RuleArn:
+              'arn:aws:elasticloadbalancing:us-east-1:398152419239:listener-rule/app/ender-stack-dev-agents-shared/abc/lst1/r1',
+          },
+        ],
+      })
+    logsSendMock.mockResolvedValueOnce({}).mockResolvedValueOnce({})
+    ecsSendMock
+      .mockResolvedValueOnce({
+        taskDefinition: { taskDefinitionArn: 'arn:tdf' },
+      })
+      .mockResolvedValueOnce({
+        service: { serviceArn: 'arn:svc' },
+      })
+
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(201)
+    // Three fetch calls: original /key/generate (400) → /key/delete →
+    // retried /key/generate (200).
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const paths = fetchMock.mock.calls.map(
+      (c) => (c[0] as string).replace(/^.+amazonaws\.com/, ''),
+    )
+    expect(paths).toEqual(['/key/generate', '/key/delete', '/key/generate'])
+  })
+
   it('surfaces partialResources.litellmKeyAlias when SM write fails after /key/generate succeeded', async () => {
     // Master read OK, /key/generate OK, but Put + Create both fail
     // → the key is on LiteLLM but we never wrote the SM secret.
