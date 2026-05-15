@@ -535,8 +535,11 @@ export async function DELETE(
       warnings.push({
         code: 'litellm-key-revoke-skipped',
         message:
-          'Skipped LiteLLM /key/delete (both MC_LITELLM_MASTER_KEY_SECRET_ARN and MC_LITELLM_ALB_DNS_NAME are unset). ' +
-          'This MC instance does not manage LiteLLM keys.',
+          'Skipped LiteLLM /key/delete: both MC_LITELLM_MASTER_KEY_SECRET_ARN and MC_LITELLM_ALB_DNS_NAME are unset, ' +
+          'so this MC instance does not manage LiteLLM keys. ' +
+          'If this deployment SHOULD manage LiteLLM keys, STOP and set both env vars before re-running DELETE — ' +
+          'otherwise the per-agent SM secret will be removed while the live LiteLLM key (if any) keeps draining budget. ' +
+          'Proceeding under the no-LiteLLM-proxy assumption.',
       })
     } else {
       // Round-4 audit (Claude C2): asymmetric env-var configuration —
