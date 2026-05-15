@@ -246,6 +246,31 @@ describe('renderTaskDefinition', () => {
     expect(initEnv.find((e) => e?.name === 'AGENT_PERSONA')).toBeUndefined()
   })
 
+  it('#357 Phase-2 / Greptile P1: persona fields with whitespace-only values are omitted (== absent)', () => {
+    // Without the trim guard in the template, a `displayName: '   '`
+    // is truthy → emits AGENT_DISPLAY_NAME='   ' → init-config sees a
+    // non-empty value → substitutes blanks into IDENTITY.md and
+    // suppresses the canonical placeholder. The operator gets
+    // blank-looking identity content instead of the documented
+    // fallback. Trim guard collapses whitespace-only to absent.
+    const taskDef = renderTaskDefinition(
+      {
+        ...fixtureInput,
+        displayName: '   ',
+        emoji: '\t\t',
+        persona: '\n   \n',
+      },
+      fixtureEnv,
+    )
+    const init = findContainer(taskDef, 'init-config')
+    const initEnv = init?.environment ?? []
+    expect(
+      initEnv.find((e) => e?.name === 'AGENT_DISPLAY_NAME'),
+    ).toBeUndefined()
+    expect(initEnv.find((e) => e?.name === 'AGENT_EMOJI')).toBeUndefined()
+    expect(initEnv.find((e) => e?.name === 'AGENT_PERSONA')).toBeUndefined()
+  })
+
   it('#354: attaches LITELLM_VIRTUAL_KEY secret to both containers from the per-agent ARN', () => {
     const envWithSecret: OpenClawAgentEnv = {
       ...fixtureEnv,

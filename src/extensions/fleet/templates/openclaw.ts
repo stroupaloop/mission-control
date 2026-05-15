@@ -277,13 +277,20 @@ export function renderTaskDefinition(
     // structural injection prefixes; init-config defensively normalizes
     // + truncates again at the boot boundary.
     { name: 'AGENT_ROLE', value: input.roleDescription },
-    ...(input.displayName
+    // Whitespace-only values are treated as absent (Greptile P1 on
+    // PR #69). A truthy-but-whitespace `displayName: '   '` would
+    // otherwise emit an AGENT_DISPLAY_NAME env var that init-config
+    // sees as supplied — substituting blanks into IDENTITY.md and
+    // suppressing the canonical "_(pick something you like)_"
+    // placeholder. Trim before the truthy check so empty / whitespace
+    // both fall through to the "not supplied" branch.
+    ...(input.displayName?.trim()
       ? [{ name: 'AGENT_DISPLAY_NAME', value: input.displayName }]
       : []),
-    ...(input.emoji
+    ...(input.emoji?.trim()
       ? [{ name: 'AGENT_EMOJI', value: input.emoji }]
       : []),
-    ...(input.persona
+    ...(input.persona?.trim()
       ? [{ name: 'AGENT_PERSONA', value: input.persona }]
       : []),
   ]

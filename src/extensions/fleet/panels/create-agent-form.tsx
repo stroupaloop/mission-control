@@ -339,14 +339,25 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     image.includes(':') &&
     lastTagSegment.length > 0 &&
     image.length <= IMAGE_MAX_BYTES
+  // UTF-8 byte length helper. Greptile P2 on PR #69: pre-fix the form
+  // compared `.length` (UTF-16 code units) against byte caps, so e.g.
+  // 1024 `é` characters (1024 code units → 2048 UTF-8 bytes) passed
+  // the form but exceeded the server cap. Browser TextEncoder is in
+  // every modern browser (Node 18+ also has it as a global) so the
+  // dependency is free.
+  const utf8Bytes = (s: string) => new TextEncoder().encode(s).length
+  const roleDescriptionBytes = utf8Bytes(roleDescription)
+  const displayNameBytes = utf8Bytes(displayName)
+  const emojiBytes = utf8Bytes(emoji)
+  const personaBytes = utf8Bytes(persona)
   const roleDescriptionValid =
     roleDescription.trim().length > 0 &&
-    roleDescription.length <= ROLE_DESCRIPTION_MAX_BYTES
+    roleDescriptionBytes <= ROLE_DESCRIPTION_MAX_BYTES
   // #357 Phase-2: optional fields. Empty = field omitted (server treats
-  // as undefined). Each capped; exceeding the cap blocks submit.
-  const displayNameValid = displayName.length <= DISPLAY_NAME_MAX_BYTES
-  const emojiValid = emoji.length <= EMOJI_MAX_BYTES
-  const personaValid = persona.length <= PERSONA_MAX_BYTES
+  // as undefined). Each capped by UTF-8 byte count, not code units.
+  const displayNameValid = displayNameBytes <= DISPLAY_NAME_MAX_BYTES
+  const emojiValid = emojiBytes <= EMOJI_MAX_BYTES
+  const personaValid = personaBytes <= PERSONA_MAX_BYTES
   const formValid =
     agentNameValid &&
     imageValid &&
@@ -615,6 +626,15 @@ function FormBody({
   defaultsError,
   defaultsErrorBlocksSubmit,
 }: FormBodyProps) {
+  // UTF-8 byte counts for the byte-capped fields (Greptile P2 on
+  // PR #69). Computed inside FormBody so the JSX can reference them
+  // without threading 4 more props from the parent. The cap-vs-bytes
+  // check at form-submit time lives in the parent's formValid.
+  const utf8Bytes = (s: string) => new TextEncoder().encode(s).length
+  const roleDescriptionBytes = utf8Bytes(roleDescription)
+  const displayNameBytes = utf8Bytes(displayName)
+  const emojiBytes = utf8Bytes(emoji)
+  const personaBytes = utf8Bytes(persona)
   if (state.kind === 'success') {
     const r = state.response
     return (
@@ -934,8 +954,7 @@ function FormBody({
           onChange={(e) => setRoleDescription(e.target.value)}
           disabled={submitting}
           required
-          maxLength={ROLE_DESCRIPTION_MAX_BYTES}
-          rows={4}
+                    rows={4}
           className="w-full px-3 py-2 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
           placeholder="What this agent does, who it serves, what guardrails apply…"
           aria-describedby="roleDescription-hint"
@@ -944,7 +963,9 @@ function FormBody({
           id="roleDescription-hint"
           className="mt-1 text-xs text-muted-foreground"
         >
-          {roleDescription.length}/{ROLE_DESCRIPTION_MAX_BYTES} chars.
+          <span className={roleDescriptionBytes > ROLE_DESCRIPTION_MAX_BYTES ? 'text-destructive' : ''}>
+            {roleDescriptionBytes}/{ROLE_DESCRIPTION_MAX_BYTES} bytes (UTF-8).
+          </span>{' '}
           Becomes the agent&apos;s runtime role prompt AND the{' '}
           <code>Role:</code> bullet in <code>IDENTITY.md</code>;
           written into an immutable task-def revision visible to anyone
@@ -978,8 +999,7 @@ function FormBody({
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
             disabled={submitting}
-            maxLength={DISPLAY_NAME_MAX_BYTES}
-            className="w-full px-3 py-2 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
+                        className="w-full px-3 py-2 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
             placeholder='e.g. "Aria" or "Vendor Ops Bot"'
             aria-describedby="displayName-hint"
           />
@@ -987,7 +1007,9 @@ function FormBody({
             id="displayName-hint"
             className="mt-1 text-xs text-muted-foreground"
           >
-            {displayName.length}/{DISPLAY_NAME_MAX_BYTES} chars.
+            <span className={displayNameBytes > DISPLAY_NAME_MAX_BYTES ? 'text-destructive' : ''}>
+              {displayNameBytes}/{DISPLAY_NAME_MAX_BYTES} bytes (UTF-8).
+            </span>{' '}
             Human-friendly name shown in IDENTITY.md.
           </p>
         </div>
@@ -1005,8 +1027,7 @@ function FormBody({
             value={emoji}
             onChange={(e) => setEmoji(e.target.value)}
             disabled={submitting}
-            maxLength={EMOJI_MAX_BYTES}
-            className="w-full px-3 py-2 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
+                        className="w-full px-3 py-2 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
             placeholder="🦊"
             aria-describedby="emoji-hint"
           />
@@ -1014,8 +1035,11 @@ function FormBody({
             id="emoji-hint"
             className="mt-1 text-xs text-muted-foreground"
           >
-            {emoji.length}/{EMOJI_MAX_BYTES} chars. Agent&apos;s
-            signature glyph (multi-codepoint emojis count as 2+ chars).
+            <span className={emojiBytes > EMOJI_MAX_BYTES ? 'text-destructive' : ''}>
+              {emojiBytes}/{EMOJI_MAX_BYTES} bytes (UTF-8).
+            </span>{' '}
+            Agent&apos;s signature glyph (emojis are 4 UTF-8 bytes each;
+            composed glyphs like 👨‍👩‍👧 are more).
           </p>
         </div>
 
@@ -1031,8 +1055,7 @@ function FormBody({
             value={persona}
             onChange={(e) => setPersona(e.target.value)}
             disabled={submitting}
-            maxLength={PERSONA_MAX_BYTES}
-            rows={4}
+                        rows={4}
             className="w-full px-3 py-2 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
             placeholder="Direct, opinionated, resourceful. Skip filler. Disagree when warranted."
             aria-describedby="persona-hint"
@@ -1041,9 +1064,12 @@ function FormBody({
             id="persona-hint"
             className="mt-1 text-xs text-muted-foreground"
           >
-            {persona.length}/{PERSONA_MAX_BYTES} chars. Prepended to
-            SOUL.md as an Operator-Supplied Persona section above the
-            canonical openclaw character framing. Markdown allowed.
+            <span className={personaBytes > PERSONA_MAX_BYTES ? 'text-destructive' : ''}>
+              {personaBytes}/{PERSONA_MAX_BYTES} bytes (UTF-8).
+            </span>{' '}
+            Prepended to SOUL.md as an Operator-Supplied Persona section
+            above the canonical openclaw character framing. Markdown
+            allowed (H1/H2 stripped to prevent section-hijack).
           </p>
         </div>
       </div>
