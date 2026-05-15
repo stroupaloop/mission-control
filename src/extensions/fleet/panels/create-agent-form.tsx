@@ -10,6 +10,8 @@ import {
   EMOJI_MAX_BYTES,
   HARNESS_TYPES,
   IMAGE_MAX_BYTES,
+  PERSONA_FIELD_CONTROL_CHAR_RE,
+  PERSONA_FIELD_DISALLOWED_PREFIX_RE,
   PERSONA_MAX_BYTES,
   PREFIX_TOO_LONG_ERROR,
   ROLE_DESCRIPTION_MAX_BYTES,
@@ -352,15 +354,13 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   const personaBytes = utf8Bytes(persona)
   // Mirror the server-side guards (templates/index.ts validatePersonaField
   // + validateProseField) client-side so operators see immediate
-  // feedback instead of a 400 after submit. Claude bot R4 medium on
-  // PR #69. Same regex literals as constraints.ts so the two layers
-  // stay in lockstep.
-  const MARKDOWN_PREFIX_RE = /^[-*][ \t]/
-  // eslint-disable-next-line no-control-regex
-  const CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/
+  // feedback instead of a 400 after submit. Regex constants IMPORTED
+  // from constraints.ts (not copied) so a future tightening — e.g.
+  // adding `^> ` blockquote rejection — updates both layers in
+  // lockstep automatically. Claude bot R5 P2 maintenance on PR #69.
   const hasProseControlChar = (s: string) => {
-    if (!CONTROL_CHAR_RE.test(s)) return false
-    return CONTROL_CHAR_RE.test(s.replace(/[\n\t]/g, ''))
+    if (!PERSONA_FIELD_CONTROL_CHAR_RE.test(s)) return false
+    return PERSONA_FIELD_CONTROL_CHAR_RE.test(s.replace(/[\n\t]/g, ''))
   }
   // roleDescription intentionally does NOT apply the markdown-prefix
   // check (it would match the server's validateProseField behavior,
@@ -375,14 +375,19 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     !hasProseControlChar(roleDescription)
   // #357 Phase-2: optional fields. Empty = field omitted (server treats
   // as undefined). Each capped by UTF-8 byte count, not code units.
+  // Trim before the list-item-prefix check so client/server agree:
+  // pre-fix, the server trimmed before checking (`...test(value.trim())`)
+  // while the client tested raw, so a leading-space value like
+  // "  - inject" passed client validation but the server's trim-then-
+  // check rejected with 400. Claude bot R5 P2 UX on PR #69.
   const displayNameValid =
     displayNameBytes <= DISPLAY_NAME_MAX_BYTES &&
-    !MARKDOWN_PREFIX_RE.test(displayName) &&
-    !CONTROL_CHAR_RE.test(displayName)
+    !PERSONA_FIELD_DISALLOWED_PREFIX_RE.test(displayName.trim()) &&
+    !PERSONA_FIELD_CONTROL_CHAR_RE.test(displayName)
   const emojiValid =
     emojiBytes <= EMOJI_MAX_BYTES &&
-    !MARKDOWN_PREFIX_RE.test(emoji) &&
-    !CONTROL_CHAR_RE.test(emoji)
+    !PERSONA_FIELD_DISALLOWED_PREFIX_RE.test(emoji.trim()) &&
+    !PERSONA_FIELD_CONTROL_CHAR_RE.test(emoji)
   const personaValid =
     personaBytes <= PERSONA_MAX_BYTES &&
     !hasProseControlChar(persona)
