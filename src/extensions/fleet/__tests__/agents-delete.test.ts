@@ -900,9 +900,11 @@ describe('DELETE /api/fleet/agents/:name — per-agent LiteLLM virtual key (#354
       deletedResources: { litellmKeyAlias?: string }
       warnings: Array<{ code: string }>
     }
-    // Alias still surfaces — we did call /key/delete; the proxy
-    // just had nothing to delete.
-    expect(json.deletedResources.litellmKeyAlias).toBe(`${PREFIX}-${AGENT}`)
+    // Aligned with AWS resource already-deleted semantics (round-3
+    // audit): when the resource was already gone, the field is
+    // suppressed in deletedResources and the warning carries the
+    // signal instead.
+    expect(json.deletedResources.litellmKeyAlias).toBeUndefined()
     expect(json.warnings.map((w) => w.code)).toContain(
       'litellm-key-already-deleted',
     )

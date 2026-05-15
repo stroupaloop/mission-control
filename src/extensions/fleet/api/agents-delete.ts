@@ -474,13 +474,20 @@ export async function DELETE(
         const result = await litellmClient.deleteKey({
           alias: litellmKeyAlias,
         })
-        deleted.litellmKeyAlias = litellmKeyAlias
         litellmKeyRevoked = true
+        // Align `deleted.litellmKeyAlias` semantics with the AWS-resource
+        // "already-deleted" handling (rule, TG, log group): the field is
+        // only populated when *this* DELETE actually revoked the key.
+        // Operator-visible signal: `deletedResources.litellmKeyAlias`
+        // present ⇒ this call did the revoke; absent + warning code
+        // `litellm-key-already-deleted` ⇒ key was gone already.
         if (result.alreadyDeleted) {
           warnings.push({
             code: 'litellm-key-already-deleted',
             message: `LiteLLM virtual key with alias '${litellmKeyAlias}' was already gone`,
           })
+        } else {
+          deleted.litellmKeyAlias = litellmKeyAlias
         }
       } catch (err) {
         // Non-fatal — surface the failure as a warning + continue.
