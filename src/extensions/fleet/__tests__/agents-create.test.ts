@@ -609,8 +609,20 @@ describe('POST /api/fleet/agents — error handling', () => {
     const POST = await importHandler()
     const resp = await POST(mkRequest(validBody()))
     expect(resp.status).toBe(409)
-    expect(((await resp.json()) as { error: string }).error).toBe(
-      'InvalidParameterException',
+    const json = (await resp.json()) as {
+      error: string
+      partialResources?: { litellmKeyAlias?: string; litellmSecretArn?: string }
+    }
+    expect(json.error).toBe('InvalidParameterException')
+    // Round-13 audit (Gap 2): step 0.4 passed but the downstream
+    // CreateService race lost, so step 0.5 DID mint a LiteLLM key
+    // and write the SM secret. The operator must see them in
+    // partialResources to clean up the orphaned LiteLLM key.
+    expect(json.partialResources?.litellmKeyAlias).toBe(
+      'ender-stack-dev-hello-bot',
+    )
+    expect(json.partialResources?.litellmSecretArn).toContain(
+      'companion-openclaw-hello-bot-litellm-key',
     )
   })
 
@@ -985,6 +997,27 @@ describe('POST /api/fleet/agents — per-agent LiteLLM virtual key (#354)', () =
       (c) => (c[0] as { __type: string }).__type,
     )
     expect(ecsCommandTypes).toEqual(['DescribeServicesCommand'])
+  })
+
+  it('aborts the create with 502 LiteLLMMasterKeyMalformed when SM returns no SecretString (round-13 audit Gap 1)', async () => {
+    // Realistic misconfiguration: the master-key secret was
+    // accidentally stored as binary, or the SecretString is
+    // empty. getLiteLLMMasterKey throws LiteLLMMasterKeyMalformed,
+    // which the outer catch surfaces as 502 with the named error
+    // so operators can find it in their runbook.
+    primeStep04NoConflict()
+    smSendMock.mockResolvedValueOnce({
+      // No SecretString — simulates binary-only secret or write
+      // anomaly.
+      ARN: 'arn:aws:secretsmanager:test:1',
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('LiteLLMMasterKeyMalformed')
+    // /key/generate was never reached.
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('aborts the create with 502 if master-key Secrets Manager read fails', async () => {

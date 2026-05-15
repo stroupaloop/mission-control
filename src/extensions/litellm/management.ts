@@ -143,6 +143,22 @@ export class LiteLLMManagementClient {
    * The bare-mint variant was made private to remove the footgun
    * (a future caller reaching for "just give me a key" would get
    * the unsafe shape).
+   *
+   * Round-13 audit (concurrent-create TOCTOU note): in a multi-MC
+   * deployment, two concurrent create-agent calls with the same
+   * agentName can both pass the `agents.ts` step 0.4 DescribeServices
+   * pre-flight, then race here:
+   *   - Create-A mints first → alias registered.
+   *   - Create-B sees duplicate alias 400 → /key/delete REVOKES
+   *     Create-A's key → mints new key for B → returns success.
+   *   - Create-A's already-written SM secret now references a
+   *     revoked key. Its task-def boot will fail at first model
+   *     call.
+   * The agents.ts step 0.4 + Phase 2.2's single-MC posture make
+   * this theoretical today. When multi-MC lands, the rotation
+   * must be replaced by a "fail loud on duplicate alias from a
+   * concurrent create" path, or guarded behind a distributed
+   * lock. Tracked as a multi-MC follow-up.
    */
   async generateKeyWithRotation(
     input: GenerateKeyInput,
