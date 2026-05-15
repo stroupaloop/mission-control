@@ -469,6 +469,14 @@ export interface WriteAgentLiteLLMKeyInput {
 /**
  * Write (or update) a per-agent LiteLLM virtual-key secret — #354.
  * Same put-or-create idempotent shape as the Slack-secret writer.
+ *
+ * Naming convention: `{MC_AGENT_SECRETS_NAME_PREFIX}-{agentName}-
+ * {suffix}` with `-` separators, matching the Slack-secret
+ * writer's use of the shared `secretName()` helper. The IAM grant
+ * (`companion-openclaw-*-litellm-*` in ender-stack PR #355) is
+ * derived from this same shape. A future third per-agent secret
+ * type should follow the same convention so the IAM patterns
+ * align without per-type bespoke shapes.
  */
 export async function writeAgentLiteLLMKey(
   input: WriteAgentLiteLLMKeyInput,

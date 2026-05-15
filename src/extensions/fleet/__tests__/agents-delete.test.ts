@@ -98,6 +98,13 @@ vi.mock('@aws-sdk/client-secrets-manager', () => ({
     __type: 'DeleteSecretCommand',
     input,
   })),
+  // Round-10 audit hygiene: included so any future test that primes
+  // a PendingDeletion → RestoreSecret path doesn't fail with a
+  // "not a constructor" error. Not exercised by current tests.
+  RestoreSecretCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'RestoreSecretCommand',
+    input,
+  })),
 }))
 
 vi.mock('@/lib/logger', () => ({
@@ -123,8 +130,11 @@ const setRequiredEnv = () => {
   process.env.MC_FLEET_PROJECT_NAME = 'ender-stack'
   process.env.MC_FLEET_ENVIRONMENT = 'dev'
   process.env.MC_AGENT_LOG_GROUP_PREFIX = '/ecs/ender-stack-dev'
-  // #354: when both are set, step 6.5 attempts /key/delete on the
-  // LiteLLM proxy; when unset, step 6.5 emits a warning + skips.
+  // #354: when both are set, step 10 attempts /key/delete on the
+  // LiteLLM proxy; when unset, step 10 emits a warning + skips.
+  // (Step numbering updated round-2 audit: revoke moved from
+  // between TG-delete and task-def-deregister to after
+  // DeleteService + DeleteLogGroup.)
   process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN =
     'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/litellm-master-key-AbC123'
   process.env.MC_LITELLM_ALB_DNS_NAME =
@@ -175,8 +185,8 @@ const mkLiteLLMDeleteResponse = (status = 200) =>
   }) as unknown as Response
 
 /**
- * #354: prime smSendMock + fetchMock so step 6.5 (LiteLLM /key/delete)
- * and step 10 (DeleteSecret) both succeed. Used by tests that bypass
+ * #354: prime smSendMock + fetchMock so step 10 (LiteLLM /key/delete)
+ * and step 11 (DeleteSecret) both succeed. Used by tests that bypass
  * happyPathMocks() but exercise the full teardown chain.
  */
 const litellmDeleteMocks = () => {
@@ -193,8 +203,8 @@ const happyPathMocks = () => {
   smSendMock.mockReset()
   fetchMock.mockReset()
 
-  // #354 step 6.5: resolve master key → /key/delete → 200.
-  // #354 step 10: DeleteSecret on the per-agent litellm secret.
+  // #354 step 10: resolve master key → /key/delete → 200.
+  // #354 step 11: DeleteSecret on the per-agent litellm secret.
   smSendMock
     .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' }) // master key read
     .mockResolvedValueOnce({}) // DeleteSecret OK
@@ -464,8 +474,8 @@ describe('DELETE /api/fleet/agents/:name — idempotency', () => {
     ecsSendMock.mockReset()
     elbv2SendMock.mockReset()
     logsSendMock.mockReset()
-    // TG already gone → step 6.5 still runs (TG-not-found doesn't
-    // short-circuit the chain); step 10 still runs after logs delete.
+    // TG already gone → step 10 (LiteLLM revoke) still runs at the
+    // end of the chain; step 11 (SM DeleteSecret) still runs after.
     litellmDeleteMocks()
 
     ecsSendMock

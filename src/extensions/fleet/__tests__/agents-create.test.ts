@@ -78,6 +78,13 @@ vi.mock('@aws-sdk/client-secrets-manager', () => ({
     __type: 'DeleteSecretCommand',
     input,
   })),
+  // Round-10 audit hygiene: included so any future test that primes
+  // a PendingDeletion → RestoreSecret path doesn't fail with a
+  // "not a constructor" error. Not exercised by current tests.
+  RestoreSecretCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'RestoreSecretCommand',
+    input,
+  })),
 }))
 
 vi.mock('@/lib/logger', () => ({

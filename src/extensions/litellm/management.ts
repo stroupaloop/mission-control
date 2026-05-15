@@ -55,22 +55,35 @@ export class LiteLLMManagementError extends Error {
   }
 
   /**
-   * Round-9 audit (Claude Medium): `pino`'s default error serializer
-   * enumerates every own-property on the error instance. That would
-   * include `bodySnippet` — which holds raw LiteLLM response text
-   * including the JSON-stringified body when /key/generate returns
-   * 200 but with a malformed shape. If a future LiteLLM proxy ever
-   * echoes partial key material alongside a missing `key` field,
-   * the snippet ends up in CloudWatch logs.
+   * Round-9 audit (Claude Medium): defense-in-depth narrowing of
+   * what gets serialized when this error class is stringified.
    *
-   * `toJSON()` here narrows the serialized shape to the fields safe
-   * to log (name, message, status, retriable). `bodySnippet` stays
-   * accessible on the instance for in-process use (the
-   * `isDuplicateAliasError` predicate reads it) but no longer flows
-   * into structured-log payloads via `logger.error({ err })`.
+   * Round-10 audit correction: pino's *default* error serializer
+   * (`pino-std-serializers`) uses a fixed-field allowlist (type,
+   * msg, stack, code) — it does NOT enumerate every own-property,
+   * so a vanilla `logger.error({ err })` with project defaults
+   * would not have leaked `bodySnippet` on its own. The risk this
+   * toJSON() actually defends against is broader:
+   *   1. Any direct `JSON.stringify(errInstance)` call —
+   *      `bodySnippet`, `status`, and `retriable` ARE enumerable
+   *      own-properties (Error.message and Error.name are not).
+   *   2. Future logging middleware, error-reporting SDKs, or
+   *      pino plugins that DO serialize all own-properties.
+   *   3. `util.inspect` in test output formatters (visible in CI
+   *      logs).
    *
-   * Note: `Error.message` is intentionally kept — it carries only
-   * the path + status code (e.g. "/key/generate returned 503"),
+   * `bodySnippet` matters for the rare 200-with-malformed-shape
+   * branch: `bodySnippet = truncate(JSON.stringify(body))`
+   * captures the full parsed response body. If a future LiteLLM
+   * proxy ever echoes partial key material alongside a missing
+   * `key` field, we don't want it to land anywhere downstream.
+   *
+   * The field stays accessible on the instance — the in-process
+   * `isDuplicateAliasError` predicate reads it directly. Only
+   * the serialized representation is narrowed.
+   *
+   * `Error.message` is intentionally kept — it carries only the
+   * path + status code (e.g. "/key/generate returned 503"),
    * never response-body content.
    */
   toJSON(): Record<string, unknown> {

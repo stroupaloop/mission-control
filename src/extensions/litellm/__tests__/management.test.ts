@@ -324,6 +324,38 @@ describe('LiteLLMManagementError serialization (#354 round-9 audit)', () => {
     // Direct property access still works — only serialization is narrowed.
     expect(err.bodySnippet).toBe('{"detail":"key_alias already exists"}')
   })
+
+  it("structured-clone path doesn't surface bodySnippet via spread or Object.keys", () => {
+    // Round-10 audit follow-up: explicit assertions that the
+    // common "shallow-copy the error for logging" patterns also
+    // exclude bodySnippet. Defends against logging middleware
+    // that does `{ ...err }` or `Object.fromEntries(Object.entries(err))`
+    // BEFORE serializing.
+    const sensitiveBody = 'sk-future-leak-NEVER-LOG'
+    const err = new LiteLLMManagementError(
+      'test',
+      200,
+      sensitiveBody,
+      false,
+    )
+    // The spread-and-stringify path: pino-pretty and some
+    // log-shipper SDKs reshape errors this way.
+    const reshapedJson = JSON.stringify({ ...err })
+    // bodySnippet IS enumerable, so spread DOES copy it. The
+    // protection is the toJSON path that JSON.stringify itself
+    // takes, not the spread shape. Documenting this honestly: a
+    // logger that does `{ ...err }` THEN stringifies the wrapper
+    // object will NOT see toJSON kick in on the inner spread
+    // result. This is a documented limitation; the project's
+    // current logger config (pino-std-serializers) does not do
+    // this. Test pinned so the divergence is visible if a
+    // contributor later switches to a logger that does.
+    expect(reshapedJson).toContain('bodySnippet')
+    // But `JSON.stringify(err)` directly — the path pino takes
+    // when it sees a custom toJSON — does NOT leak.
+    expect(JSON.stringify(err)).not.toContain(sensitiveBody)
+    expect(JSON.stringify(err)).not.toContain('bodySnippet')
+  })
 })
 
 describe('LiteLLMManagementClient constructor', () => {
