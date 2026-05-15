@@ -350,14 +350,36 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   const displayNameBytes = utf8Bytes(displayName)
   const emojiBytes = utf8Bytes(emoji)
   const personaBytes = utf8Bytes(persona)
+  // Mirror the server-side guards (templates/index.ts validatePersonaField
+  // + validateProseField) client-side so operators see immediate
+  // feedback instead of a 400 after submit. Claude bot R4 medium on
+  // PR #69. Same regex literals as constraints.ts so the two layers
+  // stay in lockstep.
+  const MARKDOWN_PREFIX_RE = /^[-*][ \t]/
+  // eslint-disable-next-line no-control-regex
+  const CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/
+  const hasProseControlChar = (s: string) => {
+    if (!CONTROL_CHAR_RE.test(s)) return false
+    return CONTROL_CHAR_RE.test(s.replace(/[\n\t]/g, ''))
+  }
   const roleDescriptionValid =
     roleDescription.trim().length > 0 &&
-    roleDescriptionBytes <= ROLE_DESCRIPTION_MAX_BYTES
+    roleDescriptionBytes <= ROLE_DESCRIPTION_MAX_BYTES &&
+    !MARKDOWN_PREFIX_RE.test(roleDescription) &&
+    !hasProseControlChar(roleDescription)
   // #357 Phase-2: optional fields. Empty = field omitted (server treats
   // as undefined). Each capped by UTF-8 byte count, not code units.
-  const displayNameValid = displayNameBytes <= DISPLAY_NAME_MAX_BYTES
-  const emojiValid = emojiBytes <= EMOJI_MAX_BYTES
-  const personaValid = personaBytes <= PERSONA_MAX_BYTES
+  const displayNameValid =
+    displayNameBytes <= DISPLAY_NAME_MAX_BYTES &&
+    !MARKDOWN_PREFIX_RE.test(displayName) &&
+    !CONTROL_CHAR_RE.test(displayName)
+  const emojiValid =
+    emojiBytes <= EMOJI_MAX_BYTES &&
+    !MARKDOWN_PREFIX_RE.test(emoji) &&
+    !CONTROL_CHAR_RE.test(emoji)
+  const personaValid =
+    personaBytes <= PERSONA_MAX_BYTES &&
+    !hasProseControlChar(persona)
   const formValid =
     agentNameValid &&
     imageValid &&

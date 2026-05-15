@@ -284,14 +284,20 @@ export function renderTaskDefinition(
     // suppressing the canonical "_(pick something you like)_"
     // placeholder. Trim before the truthy check so empty / whitespace
     // both fall through to the "not supplied" branch.
+    // Emit the trimmed value (not just guard on trim before emit) so
+    // that AGENT_DISPLAY_NAME='Aria   ' lands on the task def as
+    // 'Aria'. init-config's normField trims defensively anyway, but
+    // emitting pre-trimmed matches the operator's intent and avoids
+    // surprise in any path that bypasses init-config normalization.
+    // Claude bot R4 low on PR #69.
     ...(input.displayName?.trim()
-      ? [{ name: 'AGENT_DISPLAY_NAME', value: input.displayName }]
+      ? [{ name: 'AGENT_DISPLAY_NAME', value: input.displayName.trim() }]
       : []),
     ...(input.emoji?.trim()
-      ? [{ name: 'AGENT_EMOJI', value: input.emoji }]
+      ? [{ name: 'AGENT_EMOJI', value: input.emoji.trim() }]
       : []),
     ...(input.persona?.trim()
-      ? [{ name: 'AGENT_PERSONA', value: input.persona }]
+      ? [{ name: 'AGENT_PERSONA', value: input.persona.trim() }]
       : []),
   ]
 

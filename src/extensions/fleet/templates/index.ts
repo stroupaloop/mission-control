@@ -197,12 +197,26 @@ function validateOpenClawInput(
       `roleDescription must be ≤ ${ROLE_DESCRIPTION_MAX_BYTES} bytes; got ${roleDescriptionBytes}`,
     )
   }
-  validatePersonaField('roleDescription', input.roleDescription)
+  // roleDescription is rendered as a multi-line textarea in the form
+  // (pre-Phase-2 behavior preserved); the resulting AGENT_ROLE env var
+  // is normalized to single-line by ender-stack init-config's
+  // `normField` (CR/LF/U+2028/U+2029 → single space) before substitution
+  // into IDENTITY.md. So roleDescription tolerates LF/tab the same way
+  // persona does (multi-line prose acceptable); only non-LF/non-tab
+  // control chars are rejected.
+  //
+  // The single-line-only `validatePersonaField` is reserved for
+  // displayName / emoji where the values land in IDENTITY.md without
+  // intermediate normalization that would collapse paragraph breaks.
+  // Claude bot R4 bug finding on PR #69: applying the strict
+  // single-line check to roleDescription regressed pre-Phase-2
+  // multi-line textarea support.
+  validateProseField('roleDescription', input.roleDescription)
 
-  // #357 Phase-2: optional persona fields. Each is optional + must
-  // pass the same length-cap + structural-injection guard as
-  // roleDescription. Empty strings are treated as absent (the
-  // template emits the env var conditionally).
+  // #357 Phase-2: optional persona fields. displayName / emoji apply
+  // the single-line guard (validatePersonaField — list-item prefix +
+  // ALL control chars). persona uses the multi-line prose guard
+  // (validateProseField — control chars except LF / tab).
   if (input.displayName !== undefined) {
     const displayNameBytes = utf8Bytes(input.displayName)
     if (displayNameBytes > DISPLAY_NAME_MAX_BYTES) {
@@ -228,18 +242,22 @@ function validateOpenClawInput(
         `persona must be ≤ ${PERSONA_MAX_BYTES} bytes; got ${personaBytes}`,
       )
     }
-    // persona is multi-paragraph prose for SOUL.md — markdown is
-    // LEGITIMATE here (operators want to write **bold** etc), so we
-    // only reject control chars, NOT the list-item prefix.
-    if (input.persona && PERSONA_FIELD_CONTROL_CHAR_RE.test(input.persona)) {
-      // Allow LF (\n, 0x0A) and tab (0x09) — those are valid in prose.
-      // Strip them before re-checking; if anything still matches it's
-      // a control char we don't want.
-      const stripped = input.persona.replace(/[\n\t]/g, '')
-      if (PERSONA_FIELD_CONTROL_CHAR_RE.test(stripped)) {
-        throw new Error('persona contains disallowed control characters')
-      }
-    }
+    if (input.persona) validateProseField('persona', input.persona)
+  }
+}
+
+/**
+ * Multi-line prose validator (roleDescription + persona). Rejects
+ * disallowed control chars but ALLOWS LF and tab — operators
+ * legitimately want paragraph breaks. Markdown is legitimate too;
+ * no list-item-prefix check (init-config strips H1-H6 from persona
+ * defensively at the boot boundary).
+ */
+function validateProseField(name: string, value: string): void {
+  if (!PERSONA_FIELD_CONTROL_CHAR_RE.test(value)) return
+  const stripped = value.replace(/[\n\t]/g, '')
+  if (PERSONA_FIELD_CONTROL_CHAR_RE.test(stripped)) {
+    throw new Error(`${name} contains disallowed control characters`)
   }
 }
 

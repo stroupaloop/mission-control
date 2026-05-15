@@ -818,16 +818,20 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
     ).not.toThrow()
   })
 
-  it('#357 Phase-2 / #360 Item 1: rejects markdown list-item prefix in displayName, role, emoji', () => {
+  it('#357 Phase-2 / #360 Item 1: rejects markdown list-item prefix in displayName and emoji', () => {
+    // The single-line guard is restricted to displayName + emoji.
+    // roleDescription uses validateProseField (multi-line tolerant)
+    // because the form renders it as a textarea AND init-config's
+    // normField defensively collapses line-breaks before substitution;
+    // a roleDescription of "- pwned" lands as "- **Role:** - pwned"
+    // which is a single bullet (no structural escape). Claude R4
+    // regression bug.
     expect(() =>
       validate({ ...fixtureInput, displayName: '- inject' }),
     ).toThrow(/displayName.*list-item prefix/)
     expect(() =>
       validate({ ...fixtureInput, displayName: '* inject' }),
     ).toThrow(/displayName.*list-item prefix/)
-    expect(() =>
-      validate({ ...fixtureInput, roleDescription: '- pwned' }),
-    ).toThrow(/roleDescription.*list-item prefix/)
     expect(() =>
       validate({ ...fixtureInput, emoji: '- 🦊' }),
     ).toThrow(/emoji.*list-item prefix/)
@@ -839,21 +843,48 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
     ).not.toThrow()
   })
 
-  it('#357 Phase-2 / #360 Item 1: rejects ASCII control chars in persona fields (LF/tab allowed in persona only)', () => {
-    // displayName / roleDescription / emoji are single-line — any
-    // control char (including LF and tab) is rejected.
+  it('#357 Phase-2 / #360 Item 1: rejects ASCII control chars in single-line fields (displayName / emoji)', () => {
+    // displayName / emoji land in IDENTITY.md as single-line bullets
+    // — any control char (including LF and tab) is rejected. The
+    // single-line-only guard is reserved for these two fields where
+    // init-config does NOT normalize line breaks (substituted via
+    // regex into a pre-existing two-line bullet template).
     expect(() =>
       validate({ ...fixtureInput, displayName: 'two\nlines' }),
     ).toThrow(/displayName.*control characters/)
     expect(() =>
-      validate({ ...fixtureInput, roleDescription: 'tab\there' }),
-    ).toThrow(/roleDescription.*control characters/)
+      validate({ ...fixtureInput, displayName: 'tab\there' }),
+    ).toThrow(/displayName.*control characters/)
+    expect(() =>
+      validate({ ...fixtureInput, emoji: '\x07' }),
+    ).toThrow(/emoji.*control characters/)
+  })
 
-    // persona is multi-paragraph prose — LF and tab are LEGITIMATE
-    // (paragraph breaks, indentation). Other control chars are not.
+  it('#357 Phase-2 / Claude R4 regression: roleDescription + persona ALLOW LF / tab (prose semantics)', () => {
+    // roleDescription is rendered as a <textarea rows={4}> in the form
+    // — operators legitimately enter multi-line prose. Pre-Phase-2
+    // multi-line role descriptions were accepted at the server. After
+    // PR #69 round-1 introduced validatePersonaField for roleDescription,
+    // multi-line input got server-rejected (UX regression). Fix
+    // (claude bot R4 bug): roleDescription uses validateProseField
+    // (multi-line allowed, like persona). init-config's normField
+    // collapses LF/tab to a single space before IDENTITY.md
+    // substitution, so the multi-line value still lands as a clean
+    // single-line bullet.
+    expect(() =>
+      validate({ ...fixtureInput, roleDescription: 'multi-line\nrole' }),
+    ).not.toThrow()
+    expect(() =>
+      validate({ ...fixtureInput, roleDescription: 'tab\there' }),
+    ).not.toThrow()
+    // persona: same posture.
     expect(() =>
       validate({ ...fixtureInput, persona: 'p1\n\np2\n\tindented' }),
     ).not.toThrow()
+    // Non-LF/non-tab control chars still rejected in both.
+    expect(() =>
+      validate({ ...fixtureInput, roleDescription: 'has \x07 bell' }),
+    ).toThrow(/roleDescription.*control characters/)
     expect(() =>
       validate({ ...fixtureInput, persona: 'has \x07 bell' }),
     ).toThrow(/persona.*control characters/)
