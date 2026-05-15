@@ -775,6 +775,40 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
     ).toThrow(/persona.*1024/)
   })
 
+  it('#357 Phase-2 / Claude R2 medium: rejects multi-byte input over the UTF-8 byte cap (not just code units)', () => {
+    // Pre-fix, validation used `.length` (UTF-16 code units). 16 fox
+    // emojis are 16 code units (passes `.length ≤ 16`) but 64 UTF-8
+    // bytes — 4x the cap. init-config defensively truncates at the
+    // boot boundary, so the server passes but the value lands
+    // mangled, defeating the "operator sees the post-truncation
+    // value at submit time" trust-gap fix. Post-fix uses
+    // Buffer.byteLength.
+    const foxes = '🦊'.repeat(16) // 16 code units, 64 UTF-8 bytes
+    expect(() =>
+      validate({ ...fixtureInput, emoji: foxes }),
+    ).toThrow(/emoji.*16/)
+
+    // A persona of 700 é characters is 700 code units (passes 1024
+    // code-unit cap) but 1400 UTF-8 bytes (exceeds 1024 byte cap).
+    const accentedPersona = 'é'.repeat(700)
+    expect(() =>
+      validate({ ...fixtureInput, persona: accentedPersona }),
+    ).toThrow(/persona.*1024/)
+
+    // displayName of 33 fox emojis = 33 code units (passes 64
+    // code-unit cap) but 132 UTF-8 bytes (exceeds 64).
+    const foxName = '🦊'.repeat(33)
+    expect(() =>
+      validate({ ...fixtureInput, displayName: foxName }),
+    ).toThrow(/displayName.*64/)
+
+    // Boundary: 50 ASCII chars + 7 é = 50 + 14 = 64 bytes exactly.
+    // Within the displayName cap.
+    expect(() =>
+      validate({ ...fixtureInput, displayName: 'a'.repeat(50) + 'é'.repeat(7) }),
+    ).not.toThrow()
+  })
+
   it('#357 Phase-2 / #360 Item 1: rejects markdown list-item prefix in displayName, role, emoji', () => {
     expect(() =>
       validate({ ...fixtureInput, displayName: '- inject' }),

@@ -166,9 +166,19 @@ function validateOpenClawInput(
       'image must be a fully-qualified container ref with a non-empty tag or digest',
     )
   }
-  if (input.image.length > IMAGE_MAX_BYTES) {
+  // UTF-8 byte count, not String.prototype.length (which counts UTF-16
+  // code units). Without this, a 16-char composed-emoji `emoji` field
+  // passes (`.length === 16 ≤ 16`) but encodes to ~64 UTF-8 bytes —
+  // 4x the documented cap. The client (`create-agent-form.tsx`) uses
+  // TextEncoder for the same reason; the server boundary must match
+  // or init-config's defensive truncate silently fires and the
+  // operator-supplied value is mangled. Claude bot R2 medium on PR #69.
+  const utf8Bytes = (s: string) => Buffer.byteLength(s, 'utf8')
+
+  const imageBytes = utf8Bytes(input.image)
+  if (imageBytes > IMAGE_MAX_BYTES) {
     throw new Error(
-      `image must be ≤ ${IMAGE_MAX_BYTES} bytes; got ${input.image.length}`,
+      `image must be ≤ ${IMAGE_MAX_BYTES} bytes; got ${imageBytes}`,
     )
   }
   const allowlist = imageRegistryAllowlist()
@@ -181,9 +191,10 @@ function validateOpenClawInput(
   if (!input.roleDescription.trim()) {
     throw new Error('roleDescription is required')
   }
-  if (input.roleDescription.length > ROLE_DESCRIPTION_MAX_BYTES) {
+  const roleDescriptionBytes = utf8Bytes(input.roleDescription)
+  if (roleDescriptionBytes > ROLE_DESCRIPTION_MAX_BYTES) {
     throw new Error(
-      `roleDescription must be ≤ ${ROLE_DESCRIPTION_MAX_BYTES} bytes; got ${input.roleDescription.length}`,
+      `roleDescription must be ≤ ${ROLE_DESCRIPTION_MAX_BYTES} bytes; got ${roleDescriptionBytes}`,
     )
   }
   validatePersonaField('roleDescription', input.roleDescription)
@@ -193,25 +204,28 @@ function validateOpenClawInput(
   // roleDescription. Empty strings are treated as absent (the
   // template emits the env var conditionally).
   if (input.displayName !== undefined) {
-    if (input.displayName.length > DISPLAY_NAME_MAX_BYTES) {
+    const displayNameBytes = utf8Bytes(input.displayName)
+    if (displayNameBytes > DISPLAY_NAME_MAX_BYTES) {
       throw new Error(
-        `displayName must be ≤ ${DISPLAY_NAME_MAX_BYTES} bytes; got ${input.displayName.length}`,
+        `displayName must be ≤ ${DISPLAY_NAME_MAX_BYTES} bytes; got ${displayNameBytes}`,
       )
     }
     if (input.displayName) validatePersonaField('displayName', input.displayName)
   }
   if (input.emoji !== undefined) {
-    if (input.emoji.length > EMOJI_MAX_BYTES) {
+    const emojiBytes = utf8Bytes(input.emoji)
+    if (emojiBytes > EMOJI_MAX_BYTES) {
       throw new Error(
-        `emoji must be ≤ ${EMOJI_MAX_BYTES} bytes; got ${input.emoji.length}`,
+        `emoji must be ≤ ${EMOJI_MAX_BYTES} bytes; got ${emojiBytes}`,
       )
     }
     if (input.emoji) validatePersonaField('emoji', input.emoji)
   }
   if (input.persona !== undefined) {
-    if (input.persona.length > PERSONA_MAX_BYTES) {
+    const personaBytes = utf8Bytes(input.persona)
+    if (personaBytes > PERSONA_MAX_BYTES) {
       throw new Error(
-        `persona must be ≤ ${PERSONA_MAX_BYTES} bytes; got ${input.persona.length}`,
+        `persona must be ≤ ${PERSONA_MAX_BYTES} bytes; got ${personaBytes}`,
       )
     }
     // persona is multi-paragraph prose for SOUL.md — markdown is
