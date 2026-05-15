@@ -362,10 +362,16 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     if (!CONTROL_CHAR_RE.test(s)) return false
     return CONTROL_CHAR_RE.test(s.replace(/[\n\t]/g, ''))
   }
+  // roleDescription intentionally does NOT apply the markdown-prefix
+  // check (it would match the server's validateProseField behavior,
+  // which omits the check because the value lands as
+  // `- **Role:** $value` — single bullet content, never a structurally
+  // distinct new bullet). Pre-fix, an operator typing "- SRE Lead"
+  // saw a disabled submit but a direct API POST was accepted —
+  // client/server inconsistency. Claude bot R5 medium on PR #69.
   const roleDescriptionValid =
     roleDescription.trim().length > 0 &&
     roleDescriptionBytes <= ROLE_DESCRIPTION_MAX_BYTES &&
-    !MARKDOWN_PREFIX_RE.test(roleDescription) &&
     !hasProseControlChar(roleDescription)
   // #357 Phase-2: optional fields. Empty = field omitted (server treats
   // as undefined). Each capped by UTF-8 byte count, not code units.

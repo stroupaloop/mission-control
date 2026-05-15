@@ -276,7 +276,12 @@ export function renderTaskDefinition(
     // PERSONA_FIELD_* regexes in validateOpenClawInput reject markdown
     // structural injection prefixes; init-config defensively normalizes
     // + truncates again at the boot boundary.
-    { name: 'AGENT_ROLE', value: input.roleDescription },
+    // Trim AGENT_ROLE for consistency with the trimmed-emission posture
+    // applied to the new persona fields below (Claude bot R5 low on
+    // PR #69). init-config's normField already trims defensively but
+    // emitting pre-trimmed avoids surprise in any code path that
+    // bypasses init-config normalization.
+    { name: 'AGENT_ROLE', value: input.roleDescription.trim() },
     // Whitespace-only values are treated as absent (Greptile P1 on
     // PR #69). A truthy-but-whitespace `displayName: '   '` would
     // otherwise emit an AGENT_DISPLAY_NAME env var that init-config
@@ -313,7 +318,7 @@ export function renderTaskDefinition(
   // and can be removed in a future cleanup PR once upstream openclaw
   // standardizes on AGENT_ROLE end-to-end.
   const gatewayOnlyEnv: { name: string; value: string }[] = [
-    { name: 'OPENCLAW_ROLE_DESCRIPTION', value: input.roleDescription },
+    { name: 'OPENCLAW_ROLE_DESCRIPTION', value: input.roleDescription.trim() },
   ]
 
   // #354: secrets[] entries common to both containers.

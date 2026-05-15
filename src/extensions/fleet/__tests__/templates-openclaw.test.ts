@@ -860,6 +860,25 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
     ).toThrow(/emoji.*control characters/)
   })
 
+  it('#357 Phase-2 / Claude R5 regression: roleDescription accepts a leading markdown list-item prefix (server intent)', () => {
+    // The single-line markdown-prefix check applies to displayName +
+    // emoji only — those land as `- **Name:** $value` bullet content
+    // where a structural net-new bullet is the injection risk.
+    // roleDescription has the SAME visual posture but the field is
+    // intentionally allowed to start with `- ` (legitimate roles
+    // like "- on-call lead" / hyphenated phrases). The form / API
+    // contract must match: "- SRE Lead" → server accepts. Client
+    // had a mismatched check that the previous fix removed; this
+    // test locks the server intent so a future refactor can't
+    // silently break the allowance.
+    expect(() =>
+      validate({ ...fixtureInput, roleDescription: '- SRE Lead' }),
+    ).not.toThrow()
+    expect(() =>
+      validate({ ...fixtureInput, roleDescription: '* alternate bullet' }),
+    ).not.toThrow()
+  })
+
   it('#357 Phase-2 / Claude R4 regression: roleDescription + persona ALLOW LF / tab (prose semantics)', () => {
     // roleDescription is rendered as a <textarea rows={4}> in the form
     // — operators legitimately enter multi-line prose. Pre-Phase-2

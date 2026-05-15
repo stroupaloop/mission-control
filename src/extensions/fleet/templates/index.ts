@@ -262,16 +262,24 @@ function validateProseField(name: string, value: string): void {
 }
 
 /**
- * Shared check for displayName / roleDescription / emoji — short
- * single-line fields that land in IDENTITY.md as markdown bullets.
- * Rejects control chars and `^- `/`^* ` list-item prefixes that
- * would inject net-new trusted bullets into the agent's IDENTITY.md.
+ * Shared check for displayName / emoji — short single-line fields
+ * that land in IDENTITY.md as markdown bullet content. Rejects
+ * control chars and `^- `/`^* ` list-item prefixes that would inject
+ * net-new trusted bullets into the agent's IDENTITY.md.
+ *
+ * NOT used for roleDescription — that field uses validateProseField
+ * (multi-line allowed via textarea, init-config normField collapses
+ * line breaks at the boot boundary).
  */
 function validatePersonaField(name: string, value: string): void {
   if (PERSONA_FIELD_CONTROL_CHAR_RE.test(value)) {
     throw new Error(`${name} contains disallowed control characters`)
   }
-  if (PERSONA_FIELD_DISALLOWED_PREFIX_RE.test(value)) {
+  // Check the trimmed value — the template emits trimmed values to
+  // the task-def, so leading whitespace before a list-item prefix
+  // would otherwise bypass this check but land as a structural-look-
+  // alike after the emit-side trim. Claude bot R5 low on PR #69.
+  if (PERSONA_FIELD_DISALLOWED_PREFIX_RE.test(value.trim())) {
     throw new Error(
       `${name} cannot start with a markdown list-item prefix ` +
         `('- ' or '* '); use plain text. (#357 Phase-2 / #360 Item 1)`,
