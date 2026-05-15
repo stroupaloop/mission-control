@@ -24,6 +24,7 @@ import {
   PutSecretValueCommand,
   GetSecretValueCommand,
   DeleteSecretCommand,
+  RestoreSecretCommand,
 } from '@aws-sdk/client-secrets-manager'
 
 const AWS_REGION_AT_LOAD = process.env.AWS_REGION || 'us-east-1'
@@ -135,9 +136,33 @@ interface PutOrCreateResult {
  * branch. Round-3 audit on ender-stack#268 explicitly flagged this
  * pattern preference.
  */
+/**
+ * Detect AWS SM's "secret is scheduled for deletion" / "pending
+ * deletion" InvalidRequestException — the recovery path is
+ * RestoreSecret, not retry. AWS does not give us a structured
+ * error code for this case, only a message; matching loosely on
+ * the two phrasings AWS has shipped historically (recovery-window
+ * + immediate-deletion).
+ */
+function isPendingDeletionError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false
+  const e = err as { name?: string; message?: string }
+  if (e.name !== 'InvalidRequestException') return false
+  if (typeof e.message !== 'string') return false
+  return /scheduled for deletion|pending deletion|marked for deletion/i.test(
+    e.message,
+  )
+}
+
 export async function putOrCreateSecret(
   input: PutOrCreateInput,
 ): Promise<PutOrCreateResult> {
+  // #354: SM keeps deleted secret names reserved for the 7-day
+  // recovery window. A recreate-within-window of the same agent
+  // would otherwise 400 here. Detect PendingDeletion on both
+  // Put and Create paths, call RestoreSecret first, then retry.
+  // RestoreSecret is idempotent on an already-restored secret,
+  // so the recursion is safe.
   try {
     const resp = await secretsClient.send(
       new PutSecretValueCommand({
@@ -171,6 +196,14 @@ export async function putOrCreateSecret(
     }
     return { arn: resp.ARN, operation: 'updated' }
   } catch (err) {
+    if (isPendingDeletionError(err)) {
+      // Secret is mid-recovery-window. Restore it (idempotent)
+      // and recurse — the next Put will succeed.
+      await secretsClient.send(
+        new RestoreSecretCommand({ SecretId: input.name }),
+      )
+      return putOrCreateSecret(input)
+    }
     const name = (err as { name?: string })?.name
     if (name !== 'ResourceNotFoundException') throw err
     // Fall through to create — Put said the secret doesn't
@@ -206,6 +239,15 @@ export async function putOrCreateSecret(
       }
       return { arn: resp.ARN, operation: 'created' }
     } catch (createErr) {
+      if (isPendingDeletionError(createErr)) {
+        // PendingDeletion can also surface here when a recreate
+        // race exists. Restore and recurse — the next Put will
+        // hit the live secret.
+        await secretsClient.send(
+          new RestoreSecretCommand({ SecretId: input.name }),
+        )
+        return putOrCreateSecret(input)
+      }
       const createName = (createErr as { name?: string })?.name
       if (createName !== 'ResourceExistsException') throw createErr
       // Lost the create race. The secret now exists (the other
