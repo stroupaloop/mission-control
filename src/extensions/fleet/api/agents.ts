@@ -395,12 +395,19 @@ function getMissingEnv(env: ResolvedEnv): string[] {
   if (!env.litellmMasterKeySecretArn)
     missing.push('MC_LITELLM_MASTER_KEY_SECRET_ARN')
   // #354: per-agent virtual-key secret is written under this prefix.
-  // requireSecretsPrefix() throws if MC_AGENT_SECRETS_NAME_PREFIX is
-  // unset; surface as a missing env entry rather than a 500 later.
+  // requireSecretsPrefix() throws ConfigurationError if unset; surface
+  // as a missing env entry rather than a 500 later. Catch is narrowed
+  // to ConfigurationError (round-5 audit) so a future error path from
+  // requireSecretsPrefix doesn't silently misdiagnose as a missing
+  // env var.
   try {
     requireSecretsPrefix()
-  } catch {
-    missing.push('MC_AGENT_SECRETS_NAME_PREFIX')
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'ConfigurationError') {
+      missing.push('MC_AGENT_SECRETS_NAME_PREFIX')
+    } else {
+      throw err
+    }
   }
   return missing
 }
@@ -589,6 +596,14 @@ export async function POST(request: NextRequest) {
     const masterKey = await getLiteLLMMasterKey(
       resolved.litellmMasterKeySecretArn,
     )
+    // http:// is intentional — internal-only ALB (private subnets,
+    // internal=true, no ACM cert). The master key rides this as a
+    // Bearer token but AWS encrypts inter-AZ VPC traffic between
+    // ECS tasks and the internal ALB; the credential never leaves
+    // the VPC perimeter. Future ACM Private CA work flips this to
+    // https://; coordinate with the matching change in
+    // agents-delete.ts step 10 and the `LITELLM_BASE_URL` comment
+    // in templates/openclaw.ts so all three flip together.
     const litellmClient = new LiteLLMManagementClient(
       `http://${resolved.litellmAlbDnsName}`,
       masterKey,

@@ -512,19 +512,22 @@ export async function deleteAgentLiteLLMKey(
   agentName: string,
 ): Promise<DeleteAgentLiteLLMKeyResult> {
   const prefix = requireSecretsPrefix()
-  const secretName = `${prefix}-${agentName}-${LITELLM_KEY_SECRET_SUFFIX}`
+  // Local renamed `keySecretName` (was `secretName`) to avoid
+  // shadowing the exported `secretName()` helper at module top —
+  // round-5 audit nit. Not a behavior change.
+  const keySecretName = `${prefix}-${agentName}-${LITELLM_KEY_SECRET_SUFFIX}`
   try {
     await secretsClient.send(
       new DeleteSecretCommand({
-        SecretId: secretName,
+        SecretId: keySecretName,
         RecoveryWindowInDays: 7,
       }),
     )
-    return { alreadyDeleted: false, secretName }
+    return { alreadyDeleted: false, secretName: keySecretName }
   } catch (err) {
     const errName = (err as { name?: string })?.name
     if (errName === 'ResourceNotFoundException') {
-      return { alreadyDeleted: true, secretName }
+      return { alreadyDeleted: true, secretName: keySecretName }
     }
     // #354 round-2 audit (Greptile P2): a second DeleteSecret on a
     // secret that is already pending deletion returns
@@ -533,7 +536,7 @@ export async function deleteAgentLiteLLMKey(
     // idempotently-already-deleted so a retried teardown doesn't
     // surface a spurious litellm-secret-delete-failed warning.
     if (isPendingDeletionError(err)) {
-      return { alreadyDeleted: true, secretName }
+      return { alreadyDeleted: true, secretName: keySecretName }
     }
     throw err
   }

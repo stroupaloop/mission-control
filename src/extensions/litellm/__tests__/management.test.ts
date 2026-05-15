@@ -175,6 +175,32 @@ describe('LiteLLMManagementClient.generateKeyWithRotation (#354 round-2)', () =>
     expect(paths).toEqual(['/key/generate', '/key/delete', '/key/generate'])
   })
 
+  it('propagates rotation deleteKey 5xx without swallowing (round-5 audit gap)', async () => {
+    // Duplicate-alias on initial /key/generate → triggers rotation;
+    // /key/delete returns 5xx → expect LiteLLMManagementError(503)
+    // to propagate (caller in agents.ts maps to 502).
+    fetchMock
+      .mockResolvedValueOnce(
+        mkResponse(400, { detail: 'key_alias already exists' }),
+      )
+      .mockResolvedValueOnce(mkResponse(503, 'litellm proxy busy'))
+    const client = new LiteLLMManagementClient(BASE, MASTER)
+    await expect(
+      client.generateKeyWithRotation({
+        alias: 'a',
+        models: ['m'],
+        maxBudget: 1,
+      }),
+    ).rejects.toMatchObject({
+      name: 'LiteLLMManagementError',
+      status: 503,
+      retriable: true,
+    })
+    // Critically: no third fetch was made (the rotation's /key/generate
+    // retry was never reached because /key/delete failed first).
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('only retries ONCE — second consecutive duplicate-alias error propagates', async () => {
     fetchMock
       .mockResolvedValueOnce(

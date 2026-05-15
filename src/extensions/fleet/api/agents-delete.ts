@@ -461,12 +461,21 @@ export async function DELETE(
     // clean up AWS resources even if the LiteLLM proxy is
     // misconfigured / offline.
     const litellmKeyAlias = `${prefix}-${agentName}`
+    // Direct env reads here (vs. resolveEnv() like the create handler)
+    // are intentional: delete is best-effort soft-fail on missing
+    // LiteLLM config, while create requires both vars at request-
+    // validation time. Routing through resolveEnv would either force
+    // mandatory env (breaking delete-without-LiteLLM) or duplicate
+    // the soft-fail conditional inside the resolver — neither cleaner
+    // than the explicit reads. Round-5 audit acknowledged.
     const litellmMasterKeyArn = process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN
     const litellmAlbDnsName = process.env.MC_LITELLM_ALB_DNS_NAME
     let litellmKeyRevoked = false
     if (litellmMasterKeyArn && litellmAlbDnsName) {
       try {
         const masterKey = await getLiteLLMMasterKey(litellmMasterKeyArn)
+        // http:// is intentional — internal-only ALB; see
+        // matching comment in agents.ts step 0.5.
         const litellmClient = new LiteLLMManagementClient(
           `http://${litellmAlbDnsName}`,
           masterKey,
