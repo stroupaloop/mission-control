@@ -294,6 +294,38 @@ describe('LiteLLMManagementClient.generateKeyWithRotation (#354 round-2)', () =>
   })
 })
 
+describe('LiteLLMManagementError serialization (#354 round-9 audit)', () => {
+  it("excludes bodySnippet from JSON.stringify so pino's err serializer does not leak it to CloudWatch", () => {
+    const sensitiveBody =
+      'sk-leaked-key-material-NEVER-LOG-this-could-be-a-future-LiteLLM-error-body'
+    const err = new LiteLLMManagementError(
+      '/key/generate returned 200',
+      200,
+      sensitiveBody,
+      false,
+    )
+    const serialized = JSON.stringify(err)
+    expect(serialized).not.toContain(sensitiveBody)
+    expect(serialized).not.toContain('bodySnippet')
+    // But the other fields ARE preserved — these are operationally
+    // useful and don't carry response-body content.
+    expect(serialized).toContain('LiteLLMManagementError')
+    expect(serialized).toContain('"status":200')
+    expect(serialized).toContain('"retriable":false')
+  })
+
+  it('keeps bodySnippet readable on the instance for in-process use (isDuplicateAliasError predicate)', () => {
+    const err = new LiteLLMManagementError(
+      '/key/generate returned 400',
+      400,
+      '{"detail":"key_alias already exists"}',
+      false,
+    )
+    // Direct property access still works — only serialization is narrowed.
+    expect(err.bodySnippet).toBe('{"detail":"key_alias already exists"}')
+  })
+})
+
 describe('LiteLLMManagementClient constructor', () => {
   it('rejects empty baseUrl', () => {
     expect(() => new LiteLLMManagementClient('', MASTER)).toThrow(/baseUrl/)

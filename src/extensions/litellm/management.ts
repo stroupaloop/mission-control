@@ -53,6 +53,34 @@ export class LiteLLMManagementError extends Error {
     super(message)
     this.name = 'LiteLLMManagementError'
   }
+
+  /**
+   * Round-9 audit (Claude Medium): `pino`'s default error serializer
+   * enumerates every own-property on the error instance. That would
+   * include `bodySnippet` — which holds raw LiteLLM response text
+   * including the JSON-stringified body when /key/generate returns
+   * 200 but with a malformed shape. If a future LiteLLM proxy ever
+   * echoes partial key material alongside a missing `key` field,
+   * the snippet ends up in CloudWatch logs.
+   *
+   * `toJSON()` here narrows the serialized shape to the fields safe
+   * to log (name, message, status, retriable). `bodySnippet` stays
+   * accessible on the instance for in-process use (the
+   * `isDuplicateAliasError` predicate reads it) but no longer flows
+   * into structured-log payloads via `logger.error({ err })`.
+   *
+   * Note: `Error.message` is intentionally kept — it carries only
+   * the path + status code (e.g. "/key/generate returned 503"),
+   * never response-body content.
+   */
+  toJSON(): Record<string, unknown> {
+    return {
+      name: this.name,
+      message: this.message,
+      status: this.status,
+      retriable: this.retriable,
+    }
+  }
 }
 
 export class LiteLLMManagementClient {
