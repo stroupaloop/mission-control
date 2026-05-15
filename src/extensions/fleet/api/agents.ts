@@ -37,6 +37,36 @@ import {
   type HarnessType,
 } from '@/extensions/fleet/templates/constraints'
 import { resolveFleetPrefix } from '@/extensions/fleet/lib/fleet-prefix'
+import {
+  getLiteLLMMasterKey,
+  writeAgentLiteLLMKey,
+  deleteAgentLiteLLMKey,
+  requireSecretsPrefix,
+} from '@/extensions/fleet/lib/secrets-manager'
+import {
+  LiteLLMManagementClient,
+  LiteLLMManagementError,
+} from '@/extensions/litellm/management'
+
+/**
+ * Per-agent LiteLLM virtual-key defaults (#354). Hardcoded for now;
+ * the parent issue (#326 Track 2) anticipates per-agent overrides via
+ * the create-agent request body once the Beat 3b form has surfaced
+ * the right operator-facing controls. Filed as a follow-up.
+ *
+ * Model allowlist mirrors the smart-router fallback chain from Item 2
+ * (#337) — adding a new model to the chain WITHOUT updating this
+ * allowlist would cause MC-created agents to silently 403 on routes
+ * to the new model, while smoke-test agents (master-key) still hit it.
+ * Keep these in lock-step with services/litellm/config/litellm-config.aws.yaml.
+ */
+const DEFAULT_LITELLM_MODEL_ALLOWLIST: string[] = [
+  'openai/smart-router',
+  'anthropic/claude-haiku-4-5',
+  'anthropic/claude-sonnet-4-6',
+  'anthropic/claude-opus-4-7',
+]
+const DEFAULT_LITELLM_MAX_BUDGET_USD = 50
 
 /**
  * POST /api/fleet/agents — create a new MC-managed agent end-to-end.
@@ -126,8 +156,14 @@ interface ResolvedEnv {
   subnetIds: string[]
   securityGroupId: string
   litellmAlbDnsName: string
-  /** Optional: ARN of the LiteLLM master-key secret. Beat 5e. */
-  litellmMasterKeySecretArn?: string
+  /**
+   * ARN of the LiteLLM master-key secret. #354: required at runtime
+   * — MC reads this to authenticate to LiteLLM /key/generate and
+   * /key/delete. Empty string → fail-fast `getMissingEnv()` so a
+   * misconfigured deployment surfaces the gap as 500 ConfigurationError
+   * instead of 502 deep inside the create flow.
+   */
+  litellmMasterKeySecretArn: string
   sharedAlbName: string
 }
 
@@ -172,13 +208,12 @@ function resolveEnv(): ResolvedEnv {
       .filter(Boolean),
     securityGroupId: process.env.MC_AGENT_SECURITY_GROUP_ID || '',
     litellmAlbDnsName: process.env.MC_LITELLM_ALB_DNS_NAME || '',
-    // Optional: present when LiteLLM is deployed alongside MC.
-    // Beat 5e wires this through to the agent task-def's
-    // secrets[] so per-agent containers can authenticate to the
-    // LiteLLM proxy. Empty string is treated as "not configured"
-    // by the openclaw template (skips the entry entirely).
+    // #354: required at runtime — MC reads the master key value
+    // here to call LiteLLM /key/generate at agent-spawn time. The
+    // master key NEVER reaches the agent task-def; agents get a
+    // per-agent virtual key minted from this master key.
     litellmMasterKeySecretArn:
-      process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN || undefined,
+      process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN || '',
     sharedAlbName: `${fleetPrefix.prefix}-agents-shared`,
   }
 }
@@ -236,6 +271,21 @@ export interface CreateAgentErrorResponse {
     targetGroupArn?: string
     listenerRuleArn?: string
     logGroup?: string
+    /**
+     * #354: Per-agent LiteLLM virtual key minted via /key/generate
+     * before any AWS resource was created. If a downstream AWS call
+     * (CreateLogGroup, CreateService, etc.) fails, the key still
+     * exists on the LiteLLM proxy and the secret still exists in
+     * Secrets Manager. Operators can re-trigger create-agent (the
+     * key alias + secret name are deterministic — both will be
+     * reused) OR clean up manually by:
+     *   - `POST /key/delete key_aliases=[{prefix}-{agent}]` on the
+     *     LiteLLM proxy
+     *   - `aws secretsmanager delete-secret --secret-id
+     *     {prefix}-{agent}-litellm-key`
+     */
+    litellmKeyAlias?: string
+    litellmSecretArn?: string
     /**
      * Defensive: present only when CreateService completed without
      * the serviceArn field (an SDK contract violation — extremely
@@ -342,6 +392,17 @@ function getMissingEnv(env: ResolvedEnv): string[] {
   if (env.subnetIds.length === 0) missing.push('MC_AGENT_SUBNET_IDS')
   if (!env.securityGroupId) missing.push('MC_AGENT_SECURITY_GROUP_ID')
   if (!env.litellmAlbDnsName) missing.push('MC_LITELLM_ALB_DNS_NAME')
+  // #354: MC reads the master key to mint per-agent virtual keys.
+  if (!env.litellmMasterKeySecretArn)
+    missing.push('MC_LITELLM_MASTER_KEY_SECRET_ARN')
+  // #354: per-agent virtual-key secret is written under this prefix.
+  // requireSecretsPrefix() throws if MC_AGENT_SECRETS_NAME_PREFIX is
+  // unset; surface as a missing env entry rather than a 500 later.
+  try {
+    requireSecretsPrefix()
+  } catch {
+    missing.push('MC_AGENT_SECRETS_NAME_PREFIX')
+  }
   return missing
 }
 
@@ -466,6 +527,12 @@ export async function POST(request: NextRequest) {
     )
   }
 
+  // litellmAgentKeySecretArn is filled in by step 0.5 below — the
+  // per-agent virtual-key secret only exists AFTER /key/generate +
+  // SecretsManager write succeed. Until then it's undefined and
+  // the template would emit an empty `secrets[]` array; the create
+  // flow never reaches the template in that state (step 0.5
+  // throws and we return 502).
   const env: OpenClawAgentEnv = {
     region: resolved.region,
     prefix: resolved.prefix,
@@ -477,7 +544,6 @@ export async function POST(request: NextRequest) {
     subnetIds: resolved.subnetIds,
     securityGroupId: resolved.securityGroupId,
     litellmAlbDnsName: resolved.litellmAlbDnsName,
-    litellmMasterKeySecretArn: resolved.litellmMasterKeySecretArn,
     tags: buildTags(resolved),
   }
 
@@ -493,7 +559,56 @@ export async function POST(request: NextRequest) {
   // operators delete orphans manually using these ARNs.
   const partial: NonNullable<CreateAgentErrorResponse['partialResources']> = {}
 
+  // #354: deterministic alias so the delete path can revoke the
+  // key without a secondary lookup. Combining the fleet prefix
+  // with the agent name keeps the alias unique across environments
+  // sharing one LiteLLM proxy.
+  const litellmKeyAlias = `${resolved.prefix}-${input.agentName}`
+
   try {
+    // ================================================================
+    // Step 0.5: Mint per-agent LiteLLM virtual key (#354)
+    // ================================================================
+    // Runs BEFORE any AWS resource is provisioned so a /key/generate
+    // failure leaves zero orphans. Sequence:
+    //   a. Resolve master key from Secrets Manager (MC's task role
+    //      has `SecretsManagerReadLiteLLMMasterKey`).
+    //   b. POST /key/generate to the LiteLLM proxy at
+    //      http://{albDns}/key/generate with a model allowlist +
+    //      monthly budget cap. LiteLLM returns the virtual key.
+    //   c. Write the key to Secrets Manager at
+    //      `{prefix}-{agent}-litellm-key`. The agent execution
+    //      role's wildcard `companion-openclaw-*` GetSecretValue
+    //      grant covers it at task launch.
+    //   d. Stash the resulting ARN on the template env so the
+    //      task-def's `secrets[]` entry points at the per-agent
+    //      secret instead of the master key.
+    //
+    // The master key never reaches the agent task-def in this
+    // post-#354 world — it's MC-internal auth for the LiteLLM
+    // management API only.
+    const masterKey = await getLiteLLMMasterKey(
+      resolved.litellmMasterKeySecretArn,
+    )
+    const litellmClient = new LiteLLMManagementClient(
+      `http://${resolved.litellmAlbDnsName}`,
+      masterKey,
+    )
+    const { key: virtualKey } = await litellmClient.generateKey({
+      alias: litellmKeyAlias,
+      models: DEFAULT_LITELLM_MODEL_ALLOWLIST,
+      maxBudget: DEFAULT_LITELLM_MAX_BUDGET_USD,
+    })
+    partial.litellmKeyAlias = litellmKeyAlias
+    const litellmSecretArn = await writeAgentLiteLLMKey({
+      agentName: input.agentName,
+      projectName: resolved.projectName,
+      environment: resolved.environment,
+      virtualKey,
+    })
+    partial.litellmSecretArn = litellmSecretArn
+    env.litellmAgentKeySecretArn = litellmSecretArn
+
     // 1. Resolve the shared listener ARN. DescribeLoadBalancers (by
     // name) → DescribeListeners (by LB ARN) → filter to the HTTP:80
     // listener. Both calls are read-only and covered by the

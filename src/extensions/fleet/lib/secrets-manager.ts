@@ -23,6 +23,7 @@ import {
   CreateSecretCommand,
   PutSecretValueCommand,
   GetSecretValueCommand,
+  DeleteSecretCommand,
 } from '@aws-sdk/client-secrets-manager'
 
 const AWS_REGION_AT_LOAD = process.env.AWS_REGION || 'us-east-1'
@@ -333,6 +334,120 @@ export async function writeSlackSecrets(
  * payloads. The only legitimate use is as a Bearer token on the
  * outbound Slack API call.
  */
+/**
+ * Per-agent LiteLLM virtual-key secret name suffix (#354). Append
+ * after `${prefix}-${agentName}-`. Falls under the IAM scope
+ * `${project}/${env}/companion-openclaw-*-litellm-*`.
+ */
+export const LITELLM_KEY_SECRET_SUFFIX = 'litellm-key'
+
+/**
+ * Read the LiteLLM master key from Secrets Manager — #354. Used by
+ * MC's create-agent and delete-agent handlers to authenticate to
+ * the LiteLLM /key/generate and /key/delete management endpoints.
+ *
+ * IAM scope: MC's task role has `secretsmanager:GetSecretValue` on
+ * `${project}/${env}/litellm-master-key*` (provisioned alongside
+ * this PR's IAM changes — see SecretsManagerReadLiteLLMMasterKey
+ * in `task_ecs_write`).
+ *
+ * Token-non-leak guarantee: the returned string is the raw master
+ * key. Callers MUST NOT log it, surface it in API responses, or
+ * pass it to error.message payloads. The only legitimate use is
+ * as a Bearer token on the outbound LiteLLM API call.
+ */
+export async function getLiteLLMMasterKey(arn: string): Promise<string> {
+  let resp
+  try {
+    resp = await secretsClient.send(
+      new GetSecretValueCommand({ SecretId: arn }),
+    )
+  } catch (err) {
+    const errName = (err as { name?: string })?.name
+    if (errName === 'ResourceNotFoundException') {
+      const e = new Error(
+        `LiteLLM master-key secret not found at ${arn}. Verify MC_LITELLM_MASTER_KEY_SECRET_ARN points at the provisioned secret.`,
+      )
+      e.name = 'LiteLLMMasterKeyNotFound'
+      throw e
+    }
+    throw err
+  }
+  if (!resp.SecretString) {
+    const err = new Error(
+      `GetSecretValue for LiteLLM master-key secret returned no SecretString.`,
+    )
+    err.name = 'LiteLLMMasterKeyMalformed'
+    throw err
+  }
+  return resp.SecretString
+}
+
+export interface WriteAgentLiteLLMKeyInput {
+  agentName: string
+  projectName: string
+  environment: string
+  /** The virtual key returned by LiteLLM /key/generate. */
+  virtualKey: string
+}
+
+/**
+ * Write (or update) a per-agent LiteLLM virtual-key secret — #354.
+ * Same put-or-create idempotent shape as the Slack-secret writer.
+ */
+export async function writeAgentLiteLLMKey(
+  input: WriteAgentLiteLLMKeyInput,
+): Promise<string> {
+  const prefix = requireSecretsPrefix()
+  const name = `${prefix}-${input.agentName}-${LITELLM_KEY_SECRET_SUFFIX}`
+  const tags: Array<{ Key: string; Value: string }> = [
+    { Key: 'Project', Value: input.projectName },
+    { Key: 'Environment', Value: input.environment },
+    { Key: 'Owner', Value: 'mission-control' },
+    { Key: 'ManagedBy', Value: 'mission-control' },
+    { Key: 'Component', Value: 'agent-credential' },
+    { Key: 'AgentName', Value: input.agentName },
+    { Key: 'SecretType', Value: LITELLM_KEY_SECRET_SUFFIX },
+  ]
+  const { arn } = await putOrCreateSecret({
+    name,
+    value: input.virtualKey,
+    description: `LiteLLM virtual key for agent ${input.agentName} (Mission Control)`,
+    tags,
+  })
+  return arn
+}
+
+/**
+ * Schedule deletion of an agent's LiteLLM virtual-key secret — #354.
+ *
+ * Uses a 7-day recovery window so an accidental delete can be
+ * restored before the secret is permanently destroyed. A 404 is
+ * treated as already-deleted (idempotent), matching the rule/TG
+ * not-found posture of agents-delete.ts.
+ */
+export async function deleteAgentLiteLLMKey(
+  agentName: string,
+): Promise<{ alreadyDeleted: boolean }> {
+  const prefix = requireSecretsPrefix()
+  const name = `${prefix}-${agentName}-${LITELLM_KEY_SECRET_SUFFIX}`
+  try {
+    await secretsClient.send(
+      new DeleteSecretCommand({
+        SecretId: name,
+        RecoveryWindowInDays: 7,
+      }),
+    )
+    return { alreadyDeleted: false }
+  } catch (err) {
+    const errName = (err as { name?: string })?.name
+    if (errName === 'ResourceNotFoundException') {
+      return { alreadyDeleted: true }
+    }
+    throw err
+  }
+}
+
 export async function getSlackBotToken(agentName: string): Promise<string> {
   const prefix = requireSecretsPrefix()
   const fullSecretName = secretName(prefix, agentName, 'slack-bot-token')

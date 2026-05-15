@@ -1,0 +1,158 @@
+/**
+ * LiteLLM key-management API client — issue #354.
+ *
+ * Thin wrapper around the two LiteLLM proxy endpoints MC uses to
+ * provision and revoke per-agent virtual keys:
+ *   - `POST /key/generate` — creates a scoped virtual key with a
+ *     deterministic `key_alias`, a model allowlist, and a monthly
+ *     spend cap. Called from the fleet create-agent handler before
+ *     any AWS resources are provisioned (a failure here aborts the
+ *     create with zero orphans).
+ *   - `POST /key/delete` — revokes a virtual key by alias. Called
+ *     from the fleet delete-agent handler. A 404 from the proxy is
+ *     treated as already-deleted (idempotent).
+ *
+ * Auth: the LiteLLM master key. Resolved by the caller from Secrets
+ * Manager and passed in at constructor time. Never logged. Never
+ * surfaced in responses.
+ *
+ * Errors: all non-2xx responses (and network failures) throw
+ * `LiteLLMManagementError` with the original status, response body
+ * text (truncated), and a flag for whether the failure is retriable
+ * (5xx + network) vs fatal (4xx).
+ */
+
+const REQUEST_TIMEOUT_MS = 5_000
+const BODY_TRUNCATION_LIMIT = 512
+
+export interface GenerateKeyInput {
+  /** Deterministic alias used to identify the key at delete time. */
+  alias: string
+  /** Model allowlist — LiteLLM rejects requests for any model outside the list. */
+  models: string[]
+  /** Monthly spend cap in USD. */
+  maxBudget: number
+}
+
+export interface GenerateKeyResult {
+  /** The generated virtual key (sk-…). Caller stores in Secrets Manager. */
+  key: string
+}
+
+export interface DeleteKeyInput {
+  alias: string
+}
+
+export class LiteLLMManagementError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly bodySnippet: string,
+    public readonly retriable: boolean,
+  ) {
+    super(message)
+    this.name = 'LiteLLMManagementError'
+  }
+}
+
+export class LiteLLMManagementClient {
+  constructor(
+    private readonly baseUrl: string,
+    private readonly masterKey: string,
+  ) {
+    if (!baseUrl) throw new Error('LiteLLMManagementClient: baseUrl required')
+    if (!masterKey) throw new Error('LiteLLMManagementClient: masterKey required')
+  }
+
+  async generateKey(input: GenerateKeyInput): Promise<GenerateKeyResult> {
+    const body = await this.post('/key/generate', {
+      key_alias: input.alias,
+      models: input.models,
+      max_budget: input.maxBudget,
+    })
+    const key = (body as { key?: unknown }).key
+    if (typeof key !== 'string' || !key) {
+      throw new LiteLLMManagementError(
+        '/key/generate returned no key field',
+        200,
+        truncate(JSON.stringify(body)),
+        false,
+      )
+    }
+    return { key }
+  }
+
+  /**
+   * Revoke a key by alias. LiteLLM accepts either `keys: [<sk-…>]` or
+   * `key_aliases: [<alias>]` — using aliases here so the delete path
+   * can identify the key without first reading the per-agent secret.
+   *
+   * A 404 from the proxy (alias not found) is NOT thrown — returns
+   * `{ alreadyDeleted: true }`. Matches the idempotent shape the
+   * fleet delete handler uses for missing AWS resources.
+   */
+  async deleteKey(input: DeleteKeyInput): Promise<{ alreadyDeleted: boolean }> {
+    try {
+      await this.post('/key/delete', { key_aliases: [input.alias] })
+      return { alreadyDeleted: false }
+    } catch (err) {
+      if (err instanceof LiteLLMManagementError && err.status === 404) {
+        return { alreadyDeleted: true }
+      }
+      throw err
+    }
+  }
+
+  private async post(path: string, payload: unknown): Promise<unknown> {
+    const url = `${this.baseUrl.replace(/\/$/, '')}${path}`
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    let resp: Response
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.masterKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      })
+    } catch (err) {
+      throw new LiteLLMManagementError(
+        `${path} network error: ${(err as Error).message}`,
+        0,
+        '',
+        true,
+      )
+    } finally {
+      clearTimeout(timer)
+    }
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '')
+      throw new LiteLLMManagementError(
+        `${path} returned ${resp.status}`,
+        resp.status,
+        truncate(text),
+        resp.status >= 500,
+      )
+    }
+
+    try {
+      return await resp.json()
+    } catch (err) {
+      throw new LiteLLMManagementError(
+        `${path} returned non-JSON body: ${(err as Error).message}`,
+        resp.status,
+        '',
+        false,
+      )
+    }
+  }
+}
+
+function truncate(s: string): string {
+  if (s.length <= BODY_TRUNCATION_LIMIT) return s
+  return `${s.slice(0, BODY_TRUNCATION_LIMIT)}…[truncated ${s.length - BODY_TRUNCATION_LIMIT} chars]`
+}

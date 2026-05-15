@@ -1,8 +1,10 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
 const ecsSendMock = vi.fn()
 const elbv2SendMock = vi.fn()
 const logsSendMock = vi.fn()
+const smSendMock = vi.fn()
+const fetchMock = vi.fn()
 
 vi.mock('@aws-sdk/client-ecs', () => ({
   ECSClient: vi.fn().mockImplementation(() => ({ send: ecsSendMock })),
@@ -56,6 +58,28 @@ vi.mock('@aws-sdk/client-cloudwatch-logs', () => ({
   })),
 }))
 
+vi.mock('@aws-sdk/client-secrets-manager', () => ({
+  SecretsManagerClient: vi
+    .fn()
+    .mockImplementation(() => ({ send: smSendMock })),
+  GetSecretValueCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'GetSecretValueCommand',
+    input,
+  })),
+  CreateSecretCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'CreateSecretCommand',
+    input,
+  })),
+  PutSecretValueCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'PutSecretValueCommand',
+    input,
+  })),
+  DeleteSecretCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DeleteSecretCommand',
+    input,
+  })),
+}))
+
 vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
 }))
@@ -87,6 +111,12 @@ const setRequiredEnv = () => {
   process.env.MC_AGENT_SUBNET_IDS = 'subnet-1,subnet-2'
   process.env.MC_AGENT_SECURITY_GROUP_ID = 'sg-ecs'
   process.env.MC_LITELLM_ALB_DNS_NAME = 'internal-litellm.us-east-1.elb.amazonaws.com'
+  // #354: MC reads master key for /key/generate; writes per-agent
+  // virtual key under the agent-secrets prefix.
+  process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN =
+    'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/litellm-master-key-AbC123'
+  process.env.MC_AGENT_SECRETS_NAME_PREFIX =
+    'ender-stack/dev/companion-openclaw'
 }
 
 const validBody = () => ({
@@ -102,13 +132,64 @@ const mkRequest = (body: unknown) =>
     url: 'http://localhost/api/fleet/agents',
   }) as unknown as Parameters<Awaited<ReturnType<typeof importHandler>>>[0]
 
+// #354: response helper for the LiteLLM /key/generate fetch.
+const mkLiteLLMKeyResponse = (key = 'sk-virtual-agent-NEVER-LOG') =>
+  ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ key }),
+    json: async () => ({ key }),
+  }) as unknown as Response
+
+/**
+ * #354: prime smSendMock + fetchMock so step 0.5 (LiteLLM
+ * /key/generate + write per-agent secret) succeeds. Used by any
+ * test that bypasses happyPathMocks() but still expects a 201.
+ */
+const litellmStep05Mocks = (
+  perAgentSecretArn = 'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/companion-openclaw-hello-bot-litellm-key-XyZ789',
+) => {
+  smSendMock
+    .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
+    .mockRejectedValueOnce(
+      Object.assign(new Error('not found'), {
+        name: 'ResourceNotFoundException',
+      }),
+    )
+    .mockResolvedValueOnce({ ARN: perAgentSecretArn })
+  fetchMock.mockResolvedValueOnce(mkLiteLLMKeyResponse())
+}
+
 const happyPathMocks = () => {
-  // Order: DescribeLBs → DescribeListeners → CreateLogGroup →
+  // Order: GetSecretValue (master) → fetch /key/generate →
+  // PutSecretValue (or CreateSecret) for per-agent key →
+  // DescribeLBs → DescribeListeners → CreateLogGroup →
   // PutRetentionPolicy → RegisterTaskDef → CreateTargetGroup →
   // DescribeRules (priority allocation) → CreateRule → CreateService.
   elbv2SendMock.mockReset()
   ecsSendMock.mockReset()
   logsSendMock.mockReset()
+  smSendMock.mockReset()
+  fetchMock.mockReset()
+
+  // #354: SecretsManager call sequence — master-key read,
+  // then per-agent virtual-key write. writeAgentLiteLLMKey
+  // uses Put-or-Create (Put first); first-time path Put
+  // returns ResourceNotFoundException → fall through to
+  // CreateSecret. Three SDK calls total.
+  smSendMock
+    .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
+    .mockRejectedValueOnce(
+      Object.assign(new Error('not found'), {
+        name: 'ResourceNotFoundException',
+      }),
+    )
+    .mockResolvedValueOnce({
+      ARN: 'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/companion-openclaw-hello-bot-litellm-key-XyZ789',
+    })
+
+  // #354: LiteLLM /key/generate returns the new virtual key.
+  fetchMock.mockResolvedValueOnce(mkLiteLLMKeyResponse())
 
   elbv2SendMock
     .mockResolvedValueOnce({
@@ -174,6 +255,13 @@ beforeEach(() => {
   ecsSendMock.mockReset()
   elbv2SendMock.mockReset()
   logsSendMock.mockReset()
+  smSendMock.mockReset()
+  fetchMock.mockReset()
+  vi.stubGlobal('fetch', fetchMock)
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
 })
 
 describe('POST /api/fleet/agents — env validation', () => {
@@ -447,6 +535,7 @@ describe('POST /api/fleet/agents — happy path', () => {
 
 describe('POST /api/fleet/agents — error handling', () => {
   it('returns 502 with the SDK error name when the shared ALB is missing', async () => {
+    litellmStep05Mocks()
     elbv2SendMock.mockResolvedValueOnce({ LoadBalancers: [] })
     const POST = await importHandler()
     const resp = await POST(mkRequest(validBody()))
@@ -546,6 +635,7 @@ describe('POST /api/fleet/agents — error handling', () => {
   it('returns 409 on DuplicateTargetGroupNameException', async () => {
     // CreateTargetGroup is called before DescribeRules (the priority
     // allocator), so this error path doesn't reach DescribeRules.
+    litellmStep05Mocks()
     elbv2SendMock
       .mockResolvedValueOnce({
         LoadBalancers: [{ LoadBalancerArn: 'arn:lb' }],
@@ -629,6 +719,9 @@ describe('POST /api/fleet/agents — listener selection', () => {
     elbv2SendMock.mockReset()
     ecsSendMock.mockReset()
     logsSendMock.mockReset()
+    smSendMock.mockReset()
+    fetchMock.mockReset()
+    litellmStep05Mocks()
 
     elbv2SendMock
       .mockResolvedValueOnce({
@@ -680,6 +773,7 @@ describe('POST /api/fleet/agents — listener selection', () => {
   })
 
   it('502s with a clear error when the LB has only an HTTPS listener', async () => {
+    litellmStep05Mocks()
     elbv2SendMock.mockReset()
     elbv2SendMock
       .mockResolvedValueOnce({
@@ -708,5 +802,176 @@ describe('POST /api/fleet/agents — env edge cases', () => {
       retentionCall![0] as { input: { retentionInDays: number } }
     ).input
     expect(input.retentionInDays).toBe(365)
+  })
+
+  it('returns 500 ConfigurationError when MC_LITELLM_MASTER_KEY_SECRET_ARN is unset (#354)', async () => {
+    delete process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('ConfigurationError')
+    expect(json.detail).toContain('MC_LITELLM_MASTER_KEY_SECRET_ARN')
+  })
+
+  it('returns 500 ConfigurationError when MC_AGENT_SECRETS_NAME_PREFIX is unset (#354)', async () => {
+    delete process.env.MC_AGENT_SECRETS_NAME_PREFIX
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('ConfigurationError')
+    expect(json.detail).toContain('MC_AGENT_SECRETS_NAME_PREFIX')
+  })
+})
+
+describe('POST /api/fleet/agents — per-agent LiteLLM virtual key (#354)', () => {
+  it('mints a per-agent virtual key, stores it in SM, and wires the per-agent ARN into the task-def secrets[]', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(201)
+
+    // /key/generate was called once with the right body shape.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(
+      'http://internal-litellm.us-east-1.elb.amazonaws.com/key/generate',
+    )
+    expect(init.method).toBe('POST')
+    const headers = init.headers as Record<string, string>
+    expect(headers.Authorization).toBe('Bearer sk-master-NEVER-LOG')
+    const body = JSON.parse(init.body as string)
+    expect(body.key_alias).toBe('ender-stack-dev-hello-bot')
+    expect(body.models).toEqual([
+      'openai/smart-router',
+      'anthropic/claude-haiku-4-5',
+      'anthropic/claude-sonnet-4-6',
+      'anthropic/claude-opus-4-7',
+    ])
+    expect(body.max_budget).toBe(50)
+
+    // SecretsManager: 1) GetSecretValue (master), 2) PutSecretValue
+    // (Put-first idempotent path → not-found), 3) CreateSecret.
+    const smCalls = smSendMock.mock.calls.map(
+      (c) => (c[0] as { __type: string }).__type,
+    )
+    expect(smCalls[0]).toBe('GetSecretValueCommand')
+    expect(smCalls[1]).toBe('PutSecretValueCommand')
+    expect(smCalls[2]).toBe('CreateSecretCommand')
+    const createInput = (smSendMock.mock.calls[2][0] as {
+      input: { Name: string; Tags: Array<{ Key: string; Value: string }> }
+    }).input
+    expect(createInput.Name).toBe(
+      'ender-stack/dev/companion-openclaw-hello-bot-litellm-key',
+    )
+    const tagMap = Object.fromEntries(
+      createInput.Tags.map((t) => [t.Key, t.Value]),
+    )
+    expect(tagMap.Project).toBe('ender-stack')
+    expect(tagMap.AgentName).toBe('hello-bot')
+    expect(tagMap.SecretType).toBe('litellm-key')
+
+    // The RegisterTaskDefinition call carries the per-agent secret
+    // ARN in its secrets[] entry, NOT the master-key ARN.
+    const registerCall = ecsSendMock.mock.calls.find(
+      (c) =>
+        (c[0] as { __type: string }).__type === 'RegisterTaskDefinitionCommand',
+    )
+    expect(registerCall).toBeDefined()
+    const containerDefs = (
+      registerCall![0] as {
+        input: { containerDefinitions: Array<Record<string, unknown>> }
+      }
+    ).input.containerDefinitions
+    for (const c of containerDefs) {
+      const secrets = (c.secrets ?? []) as Array<{
+        name: string
+        valueFrom: string
+      }>
+      const virtualKey = secrets.find((s) => s.name === 'LITELLM_VIRTUAL_KEY')
+      expect(virtualKey).toBeDefined()
+      expect(virtualKey!.valueFrom).toContain(
+        'companion-openclaw-hello-bot-litellm-key',
+      )
+      // Master-key ARN must NOT leak into the task-def.
+      expect(virtualKey!.valueFrom).not.toContain('litellm-master-key')
+    }
+  })
+
+  it('aborts the create with 502 if /key/generate fails — no AWS resources are touched', async () => {
+    // Master-key read succeeds, /key/generate 503s.
+    smSendMock.mockResolvedValueOnce({
+      SecretString: 'sk-master-NEVER-LOG',
+    })
+    fetchMock.mockResolvedValueOnce(
+      ({
+        ok: false,
+        status: 503,
+        text: async () => 'upstream busy',
+        json: async () => ({}),
+      }) as unknown as Response,
+    )
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as {
+      error: string
+      partialResources?: Record<string, unknown>
+    }
+    expect(json.error).toBe('LiteLLMManagementError')
+    // No partial AWS resources — we failed before any AWS call.
+    expect(json.partialResources?.taskDefinitionArn).toBeUndefined()
+    expect(json.partialResources?.targetGroupArn).toBeUndefined()
+    expect(json.partialResources?.listenerRuleArn).toBeUndefined()
+    expect(json.partialResources?.logGroup).toBeUndefined()
+    expect(elbv2SendMock).not.toHaveBeenCalled()
+    expect(ecsSendMock).not.toHaveBeenCalled()
+    expect(logsSendMock).not.toHaveBeenCalled()
+  })
+
+  it('aborts the create with 502 if master-key Secrets Manager read fails', async () => {
+    smSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('not found'), {
+        name: 'ResourceNotFoundException',
+      }),
+    )
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('LiteLLMMasterKeyNotFound')
+    // /key/generate was never called.
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(elbv2SendMock).not.toHaveBeenCalled()
+  })
+
+  it('surfaces partialResources.litellmKeyAlias when SM write fails after /key/generate succeeded', async () => {
+    // Master read OK, /key/generate OK, but Put + Create both fail
+    // → the key is on LiteLLM but we never wrote the SM secret.
+    smSendMock
+      .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('not found'), {
+          name: 'ResourceNotFoundException',
+        }),
+      )
+      .mockRejectedValueOnce(
+        Object.assign(new Error('quota'), { name: 'LimitExceededException' }),
+      )
+    fetchMock.mockResolvedValueOnce(mkLiteLLMKeyResponse())
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as {
+      error: string
+      partialResources?: { litellmKeyAlias?: string; litellmSecretArn?: string }
+    }
+    // Operator needs the alias so they can revoke the now-orphaned key.
+    expect(json.partialResources?.litellmKeyAlias).toBe(
+      'ender-stack-dev-hello-bot',
+    )
+    // SM write failed → no ARN to surface.
+    expect(json.partialResources?.litellmSecretArn).toBeUndefined()
   })
 })

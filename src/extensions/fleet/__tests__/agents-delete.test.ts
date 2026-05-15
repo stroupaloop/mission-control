@@ -1,9 +1,11 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest'
 import * as auth from '@/lib/auth'
 
 const ecsSendMock = vi.fn()
 const elbv2SendMock = vi.fn()
 const logsSendMock = vi.fn()
+const smSendMock = vi.fn()
+const fetchMock = vi.fn()
 
 // AWS SDK mock — same pattern as agents-create.test.ts. Each Command
 // constructor wraps its input in a __type-tagged plain object so the
@@ -76,6 +78,28 @@ vi.mock('@aws-sdk/client-cloudwatch-logs', () => ({
   })),
 }))
 
+vi.mock('@aws-sdk/client-secrets-manager', () => ({
+  SecretsManagerClient: vi
+    .fn()
+    .mockImplementation(() => ({ send: smSendMock })),
+  GetSecretValueCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'GetSecretValueCommand',
+    input,
+  })),
+  CreateSecretCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'CreateSecretCommand',
+    input,
+  })),
+  PutSecretValueCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'PutSecretValueCommand',
+    input,
+  })),
+  DeleteSecretCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DeleteSecretCommand',
+    input,
+  })),
+}))
+
 vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
 }))
@@ -99,6 +123,14 @@ const setRequiredEnv = () => {
   process.env.MC_FLEET_PROJECT_NAME = 'ender-stack'
   process.env.MC_FLEET_ENVIRONMENT = 'dev'
   process.env.MC_AGENT_LOG_GROUP_PREFIX = '/ecs/ender-stack-dev'
+  // #354: when both are set, step 6.5 attempts /key/delete on the
+  // LiteLLM proxy; when unset, step 6.5 emits a warning + skips.
+  process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN =
+    'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/litellm-master-key-AbC123'
+  process.env.MC_LITELLM_ALB_DNS_NAME =
+    'internal-litellm.us-east-1.elb.amazonaws.com'
+  process.env.MC_AGENT_SECRETS_NAME_PREFIX =
+    'ender-stack/dev/companion-openclaw'
 }
 
 // Resource ARN/name fixtures matching the deterministic naming the
@@ -133,10 +165,40 @@ const mkParams = (name: string = AGENT) => ({
  *   → ecs:ListTaskDefinitions → DeregisterTaskDefinition (×2) → DeleteService
  *   → logs:DeleteLogGroup
  */
+// #354: response helper for the LiteLLM /key/delete fetch.
+const mkLiteLLMDeleteResponse = (status = 200) =>
+  ({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => JSON.stringify({ deleted: 1 }),
+    json: async () => ({ deleted: 1 }),
+  }) as unknown as Response
+
+/**
+ * #354: prime smSendMock + fetchMock so step 6.5 (LiteLLM /key/delete)
+ * and step 10 (DeleteSecret) both succeed. Used by tests that bypass
+ * happyPathMocks() but exercise the full teardown chain.
+ */
+const litellmDeleteMocks = () => {
+  smSendMock
+    .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
+    .mockResolvedValueOnce({})
+  fetchMock.mockResolvedValueOnce(mkLiteLLMDeleteResponse(200))
+}
+
 const happyPathMocks = () => {
   ecsSendMock.mockReset()
   elbv2SendMock.mockReset()
   logsSendMock.mockReset()
+  smSendMock.mockReset()
+  fetchMock.mockReset()
+
+  // #354 step 6.5: resolve master key → /key/delete → 200.
+  // #354 step 10: DeleteSecret on the per-agent litellm secret.
+  smSendMock
+    .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' }) // master key read
+    .mockResolvedValueOnce({}) // DeleteSecret OK
+  fetchMock.mockResolvedValueOnce(mkLiteLLMDeleteResponse(200))
 
   ecsSendMock
     // 1. DescribeServices — service exists, ACTIVE, agent-harness + MC-managed
@@ -203,6 +265,13 @@ beforeEach(() => {
   ecsSendMock.mockReset()
   elbv2SendMock.mockReset()
   logsSendMock.mockReset()
+  smSendMock.mockReset()
+  fetchMock.mockReset()
+  vi.stubGlobal('fetch', fetchMock)
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
 })
 
 describe('DELETE /api/fleet/agents/:name — happy path', () => {
@@ -225,6 +294,12 @@ describe('DELETE /api/fleet/agents/:name — happy path', () => {
       targetGroupArn: TG_ARN,
       logGroup: LOG_GROUP,
       taskDefinitionRevisions: [TASK_DEF_ARN_1, TASK_DEF_ARN_2],
+      // #354: per-agent LiteLLM virtual key + Secrets Manager
+      // secret are revoked alongside the AWS resources. The
+      // secret name uses MC_AGENT_SECRETS_NAME_PREFIX (slash-form)
+      // rather than the fleet prefix (dash-form).
+      litellmKeyAlias: `${PREFIX}-${AGENT}`,
+      litellmSecretName: `ender-stack/dev/companion-openclaw-${AGENT}-litellm-key`,
     })
     expect(json.warnings).toEqual([])
   })
@@ -284,6 +359,7 @@ describe('DELETE /api/fleet/agents/:name — idempotency', () => {
     ecsSendMock.mockReset()
     elbv2SendMock.mockReset()
     logsSendMock.mockReset()
+    litellmDeleteMocks()
 
     ecsSendMock
       .mockResolvedValueOnce({
@@ -330,6 +406,7 @@ describe('DELETE /api/fleet/agents/:name — idempotency', () => {
     ecsSendMock.mockReset()
     elbv2SendMock.mockReset()
     logsSendMock.mockReset()
+    litellmDeleteMocks()
 
     ecsSendMock
       .mockResolvedValueOnce({
@@ -387,6 +464,9 @@ describe('DELETE /api/fleet/agents/:name — idempotency', () => {
     ecsSendMock.mockReset()
     elbv2SendMock.mockReset()
     logsSendMock.mockReset()
+    // TG already gone → step 6.5 still runs (TG-not-found doesn't
+    // short-circuit the chain); step 10 still runs after logs delete.
+    litellmDeleteMocks()
 
     ecsSendMock
       .mockResolvedValueOnce({
@@ -445,6 +525,7 @@ describe('DELETE /api/fleet/agents/:name — sibling-family safety', () => {
     // EXACT family before deregistering. Without this filter, deleting
     // a short-named agent would silently deregister another agent's
     // task-defs.
+    litellmDeleteMocks()
     ecsSendMock
       .mockResolvedValueOnce({
         services: [
@@ -585,6 +666,7 @@ describe('DELETE /api/fleet/agents/:name — refusal paths', () => {
     // still exist. 404'ing on retry would strand those resources.
     // INACTIVE is now treated as "ECS portion already done, finish
     // the rest" — handler returns 200 with a warning instead.
+    litellmDeleteMocks()
     ecsSendMock
       .mockResolvedValueOnce({
         services: [
@@ -733,5 +815,207 @@ describe('DELETE /api/fleet/agents/:name — partial failure', () => {
     expect(json.failedResources?.listenerRuleArn).toBeDefined()
     expect(json.failedResources?.logGroup).toBeDefined()
     expect(json.failedResources?.taskDefinitionRevisions).toBeDefined()
+  })
+})
+
+describe('DELETE /api/fleet/agents/:name — per-agent LiteLLM virtual key (#354)', () => {
+  it('revokes the per-agent virtual key via /key/delete and schedules the SM secret for deletion', async () => {
+    happyPathMocks()
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+
+    // /key/delete called with the deterministic alias.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(
+      'http://internal-litellm.us-east-1.elb.amazonaws.com/key/delete',
+    )
+    const body = JSON.parse(init.body as string)
+    expect(body.key_aliases).toEqual([`${PREFIX}-${AGENT}`])
+
+    // Secrets Manager: GetSecretValue (master) → DeleteSecret (per-agent).
+    const smCalls = smSendMock.mock.calls.map(
+      (c) => (c[0] as { __type: string }).__type,
+    )
+    expect(smCalls).toEqual(['GetSecretValueCommand', 'DeleteSecretCommand'])
+    const deleteInput = (smSendMock.mock.calls[1][0] as {
+      input: { SecretId: string; RecoveryWindowInDays: number }
+    }).input
+    expect(deleteInput.SecretId).toBe(
+      `ender-stack/dev/companion-openclaw-${AGENT}-litellm-key`,
+    )
+    expect(deleteInput.RecoveryWindowInDays).toBe(7)
+  })
+
+  it('warns + continues when /key/delete returns 404 (idempotent)', async () => {
+    // Master read OK, /key/delete 404 (alias not on the proxy),
+    // SM DeleteSecret OK.
+    ecsSendMock.mockReset()
+    elbv2SendMock.mockReset()
+    logsSendMock.mockReset()
+    smSendMock
+      .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
+      .mockResolvedValueOnce({})
+    fetchMock.mockResolvedValueOnce(mkLiteLLMDeleteResponse(404))
+
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ taskDefinitionArns: [] })
+      .mockResolvedValueOnce({})
+    elbv2SendMock
+      .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
+      .mockResolvedValueOnce({ Listeners: [{ ListenerArn: LISTENER_ARN }] })
+      .mockResolvedValueOnce({
+        Rules: [
+          {
+            RuleArn: RULE_ARN,
+            Conditions: [
+              { Field: 'path-pattern', Values: [`/agent/${AGENT}`] },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ TargetGroups: [{ TargetGroupArn: TG_ARN }] })
+      .mockResolvedValueOnce({})
+    logsSendMock.mockResolvedValueOnce({})
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      deletedResources: { litellmKeyAlias?: string }
+      warnings: Array<{ code: string }>
+    }
+    // Alias still surfaces — we did call /key/delete; the proxy
+    // just had nothing to delete.
+    expect(json.deletedResources.litellmKeyAlias).toBe(`${PREFIX}-${AGENT}`)
+    expect(json.warnings.map((w) => w.code)).toContain(
+      'litellm-key-already-deleted',
+    )
+  })
+
+  it('warns + continues when /key/delete returns 5xx — AWS teardown still completes', async () => {
+    ecsSendMock.mockReset()
+    elbv2SendMock.mockReset()
+    logsSendMock.mockReset()
+    smSendMock
+      .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
+      .mockResolvedValueOnce({})
+    fetchMock.mockResolvedValueOnce(mkLiteLLMDeleteResponse(503))
+
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ taskDefinitionArns: [] })
+      .mockResolvedValueOnce({})
+    elbv2SendMock
+      .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
+      .mockResolvedValueOnce({ Listeners: [{ ListenerArn: LISTENER_ARN }] })
+      .mockResolvedValueOnce({
+        Rules: [
+          {
+            RuleArn: RULE_ARN,
+            Conditions: [
+              { Field: 'path-pattern', Values: [`/agent/${AGENT}`] },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ TargetGroups: [{ TargetGroupArn: TG_ARN }] })
+      .mockResolvedValueOnce({})
+    logsSendMock.mockResolvedValueOnce({})
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    // Non-fatal — full AWS teardown still returns 200.
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      deletedResources: { serviceArn?: string; litellmKeyAlias?: string }
+      warnings: Array<{ code: string }>
+    }
+    expect(json.deletedResources.serviceArn).toBe(SERVICE_ARN)
+    // Alias NOT in deletedResources because the revoke failed.
+    expect(json.deletedResources.litellmKeyAlias).toBeUndefined()
+    expect(json.warnings.map((w) => w.code)).toContain(
+      'litellm-key-revoke-failed',
+    )
+  })
+
+  it('emits a warning + skips /key/delete when MC_LITELLM_MASTER_KEY_SECRET_ARN is unset (best-effort cleanup)', async () => {
+    delete process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN
+    // SM still gets the DeleteSecret call for step 10.
+    smSendMock.mockResolvedValueOnce({})
+
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ taskDefinitionArns: [] })
+      .mockResolvedValueOnce({})
+    elbv2SendMock
+      .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
+      .mockResolvedValueOnce({ Listeners: [{ ListenerArn: LISTENER_ARN }] })
+      .mockResolvedValueOnce({
+        Rules: [
+          {
+            RuleArn: RULE_ARN,
+            Conditions: [
+              { Field: 'path-pattern', Values: [`/agent/${AGENT}`] },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ TargetGroups: [{ TargetGroupArn: TG_ARN }] })
+      .mockResolvedValueOnce({})
+    logsSendMock.mockResolvedValueOnce({})
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    // Never called /key/delete — env was unset.
+    expect(fetchMock).not.toHaveBeenCalled()
+    const json = (await resp.json()) as {
+      warnings: Array<{ code: string }>
+    }
+    expect(json.warnings.map((w) => w.code)).toContain(
+      'litellm-key-revoke-skipped',
+    )
   })
 })
