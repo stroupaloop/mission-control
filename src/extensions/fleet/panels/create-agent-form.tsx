@@ -6,8 +6,11 @@ import { Button } from '@/components/ui/button'
 import {
   AGENT_NAME_MIN_LENGTH,
   AGENT_NAME_RE,
+  DISPLAY_NAME_MAX_BYTES,
+  EMOJI_MAX_BYTES,
   HARNESS_TYPES,
   IMAGE_MAX_BYTES,
+  PERSONA_MAX_BYTES,
   PREFIX_TOO_LONG_ERROR,
   ROLE_DESCRIPTION_MAX_BYTES,
   type HarnessType,
@@ -73,6 +76,13 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   const [agentName, setAgentName] = useState('')
   const [image, setImage] = useState('')
   const [roleDescription, setRoleDescription] = useState('')
+  // #357 Phase-2: optional persona fields. All default to '' (empty
+  // strings get OMITTED from the POST body so the server treats them
+  // as undefined — matching the "field absent" semantics the template
+  // expects for its conditional env-var emission).
+  const [displayName, setDisplayName] = useState('')
+  const [emoji, setEmoji] = useState('')
+  const [persona, setPersona] = useState('')
   const [state, setState] = useState<FormState>({ kind: 'idle' })
   // null = not yet fetched OR fetch failed; string = pre-fill ready.
   // Form treats null as "no default known"; operator types from scratch.
@@ -144,6 +154,9 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     setState({ kind: 'idle' })
     setAgentName('')
     setRoleDescription('')
+    setDisplayName('')
+    setEmoji('')
+    setPersona('')
     setHarnessType(HARNESS_TYPE_DEFAULT)
     setImage('')
     setMaxAgentNameByHarness({})
@@ -329,10 +342,18 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
   const roleDescriptionValid =
     roleDescription.trim().length > 0 &&
     roleDescription.length <= ROLE_DESCRIPTION_MAX_BYTES
+  // #357 Phase-2: optional fields. Empty = field omitted (server treats
+  // as undefined). Each capped; exceeding the cap blocks submit.
+  const displayNameValid = displayName.length <= DISPLAY_NAME_MAX_BYTES
+  const emojiValid = emoji.length <= EMOJI_MAX_BYTES
+  const personaValid = persona.length <= PERSONA_MAX_BYTES
   const formValid =
     agentNameValid &&
     imageValid &&
     roleDescriptionValid &&
+    displayNameValid &&
+    emojiValid &&
+    personaValid &&
     !defaultsErrorBlocksSubmit
 
   async function handleSubmit(e: React.FormEvent) {
@@ -355,6 +376,13 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           agentName,
           image,
           roleDescription,
+          // #357 Phase-2: omit empty optionals so the server gets
+          // `undefined` (template's conditional-emission branch doesn't
+          // fire and the task-def stays clean for agents that didn't
+          // supply persona fields).
+          ...(displayName ? { displayName } : {}),
+          ...(emoji ? { emoji } : {}),
+          ...(persona ? { persona } : {}),
         }),
       })
     } catch (err) {
@@ -413,6 +441,9 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
     // shape when a second harness lands. Round-9 audit P3.
     setImage(defaultsByHarness[harnessType] ?? '')
     setRoleDescription('')
+    setDisplayName('')
+    setEmoji('')
+    setPersona('')
     setState({ kind: 'idle' })
     // "Create another" treats the just-applied default as the
     // canonical starting point; the operator hasn't edited yet.
@@ -473,6 +504,12 @@ export function CreateAgentForm({ open, onCreated, onClose }: Props) {
           imageValid={imageValid}
           roleDescription={roleDescription}
           setRoleDescription={setRoleDescription}
+          displayName={displayName}
+          setDisplayName={setDisplayName}
+          emoji={emoji}
+          setEmoji={setEmoji}
+          persona={persona}
+          setPersona={setPersona}
           formValid={formValid}
           firstInputRef={firstInputRef}
           onSubmit={handleSubmit}
@@ -523,6 +560,15 @@ interface FormBodyProps {
   imageValid: boolean
   roleDescription: string
   setRoleDescription: (s: string) => void
+  /** #357 Phase-2: optional persona fields. Empty string = field
+   *  omitted; the parent strips empties from the POST body so the
+   *  template's conditional emission stays accurate. */
+  displayName: string
+  setDisplayName: (s: string) => void
+  emoji: string
+  setEmoji: (s: string) => void
+  persona: string
+  setPersona: (s: string) => void
   formValid: boolean
   firstInputRef: React.MutableRefObject<HTMLInputElement | null>
   onSubmit: (e: React.FormEvent) => void
@@ -555,6 +601,12 @@ function FormBody({
   imageValid,
   roleDescription,
   setRoleDescription,
+  displayName,
+  setDisplayName,
+  emoji,
+  setEmoji,
+  persona,
+  setPersona,
   formValid,
   firstInputRef,
   onSubmit,
@@ -893,11 +945,107 @@ function FormBody({
           className="mt-1 text-xs text-muted-foreground"
         >
           {roleDescription.length}/{ROLE_DESCRIPTION_MAX_BYTES} chars.
-          Becomes the agent&apos;s runtime role prompt; written into an
-          immutable task-def revision visible to anyone with{' '}
-          <code>ecs:DescribeTaskDefinition</code> — treat as permanent
-          + public.
+          Becomes the agent&apos;s runtime role prompt AND the{' '}
+          <code>Role:</code> bullet in <code>IDENTITY.md</code>;
+          written into an immutable task-def revision visible to anyone
+          with <code>ecs:DescribeTaskDefinition</code> — treat as
+          permanent + public.
         </p>
+      </div>
+
+      {/* #357 Phase-2: optional persona fields. All three are optional —
+          when blank the agent falls back to the canonical openclaw
+          template placeholders and the BOOTSTRAP.md first-run
+          conversation fills in identity. */}
+      <div className="border-t pt-4 mt-2">
+        <p className="text-xs text-muted-foreground mb-3">
+          Optional persona scaffolding — these get hard-templated into
+          the agent&apos;s <code>IDENTITY.md</code> and{' '}
+          <code>SOUL.md</code> at boot. Leave blank to let the agent
+          fill them in via its first-run bootstrap conversation.
+        </p>
+
+        <div className="mb-3">
+          <label
+            htmlFor="displayName"
+            className="block text-sm font-medium mb-1.5"
+          >
+            Display name
+          </label>
+          <input
+            id="displayName"
+            type="text"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            disabled={submitting}
+            maxLength={DISPLAY_NAME_MAX_BYTES}
+            className="w-full px-3 py-2 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
+            placeholder='e.g. "Aria" or "Vendor Ops Bot"'
+            aria-describedby="displayName-hint"
+          />
+          <p
+            id="displayName-hint"
+            className="mt-1 text-xs text-muted-foreground"
+          >
+            {displayName.length}/{DISPLAY_NAME_MAX_BYTES} chars.
+            Human-friendly name shown in IDENTITY.md.
+          </p>
+        </div>
+
+        <div className="mb-3">
+          <label
+            htmlFor="emoji"
+            className="block text-sm font-medium mb-1.5"
+          >
+            Emoji
+          </label>
+          <input
+            id="emoji"
+            type="text"
+            value={emoji}
+            onChange={(e) => setEmoji(e.target.value)}
+            disabled={submitting}
+            maxLength={EMOJI_MAX_BYTES}
+            className="w-full px-3 py-2 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
+            placeholder="🦊"
+            aria-describedby="emoji-hint"
+          />
+          <p
+            id="emoji-hint"
+            className="mt-1 text-xs text-muted-foreground"
+          >
+            {emoji.length}/{EMOJI_MAX_BYTES} chars. Agent&apos;s
+            signature glyph (multi-codepoint emojis count as 2+ chars).
+          </p>
+        </div>
+
+        <div className="mb-1">
+          <label
+            htmlFor="persona"
+            className="block text-sm font-medium mb-1.5"
+          >
+            Persona
+          </label>
+          <textarea
+            id="persona"
+            value={persona}
+            onChange={(e) => setPersona(e.target.value)}
+            disabled={submitting}
+            maxLength={PERSONA_MAX_BYTES}
+            rows={4}
+            className="w-full px-3 py-2 rounded-lg bg-secondary border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
+            placeholder="Direct, opinionated, resourceful. Skip filler. Disagree when warranted."
+            aria-describedby="persona-hint"
+          />
+          <p
+            id="persona-hint"
+            className="mt-1 text-xs text-muted-foreground"
+          >
+            {persona.length}/{PERSONA_MAX_BYTES} chars. Prepended to
+            SOUL.md as an Operator-Supplied Persona section above the
+            canonical openclaw character framing. Markdown allowed.
+          </p>
+        </div>
       </div>
 
       <div className="flex gap-2 pt-2">

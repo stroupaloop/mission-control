@@ -24,8 +24,13 @@
 import * as openclaw from './openclaw'
 import {
   AGENT_NAME_RE,
+  DISPLAY_NAME_MAX_BYTES,
+  EMOJI_MAX_BYTES,
   HARNESS_TYPES,
   IMAGE_MAX_BYTES,
+  PERSONA_FIELD_CONTROL_CHAR_RE,
+  PERSONA_FIELD_DISALLOWED_PREFIX_RE,
+  PERSONA_MAX_BYTES,
   ROLE_DESCRIPTION_MAX_BYTES,
   type HarnessType,
 } from './constraints'
@@ -179,6 +184,65 @@ function validateOpenClawInput(
   if (input.roleDescription.length > ROLE_DESCRIPTION_MAX_BYTES) {
     throw new Error(
       `roleDescription must be ≤ ${ROLE_DESCRIPTION_MAX_BYTES} bytes; got ${input.roleDescription.length}`,
+    )
+  }
+  validatePersonaField('roleDescription', input.roleDescription)
+
+  // #357 Phase-2: optional persona fields. Each is optional + must
+  // pass the same length-cap + structural-injection guard as
+  // roleDescription. Empty strings are treated as absent (the
+  // template emits the env var conditionally).
+  if (input.displayName !== undefined) {
+    if (input.displayName.length > DISPLAY_NAME_MAX_BYTES) {
+      throw new Error(
+        `displayName must be ≤ ${DISPLAY_NAME_MAX_BYTES} bytes; got ${input.displayName.length}`,
+      )
+    }
+    if (input.displayName) validatePersonaField('displayName', input.displayName)
+  }
+  if (input.emoji !== undefined) {
+    if (input.emoji.length > EMOJI_MAX_BYTES) {
+      throw new Error(
+        `emoji must be ≤ ${EMOJI_MAX_BYTES} bytes; got ${input.emoji.length}`,
+      )
+    }
+    if (input.emoji) validatePersonaField('emoji', input.emoji)
+  }
+  if (input.persona !== undefined) {
+    if (input.persona.length > PERSONA_MAX_BYTES) {
+      throw new Error(
+        `persona must be ≤ ${PERSONA_MAX_BYTES} bytes; got ${input.persona.length}`,
+      )
+    }
+    // persona is multi-paragraph prose for SOUL.md — markdown is
+    // LEGITIMATE here (operators want to write **bold** etc), so we
+    // only reject control chars, NOT the list-item prefix.
+    if (input.persona && PERSONA_FIELD_CONTROL_CHAR_RE.test(input.persona)) {
+      // Allow LF (\n, 0x0A) and tab (0x09) — those are valid in prose.
+      // Strip them before re-checking; if anything still matches it's
+      // a control char we don't want.
+      const stripped = input.persona.replace(/[\n\t]/g, '')
+      if (PERSONA_FIELD_CONTROL_CHAR_RE.test(stripped)) {
+        throw new Error('persona contains disallowed control characters')
+      }
+    }
+  }
+}
+
+/**
+ * Shared check for displayName / roleDescription / emoji — short
+ * single-line fields that land in IDENTITY.md as markdown bullets.
+ * Rejects control chars and `^- `/`^* ` list-item prefixes that
+ * would inject net-new trusted bullets into the agent's IDENTITY.md.
+ */
+function validatePersonaField(name: string, value: string): void {
+  if (PERSONA_FIELD_CONTROL_CHAR_RE.test(value)) {
+    throw new Error(`${name} contains disallowed control characters`)
+  }
+  if (PERSONA_FIELD_DISALLOWED_PREFIX_RE.test(value)) {
+    throw new Error(
+      `${name} cannot start with a markdown list-item prefix ` +
+        `('- ' or '* '); use plain text. (#357 Phase-2 / #360 Item 1)`,
     )
   }
 }

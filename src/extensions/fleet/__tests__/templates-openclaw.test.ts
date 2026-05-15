@@ -152,41 +152,98 @@ describe('renderTaskDefinition', () => {
     }
   })
 
-  it('places gateway-only env vars only on gateway, not on init-config', () => {
-    // OPENCLAW_ROLE_DESCRIPTION is gateway-only (prompt-injection
-    // surface — init-config never reads it). LITELLM_BASE_URL is
-    // common to both post-Beat 5e since init-config.sh templates
-    // it into the rendered openclaw.json.
+  it('#357 Phase-2: AGENT_ROLE is on BOTH containers (renamed + relocated from gateway-only OPENCLAW_ROLE_DESCRIPTION)', () => {
+    // Pre-Phase-2 the env var was named OPENCLAW_ROLE_DESCRIPTION and
+    // lived on gatewayOnlyEnv. init-config never received it in
+    // production. Phase-2 (ender-stack#361) renames to AGENT_ROLE and
+    // moves it to commonEnv so init-config can read it at boot to
+    // hard-template IDENTITY.md's Role: bullet. The gateway continues
+    // to read it as part of the runtime role prompt.
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
     const init = findContainer(taskDef, 'init-config')
     const gateway = findContainer(taskDef, 'gateway')
     const initEnv = init?.environment ?? []
     const gatewayEnv = gateway?.environment ?? []
 
-    expect(gatewayEnv).toContainEqual({
-      name: 'OPENCLAW_ROLE_DESCRIPTION',
-      value: 'Says hello',
-    })
-    // Beat 5e: LITELLM_BASE_URL is on BOTH containers now.
-    expect(gatewayEnv).toContainEqual({
-      name: 'LITELLM_BASE_URL',
-      value: 'http://internal-litellm.us-east-1.elb.amazonaws.com',
-    })
-    expect(initEnv).toContainEqual({
-      name: 'LITELLM_BASE_URL',
-      value: 'http://internal-litellm.us-east-1.elb.amazonaws.com',
-    })
+    for (const env of [initEnv, gatewayEnv]) {
+      expect(env).toContainEqual({ name: 'AGENT_ROLE', value: 'Says hello' })
+      // Legacy name must be fully purged.
+      expect(
+        env.find((e) => e?.name === 'OPENCLAW_ROLE_DESCRIPTION'),
+      ).toBeUndefined()
+      // LITELLM_BASE_URL: present on both (Beat 5e).
+      expect(env).toContainEqual({
+        name: 'LITELLM_BASE_URL',
+        value: 'http://internal-litellm.us-east-1.elb.amazonaws.com',
+      })
+      // LITELLM_API_BASE: legacy alias, must be gone.
+      expect(env.find((e) => e?.name === 'LITELLM_API_BASE')).toBeUndefined()
+    }
+  })
 
+  it('#357 Phase-2: optional persona fields are emitted on both containers when provided (commonEnv)', () => {
+    // Phase-2 introduces three optional fields. When supplied, each
+    // becomes a commonEnv entry so init-config (ender-stack#361) can
+    // hard-template IDENTITY.md placeholder lines (Name, Emoji) and a
+    // SOUL.md `Operator-Supplied Persona` section.
+    const taskDef = renderTaskDefinition(
+      {
+        ...fixtureInput,
+        displayName: 'Aria',
+        emoji: '🦊',
+        persona: 'Direct, opinionated, resourceful. Skip filler.',
+      },
+      fixtureEnv,
+    )
+    const init = findContainer(taskDef, 'init-config')
+    const gateway = findContainer(taskDef, 'gateway')
+
+    for (const c of [init, gateway]) {
+      const env = c?.environment ?? []
+      expect(env).toContainEqual({ name: 'AGENT_DISPLAY_NAME', value: 'Aria' })
+      expect(env).toContainEqual({ name: 'AGENT_EMOJI', value: '🦊' })
+      expect(env).toContainEqual({
+        name: 'AGENT_PERSONA',
+        value: 'Direct, opinionated, resourceful. Skip filler.',
+      })
+    }
+  })
+
+  it('#357 Phase-2: persona fields are OMITTED from the task-def when unset (conditional emission)', () => {
+    // Optional fields default to undefined / empty. The template only
+    // emits the env-var entry when the value is truthy — keeps the
+    // task-def env block clean for agents that opt out of persona
+    // scaffolding. init-config falls back to canonical placeholders.
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv) // no persona fields
+    const init = findContainer(taskDef, 'init-config')
+    const gateway = findContainer(taskDef, 'gateway')
+
+    for (const c of [init, gateway]) {
+      const env = c?.environment ?? []
+      expect(
+        env.find((e) => e?.name === 'AGENT_DISPLAY_NAME'),
+      ).toBeUndefined()
+      expect(env.find((e) => e?.name === 'AGENT_EMOJI')).toBeUndefined()
+      expect(env.find((e) => e?.name === 'AGENT_PERSONA')).toBeUndefined()
+    }
+  })
+
+  it('#357 Phase-2: persona fields explicitly set to empty string are also omitted (empty == absent)', () => {
+    // Defensive: a client that sets displayName: '' (vs not supplying
+    // the key at all) should produce the same task-def shape as the
+    // "not supplied" case. Prevents subtle drift between the type
+    // guard's accept-string and the template's emit-conditional logic.
+    const taskDef = renderTaskDefinition(
+      { ...fixtureInput, displayName: '', emoji: '', persona: '' },
+      fixtureEnv,
+    )
+    const init = findContainer(taskDef, 'init-config')
+    const initEnv = init?.environment ?? []
     expect(
-      initEnv.find((e) => e?.name === 'OPENCLAW_ROLE_DESCRIPTION'),
+      initEnv.find((e) => e?.name === 'AGENT_DISPLAY_NAME'),
     ).toBeUndefined()
-    // Legacy LITELLM_API_BASE name should be gone.
-    expect(
-      initEnv.find((e) => e?.name === 'LITELLM_API_BASE'),
-    ).toBeUndefined()
-    expect(
-      gatewayEnv.find((e) => e?.name === 'LITELLM_API_BASE'),
-    ).toBeUndefined()
+    expect(initEnv.find((e) => e?.name === 'AGENT_EMOJI')).toBeUndefined()
+    expect(initEnv.find((e) => e?.name === 'AGENT_PERSONA')).toBeUndefined()
   })
 
   it('#354: attaches LITELLM_VIRTUAL_KEY secret to both containers from the per-agent ARN', () => {
@@ -653,6 +710,85 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
     expect(() =>
       validate({ ...fixtureInput, roleDescription: '   ' }),
     ).toThrow(/roleDescription/)
+  })
+
+  it('#357 Phase-2: rejects roleDescription > 200 bytes (reduced from 1024)', () => {
+    expect(() =>
+      validate({ ...fixtureInput, roleDescription: 'a'.repeat(201) }),
+    ).toThrow(/roleDescription.*200/)
+    expect(() =>
+      validate({ ...fixtureInput, roleDescription: 'a'.repeat(200) }),
+    ).not.toThrow()
+  })
+
+  it('#357 Phase-2: optional persona fields can be absent', () => {
+    // Backward compat — clients that don't supply persona fields must
+    // still pass validation (Phase-1 form continues to work).
+    expect(() => validate({ ...fixtureInput })).not.toThrow()
+  })
+
+  it('#357 Phase-2: persona fields accept reasonable values', () => {
+    expect(() =>
+      validate({
+        ...fixtureInput,
+        displayName: 'Aria',
+        emoji: '🦊',
+        persona: 'Direct, opinionated. Skip filler.\n\nDisagree when warranted.',
+      }),
+    ).not.toThrow()
+  })
+
+  it('#357 Phase-2: rejects displayName / emoji / persona over the byte cap', () => {
+    expect(() =>
+      validate({ ...fixtureInput, displayName: 'a'.repeat(65) }),
+    ).toThrow(/displayName.*64/)
+    expect(() =>
+      validate({ ...fixtureInput, emoji: 'a'.repeat(17) }),
+    ).toThrow(/emoji.*16/)
+    expect(() =>
+      validate({ ...fixtureInput, persona: 'p'.repeat(1025) }),
+    ).toThrow(/persona.*1024/)
+  })
+
+  it('#357 Phase-2 / #360 Item 1: rejects markdown list-item prefix in displayName, role, emoji', () => {
+    expect(() =>
+      validate({ ...fixtureInput, displayName: '- inject' }),
+    ).toThrow(/displayName.*list-item prefix/)
+    expect(() =>
+      validate({ ...fixtureInput, displayName: '* inject' }),
+    ).toThrow(/displayName.*list-item prefix/)
+    expect(() =>
+      validate({ ...fixtureInput, roleDescription: '- pwned' }),
+    ).toThrow(/roleDescription.*list-item prefix/)
+    expect(() =>
+      validate({ ...fixtureInput, emoji: '- 🦊' }),
+    ).toThrow(/emoji.*list-item prefix/)
+
+    // Numbered-list prefix `1. ` is intentionally allowed (legitimate
+    // role names contain "1." — e.g. "Tier 1. SRE").
+    expect(() =>
+      validate({ ...fixtureInput, displayName: 'Tier 1 Engineer' }),
+    ).not.toThrow()
+  })
+
+  it('#357 Phase-2 / #360 Item 1: rejects ASCII control chars in persona fields (LF/tab allowed in persona only)', () => {
+    // displayName / roleDescription / emoji are single-line — any
+    // control char (including LF and tab) is rejected.
+    expect(() =>
+      validate({ ...fixtureInput, displayName: 'two\nlines' }),
+    ).toThrow(/displayName.*control characters/)
+    expect(() =>
+      validate({ ...fixtureInput, roleDescription: 'tab\there' }),
+    ).toThrow(/roleDescription.*control characters/)
+
+    // persona is multi-paragraph prose — LF and tab are LEGITIMATE
+    // (paragraph breaks, indentation). Other control chars are not.
+    expect(() =>
+      validate({ ...fixtureInput, persona: 'p1\n\np2\n\tindented' }),
+    ).not.toThrow()
+    expect(() =>
+      validate({ ...fixtureInput, persona: 'has \x07 bell' }),
+    ).toThrow(/persona.*control characters/)
   })
 
   it('enforces deployment-aware combined-name cap when prefix is provided (round-2 audit on PR #39)', () => {
