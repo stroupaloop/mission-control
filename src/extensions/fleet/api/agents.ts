@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import {
   ECSClient,
+  DescribeServicesCommand,
   RegisterTaskDefinitionCommand,
   CreateServiceCommand,
 } from '@aws-sdk/client-ecs'
@@ -572,6 +573,57 @@ export async function POST(request: NextRequest) {
   const litellmKeyAlias = `${resolved.prefix}-${input.agentName}`
 
   try {
+    // ================================================================
+    // Step 0.4: Pre-flight DescribeServices conflict check (#354 round-12)
+    // ================================================================
+    // Without this guard, a duplicate create-agent call with the
+    // same agentName would fall into step 0.5's
+    // `generateKeyWithRotation` path: it would detect the existing
+    // alias on the LiteLLM proxy, call /key/delete on the LIVE key
+    // the running agent is using, then mint a new one. The
+    // downstream CreateTargetGroup would 409 — operator gets a 409
+    // response, but the running agent's task (which resolved the
+    // key value at task-launch time and is still using it for
+    // outbound LiteLLM calls) loses access immediately. Every
+    // model call from the running agent starts failing 401/403.
+    //
+    // Read-only DescribeServices on the templated service name
+    // catches the case BEFORE touching LiteLLM. Only ACTIVE
+    // services trigger the 409 — INACTIVE (prior failed delete
+    // left a tombstone) and DRAINING (mid-teardown) should fall
+    // through and let the create attempt fill in any gaps.
+    //
+    // TOCTOU window: two concurrent creates for the same name can
+    // both pass this check, both mint keys, and race at
+    // CreateService. The window is the same one allocatePriority
+    // already accepts; Phase 2.2 is single-MC so it's theoretical.
+    const serviceName = `${resolved.prefix}-companion-openclaw-${input.agentName}`
+    const existsCheck = await ecsClient.send(
+      new DescribeServicesCommand({
+        cluster: resolved.clusterName,
+        services: [serviceName],
+      }),
+    )
+    if (existsCheck.services?.[0]?.status === 'ACTIVE') {
+      logger.warn(
+        {
+          cluster: resolved.clusterName,
+          serviceName,
+          actor: 'user' in auth ? auth.user.id : undefined,
+        },
+        '[fleet] create-agent rejected — ACTIVE service exists with this name (would revoke live key)',
+      )
+      return NextResponse.json(
+        {
+          error: 'ServiceAlreadyExists',
+          detail:
+            `An ACTIVE agent named "${input.agentName}" already exists. ` +
+            'Delete it first via DELETE /api/fleet/agents/{name}, or choose a different name.',
+        } satisfies CreateAgentErrorResponse,
+        { status: 409, headers: { 'Cache-Control': 'no-store' } },
+      )
+    }
+
     // ================================================================
     // Step 0.5: Mint per-agent LiteLLM virtual key (#354)
     // ================================================================

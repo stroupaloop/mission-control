@@ -8,6 +8,10 @@ const fetchMock = vi.fn()
 
 vi.mock('@aws-sdk/client-ecs', () => ({
   ECSClient: vi.fn().mockImplementation(() => ({ send: ecsSendMock })),
+  DescribeServicesCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DescribeServicesCommand',
+    input,
+  })),
   RegisterTaskDefinitionCommand: vi.fn().mockImplementation((input: unknown) => ({
     __type: 'RegisterTaskDefinitionCommand',
     input,
@@ -149,13 +153,31 @@ const mkLiteLLMKeyResponse = (key = 'sk-virtual-agent-NEVER-LOG') =>
   }) as unknown as Response
 
 /**
+ * #354 round-12: prime step 0.4 (DescribeServices conflict
+ * pre-flight). Returns an empty `services` array — no ACTIVE
+ * service exists with this name → handler proceeds to step 0.5.
+ *
+ * Use in tests that bypass happyPathMocks / litellmStep05Mocks
+ * but expect the handler to reach step 0.5 or beyond.
+ */
+const primeStep04NoConflict = () => {
+  ecsSendMock.mockResolvedValueOnce({ services: [] })
+}
+
+/**
  * #354: prime smSendMock + fetchMock so step 0.5 (LiteLLM
  * /key/generate + write per-agent secret) succeeds. Used by any
  * test that bypasses happyPathMocks() but still expects a 201.
+ *
+ * Also primes step 0.4 (DescribeServices conflict pre-flight,
+ * #354 round-12 fix): an empty `services` array means no ACTIVE
+ * service exists with this name → proceed to step 0.5.
  */
 const litellmStep05Mocks = (
   perAgentSecretArn = 'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/companion-openclaw-hello-bot-litellm-key-XyZ789',
 ) => {
+  // Step 0.4: DescribeServices for conflict check (#354 round-12).
+  ecsSendMock.mockResolvedValueOnce({ services: [] })
   smSendMock
     .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
     .mockRejectedValueOnce(
@@ -168,16 +190,21 @@ const litellmStep05Mocks = (
 }
 
 const happyPathMocks = () => {
-  // Order: GetSecretValue (master) → fetch /key/generate →
-  // PutSecretValue (or CreateSecret) for per-agent key →
-  // DescribeLBs → DescribeListeners → CreateLogGroup →
-  // PutRetentionPolicy → RegisterTaskDef → CreateTargetGroup →
-  // DescribeRules (priority allocation) → CreateRule → CreateService.
+  // Order: DescribeServices (conflict pre-flight) → GetSecretValue
+  // (master) → fetch /key/generate → PutSecretValue (or CreateSecret)
+  // for per-agent key → DescribeLBs → DescribeListeners →
+  // CreateLogGroup → PutRetentionPolicy → RegisterTaskDef →
+  // CreateTargetGroup → DescribeRules (priority allocation) →
+  // CreateRule → CreateService.
   elbv2SendMock.mockReset()
   ecsSendMock.mockReset()
   logsSendMock.mockReset()
   smSendMock.mockReset()
   fetchMock.mockReset()
+
+  // #354 round-12: step 0.4 DescribeServices pre-flight conflict
+  // check. Empty services array = no ACTIVE service → proceed.
+  ecsSendMock.mockResolvedValueOnce({ services: [] })
 
   // #354: SecretsManager call sequence — master-key read,
   // then per-agent virtual-key write. writeAgentLiteLLMKey
@@ -474,8 +501,16 @@ describe('POST /api/fleet/agents — happy path', () => {
       (c) => (c[0] as { __type: string }).__type,
     )
     expect(calls).toEqual(['CreateLogGroupCommand', 'PutRetentionPolicyCommand'])
-    // RegisterTaskDef must be after both log calls.
-    const registerOrder = ecsSendMock.mock.invocationCallOrder[0]
+    // RegisterTaskDef must be after both log calls. Find the
+    // RegisterTaskDef invocation order specifically (DescribeServices
+    // for step 0.4 also runs before it; can't index-into [0]).
+    const registerIdx = ecsSendMock.mock.calls.findIndex(
+      (c) =>
+        (c[0] as { __type: string }).__type ===
+        'RegisterTaskDefinitionCommand',
+    )
+    expect(registerIdx).toBeGreaterThanOrEqual(0)
+    const registerOrder = ecsSendMock.mock.invocationCallOrder[registerIdx]
     const lastLogOrder =
       logsSendMock.mock.invocationCallOrder[
         logsSendMock.mock.invocationCallOrder.length - 1
@@ -551,11 +586,16 @@ describe('POST /api/fleet/agents — error handling', () => {
     expect(json.error).toBe('Error') // generic Error.name
   })
 
-  it('returns 409 when the ECS service already exists', async () => {
+  it('returns 409 when the ECS service already exists (downstream race past step 0.4)', async () => {
+    // This test simulates the TOCTOU window: step 0.4 sees no
+    // ACTIVE service, but a concurrent create wins the
+    // CreateService race. The step 0.4 DescribeServices returns
+    // empty (pre-flight passes); CreateService later 409s.
     happyPathMocks()
     // Override the LAST ecs call (CreateService) with a conflict.
     ecsSendMock.mockReset()
     ecsSendMock
+      .mockResolvedValueOnce({ services: [] }) // step 0.4 pre-flight
       .mockResolvedValueOnce({
         taskDefinition: {
           taskDefinitionArn: 'arn:tdf',
@@ -578,6 +618,7 @@ describe('POST /api/fleet/agents — error handling', () => {
     happyPathMocks()
     ecsSendMock.mockReset()
     ecsSendMock
+      .mockResolvedValueOnce({ services: [] }) // step 0.4 pre-flight
       .mockResolvedValueOnce({
         taskDefinition: { taskDefinitionArn: 'arn:tdf' },
       })
@@ -610,6 +651,7 @@ describe('POST /api/fleet/agents — error handling', () => {
     // orphaned ECS service.
     ecsSendMock.mockReset()
     ecsSendMock
+      .mockResolvedValueOnce({ services: [] }) // step 0.4 pre-flight
       .mockResolvedValueOnce({
         taskDefinition: { taskDefinitionArn: 'arn:tdf' },
       })
@@ -672,6 +714,7 @@ describe('POST /api/fleet/agents — error handling', () => {
     // logGroup.
     ecsSendMock.mockReset()
     ecsSendMock
+      .mockResolvedValueOnce({ services: [] }) // step 0.4 pre-flight
       .mockResolvedValueOnce({
         taskDefinition: { taskDefinitionArn: 'arn:tdf-1' },
       })
@@ -907,7 +950,9 @@ describe('POST /api/fleet/agents — per-agent LiteLLM virtual key (#354)', () =
   })
 
   it('aborts the create with 502 if /key/generate fails — no AWS resources are touched', async () => {
-    // Master-key read succeeds, /key/generate 503s.
+    // Step 0.4 DescribeServices (empty), then master-key read OK,
+    // then /key/generate 503s.
+    primeStep04NoConflict()
     smSendMock.mockResolvedValueOnce({
       SecretString: 'sk-master-NEVER-LOG',
     })
@@ -927,17 +972,23 @@ describe('POST /api/fleet/agents — per-agent LiteLLM virtual key (#354)', () =
       partialResources?: Record<string, unknown>
     }
     expect(json.error).toBe('LiteLLMManagementError')
-    // No partial AWS resources — we failed before any AWS call.
+    // No partial AWS resources — we failed before any provisioning AWS call.
     expect(json.partialResources?.taskDefinitionArn).toBeUndefined()
     expect(json.partialResources?.targetGroupArn).toBeUndefined()
     expect(json.partialResources?.listenerRuleArn).toBeUndefined()
     expect(json.partialResources?.logGroup).toBeUndefined()
     expect(elbv2SendMock).not.toHaveBeenCalled()
-    expect(ecsSendMock).not.toHaveBeenCalled()
     expect(logsSendMock).not.toHaveBeenCalled()
+    // ECS WAS called once (DescribeServices for step 0.4 pre-flight)
+    // but NOT for any provisioning verbs.
+    const ecsCommandTypes = ecsSendMock.mock.calls.map(
+      (c) => (c[0] as { __type: string }).__type,
+    )
+    expect(ecsCommandTypes).toEqual(['DescribeServicesCommand'])
   })
 
   it('aborts the create with 502 if master-key Secrets Manager read fails', async () => {
+    primeStep04NoConflict()
     smSendMock.mockRejectedValueOnce(
       Object.assign(new Error('not found'), {
         name: 'ResourceNotFoundException',
@@ -953,9 +1004,94 @@ describe('POST /api/fleet/agents — per-agent LiteLLM virtual key (#354)', () =
     expect(elbv2SendMock).not.toHaveBeenCalled()
   })
 
+  it('returns 409 ServiceAlreadyExists BEFORE touching LiteLLM when an ACTIVE service exists (#354 round-12)', async () => {
+    // The critical correctness fix: a second create-agent call
+    // with the same agent name must NOT revoke the running
+    // agent's LiteLLM key via the rotation path. Step 0.4
+    // DescribeServices catches the conflict first and returns
+    // 409 with no LiteLLM side effects.
+    ecsSendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn:
+            'arn:aws:ecs:us-east-1:398152419239:service/ender-stack-dev/ender-stack-dev-companion-openclaw-hello-bot',
+          status: 'ACTIVE',
+        },
+      ],
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(409)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('ServiceAlreadyExists')
+    expect(json.detail).toContain('hello-bot')
+    // CRITICAL: NO LiteLLM /key/delete or /key/generate was called.
+    expect(fetchMock).not.toHaveBeenCalled()
+    // NO master-key SM read either.
+    expect(smSendMock).not.toHaveBeenCalled()
+    // No downstream AWS provisioning verbs.
+    const ecsCommandTypes = ecsSendMock.mock.calls.map(
+      (c) => (c[0] as { __type: string }).__type,
+    )
+    expect(ecsCommandTypes).toEqual(['DescribeServicesCommand'])
+    expect(elbv2SendMock).not.toHaveBeenCalled()
+    expect(logsSendMock).not.toHaveBeenCalled()
+  })
+
+  it('proceeds past step 0.4 when the existing service is INACTIVE (prior failed delete tombstone)', async () => {
+    // INACTIVE services indicate a prior delete partially failed
+    // and ECS tombstoned the service. The create should still
+    // proceed — let the new attempt fill in any gaps.
+    ecsSendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn: 'arn:aws:ecs:us-east-1:398152419239:service/x/y',
+          status: 'INACTIVE',
+        },
+      ],
+    })
+    // Continue with happy-path beyond step 0.4.
+    smSendMock
+      .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('not found'), {
+          name: 'ResourceNotFoundException',
+        }),
+      )
+      .mockResolvedValueOnce({
+        ARN: 'arn:aws:secretsmanager:us-east-1:398152419239:secret:test-litellm-key',
+      })
+    fetchMock.mockResolvedValueOnce(mkLiteLLMKeyResponse())
+    elbv2SendMock
+      .mockResolvedValueOnce({
+        LoadBalancers: [{ LoadBalancerArn: 'arn:lb' }],
+      })
+      .mockResolvedValueOnce({
+        Listeners: [{ ListenerArn: 'arn:lst', Protocol: 'HTTP' }],
+      })
+      .mockResolvedValueOnce({ TargetGroups: [{ TargetGroupArn: 'arn:tg' }] })
+      .mockResolvedValueOnce({ Rules: [{ Priority: 'default' }] })
+      .mockResolvedValueOnce({ Rules: [{ RuleArn: 'arn:rule' }] })
+    logsSendMock.mockResolvedValueOnce({}).mockResolvedValueOnce({})
+    ecsSendMock
+      .mockResolvedValueOnce({
+        taskDefinition: { taskDefinitionArn: 'arn:tdf' },
+      })
+      .mockResolvedValueOnce({ service: { serviceArn: 'arn:svc' } })
+
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(201)
+    // /key/generate WAS called — step 0.4 didn't short-circuit.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('on retry, recovers a duplicate-alias /key/generate via /key/delete + re-mint (#354 round-2)', async () => {
-    // First fetch hits "alias already exists" (operator retry after
-    // partial AWS failure); rotation revokes the orphan and re-mints.
+    // Scenario: prior create-agent partial-failure left a LiteLLM
+    // alias dangling but the ECS service was never created. Step
+    // 0.4 (round-12 pre-flight) sees no ACTIVE service → proceed.
+    // Step 0.5 hits duplicate-alias → rotation revokes + re-mints.
+    primeStep04NoConflict()
     smSendMock
       .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
       .mockRejectedValueOnce(
@@ -1032,6 +1168,7 @@ describe('POST /api/fleet/agents — per-agent LiteLLM virtual key (#354)', () =
   })
 
   it('surfaces partialResources.litellmKeyAlias when SM write fails after /key/generate succeeded', async () => {
+    primeStep04NoConflict()
     // Master read OK, /key/generate OK, but Put + Create both fail
     // → the key is on LiteLLM but we never wrote the SM secret.
     smSendMock
