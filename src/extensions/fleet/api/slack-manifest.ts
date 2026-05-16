@@ -200,7 +200,15 @@ export async function GET(
           return undefined
         }
         displayName = readEnv('AGENT_DISPLAY_NAME')
-        const role = readEnv('OPENCLAW_ROLE_DESCRIPTION')
+        // Read AGENT_ROLE (canonical commonEnv name) first; fall back to
+        // the legacy OPENCLAW_ROLE_DESCRIPTION alias (gatewayOnlyEnv) for
+        // forward-compatibility. The legacy alias is documented in
+        // openclaw.ts as "transitional, can be removed in a future cleanup
+        // PR once upstream openclaw standardizes on AGENT_ROLE end-to-
+        // end" — when that cleanup lands, reading the canonical name
+        // first keeps this handler working without further changes.
+        const role =
+          readEnv('AGENT_ROLE') ?? readEnv('OPENCLAW_ROLE_DESCRIPTION')
         // Collapse interior whitespace so a multi-line role description
         // (textarea input) renders cleanly in Slack's single-line app
         // description. truncateForSlack still enforces the 140-char cap.

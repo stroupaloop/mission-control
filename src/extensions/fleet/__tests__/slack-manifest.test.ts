@@ -318,6 +318,106 @@ describe('GET /api/fleet/agents/:name/slack/manifest — happy path', () => {
     expect(json.manifest.features.bot_user.display_name).toBe('Procurement Bot')
   })
 
+  it('reads AGENT_ROLE (canonical) before falling back to OPENCLAW_ROLE_DESCRIPTION (legacy alias)', async () => {
+    // openclaw.ts emits the role description under two env names:
+    //   - AGENT_ROLE on commonEnv (canonical post-#357)
+    //   - OPENCLAW_ROLE_DESCRIPTION on gatewayOnlyEnv (transitional)
+    // The legacy alias is slated for cleanup once upstream openclaw
+    // standardizes on AGENT_ROLE. Reading the canonical name first
+    // keeps this handler working through that cleanup; locking the
+    // priority in a test catches a regression if the order ever flips.
+    const TD_ARN = `arn:aws:ecs:us-east-1:111:task-definition/${SERVICE_NAME}:9`
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            taskDefinition: TD_ARN,
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        taskDefinition: {
+          containerDefinitions: [
+            {
+              name: 'init-config',
+              environment: [
+                { name: 'AGENT_ROLE', value: 'Canonical role from AGENT_ROLE' },
+              ],
+            },
+            {
+              name: 'gateway',
+              environment: [
+                { name: 'AGENT_ROLE', value: 'Canonical role from AGENT_ROLE' },
+                {
+                  name: 'OPENCLAW_ROLE_DESCRIPTION',
+                  value: 'Legacy alias value (should not win)',
+                },
+              ],
+            },
+          ],
+        },
+      })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as {
+      manifest: { display_information: { description: string } }
+    }
+    expect(json.manifest.display_information.description).toBe(
+      'Canonical role from AGENT_ROLE',
+    )
+  })
+
+  it('falls back to OPENCLAW_ROLE_DESCRIPTION when AGENT_ROLE is absent (legacy task-def compatibility)', async () => {
+    // Pre-#357 task-defs may carry only OPENCLAW_ROLE_DESCRIPTION on the
+    // gateway. The handler must still render a personalized description
+    // for those agents until they cycle through a redeploy that adds
+    // the canonical AGENT_ROLE name.
+    const TD_ARN = `arn:aws:ecs:us-east-1:111:task-definition/${SERVICE_NAME}:10`
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            taskDefinition: TD_ARN,
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        taskDefinition: {
+          containerDefinitions: [
+            {
+              name: 'gateway',
+              environment: [
+                {
+                  name: 'OPENCLAW_ROLE_DESCRIPTION',
+                  value: 'Legacy-only role description',
+                },
+              ],
+            },
+          ],
+        },
+      })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as {
+      manifest: { display_information: { description: string } }
+    }
+    expect(json.manifest.display_information.description).toBe(
+      'Legacy-only role description',
+    )
+  })
+
   it('reads OPENCLAW_ROLE_DESCRIPTION from init-config first when both containers carry it (locks priority contract)', async () => {
     // Pair to the AGENT_DISPLAY_NAME priority test. Today
     // OPENCLAW_ROLE_DESCRIPTION lives exclusively in gatewayOnlyEnv, but
