@@ -318,6 +318,114 @@ describe('GET /api/fleet/agents/:name/slack/manifest — happy path', () => {
     expect(json.manifest.features.bot_user.display_name).toBe('Procurement Bot')
   })
 
+  it('reads OPENCLAW_ROLE_DESCRIPTION from init-config first when both containers carry it (locks priority contract)', async () => {
+    // Pair to the AGENT_DISPLAY_NAME priority test. Today
+    // OPENCLAW_ROLE_DESCRIPTION lives exclusively in gatewayOnlyEnv, but
+    // readEnv's init-config-first ordering means a future refactor that
+    // adds a blank or stale value to commonEnv would silently shadow the
+    // gateway value. Lock the priority so a regression surfaces here
+    // before it lands in prod.
+    const TD_ARN = `arn:aws:ecs:us-east-1:111:task-definition/${SERVICE_NAME}:7`
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            taskDefinition: TD_ARN,
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        taskDefinition: {
+          containerDefinitions: [
+            {
+              name: 'gateway',
+              environment: [
+                {
+                  name: 'OPENCLAW_ROLE_DESCRIPTION',
+                  value: 'STALE Gateway Description',
+                },
+              ],
+            },
+            {
+              name: 'init-config',
+              environment: [
+                {
+                  name: 'OPENCLAW_ROLE_DESCRIPTION',
+                  value: 'Authoritative init-config description',
+                },
+              ],
+            },
+          ],
+        },
+      })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as {
+      manifest: { display_information: { description: string } }
+    }
+    expect(json.manifest.display_information.description).toBe(
+      'Authoritative init-config description',
+    )
+  })
+
+  it('reads OPENCLAW_ROLE_DESCRIPTION from gateway when init-config has it blank (readEnv skips empty)', async () => {
+    // readEnv's "first non-empty" semantics — a blank init-config value
+    // must not shadow a real gateway value. This matters today because
+    // OPENCLAW_ROLE_DESCRIPTION lives in gatewayOnlyEnv; a future
+    // template tweak that adds an empty entry to commonEnv would otherwise
+    // make the Slack description go blank.
+    const TD_ARN = `arn:aws:ecs:us-east-1:111:task-definition/${SERVICE_NAME}:8`
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            taskDefinition: TD_ARN,
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        taskDefinition: {
+          containerDefinitions: [
+            {
+              name: 'init-config',
+              environment: [
+                { name: 'OPENCLAW_ROLE_DESCRIPTION', value: '   ' },
+              ],
+            },
+            {
+              name: 'gateway',
+              environment: [
+                {
+                  name: 'OPENCLAW_ROLE_DESCRIPTION',
+                  value: 'Real gateway description',
+                },
+              ],
+            },
+          ],
+        },
+      })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as {
+      manifest: { display_information: { description: string } }
+    }
+    expect(json.manifest.display_information.description).toBe(
+      'Real gateway description',
+    )
+  })
+
   it('collapses interior whitespace in OPENCLAW_ROLE_DESCRIPTION for the Slack app description', async () => {
     // Operators may enter multi-line role descriptions via the textarea.
     // The Slack app description is single-line (truncated to 140 chars);

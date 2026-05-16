@@ -166,12 +166,11 @@ function validateOpenClawInput(
     )
   }
   // UTF-8 byte count, not String.prototype.length (which counts UTF-16
-  // code units). Without this, a 16-char composed-emoji `emoji` field
-  // passes (`.length === 16 ≤ 16`) but encodes to ~64 UTF-8 bytes —
-  // 4x the documented cap. The client (`create-agent-form.tsx`) uses
-  // TextEncoder for the same reason; the server boundary must match
-  // or init-config's defensive truncate silently fires and the
-  // operator-supplied value is mangled. Claude bot R2 medium on PR #69.
+  // code units). Without this, a 17-fox-emoji `displayName` would pass
+  // `.length === 17 ≤ 64` but encode to 68 UTF-8 bytes — over the cap.
+  // The client (`create-agent-form.tsx`) uses TextEncoder for the same
+  // reason; the server boundary must match or init-config's defensive
+  // truncate silently fires and the operator-supplied value is mangled.
   const utf8Bytes = (s: string) => Buffer.byteLength(s, 'utf8')
 
   const imageBytes = utf8Bytes(input.image)
