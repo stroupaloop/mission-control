@@ -118,25 +118,58 @@ describe('<CreateAgentForm />', () => {
     ).toBeDisabled()
   })
 
-  // #357 Phase-2: optional persona fields (displayName / emoji /
-  // persona). These satisfy CLAUDE.md's test-discipline hard rule for
-  // the form layer; the template-level + handler-level coverage lives
-  // in templates-openclaw.test.ts + agents-create.test.ts. Claude bot
-  // R2 high finding on PR #69.
-  it('#357 Phase-2: renders displayName / emoji / persona inputs and accepts input', () => {
+  // Role description prefix-injection defense. roleDescription lands
+  // in IDENTITY.md as `- **Role:** $value` after init-config collapses
+  // newlines, so a leading `- foo` would render as a structurally-valid
+  // bullet body but is almost always an injection attempt.
+  it.each([
+    ['- inject', 'hyphen'],
+    ['* inject', 'asterisk'],
+    ['+ inject', 'plus'],
+    ['1. inject', 'numbered'],
+    ['  - inject', 'leading whitespace + hyphen (trim then check)'],
+  ])(
+    'rejects roleDescription starting with markdown list-item prefix (%s — %s)',
+    (value) => {
+      render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+      fill({ roleDescription: value })
+      expect(
+        screen.getByRole('button', { name: /Create agent/i }),
+      ).toBeDisabled()
+    },
+  )
+
+  it('allows roleDescription with an internal `- foo` line (multi-line prose)', () => {
+    // The prefix check is on the TRIMMED START only. A bullet on line 2
+    // is legitimate operator content (init-config collapses newlines
+    // to spaces — `foo - bar` after collapse, not a structural bullet).
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    fill({ roleDescription: 'Senior on-call engineer\n- handles P0 incidents' })
+    expect(
+      screen.getByRole('button', { name: /Create agent/i }),
+    ).not.toBeDisabled()
+  })
+
+  // Optional persona fields (displayName / persona). These satisfy
+  // CLAUDE.md's test-discipline hard rule for the form layer; the
+  // template-level + handler-level coverage lives in
+  // templates-openclaw.test.ts + agents-create.test.ts.
+  it('renders displayName / persona inputs and accepts input', () => {
     render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     const displayName = screen.getByLabelText(/^Display name$/i) as HTMLInputElement
-    const emoji = screen.getByLabelText(/^Emoji$/i) as HTMLInputElement
     const persona = screen.getByLabelText(/^Persona$/i) as HTMLTextAreaElement
     fireEvent.change(displayName, { target: { value: 'Aria' } })
-    fireEvent.change(emoji, { target: { value: '🦊' } })
     fireEvent.change(persona, { target: { value: 'Direct, opinionated.' } })
     expect(displayName.value).toBe('Aria')
-    expect(emoji.value).toBe('🦊')
     expect(persona.value).toBe('Direct, opinionated.')
   })
 
-  it('#357 Phase-2: persona fields default empty → POST body omits them', async () => {
+  it('does not render the emoji field (removed; AGENT_EMOJI cosmetic-only)', () => {
+    render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+    expect(screen.queryByLabelText(/^Emoji$/i)).toBeNull()
+  })
+
+  it('persona fields default empty → POST body omits them', async () => {
     const postResponse = new Response(
       JSON.stringify({
         ok: true,
@@ -171,7 +204,7 @@ describe('<CreateAgentForm />', () => {
     expect(body).not.toHaveProperty('persona')
   })
 
-  it('#357 Phase-2: persona fields populated → POST body includes them verbatim', async () => {
+  it('persona fields populated → POST body includes them verbatim', async () => {
     const postResponse = new Response(
       JSON.stringify({
         ok: true,
@@ -191,9 +224,6 @@ describe('<CreateAgentForm />', () => {
     fireEvent.change(screen.getByLabelText(/^Display name$/i), {
       target: { value: 'Aria' },
     })
-    fireEvent.change(screen.getByLabelText(/^Emoji$/i), {
-      target: { value: '🦊' },
-    })
     fireEvent.change(screen.getByLabelText(/^Persona$/i), {
       target: { value: 'Direct, opinionated. Skip filler.' },
     })
@@ -209,11 +239,10 @@ describe('<CreateAgentForm />', () => {
     )
     const body = JSON.parse((postCall?.[1]?.body as string) ?? '{}') as Record<string, unknown>
     expect(body.displayName).toBe('Aria')
-    expect(body.emoji).toBe('🦊')
     expect(body.persona).toBe('Direct, opinionated. Skip filler.')
   })
 
-  it('#357 Phase-2: persona-field overflow (UTF-8 bytes) blocks submit', () => {
+  it('persona-field overflow (UTF-8 bytes) blocks submit', () => {
     render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     fill()
     const submit = screen.getByRole('button', { name: /Create agent/i })

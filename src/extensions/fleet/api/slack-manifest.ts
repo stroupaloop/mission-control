@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import {
   ECSClient,
   DescribeServicesCommand,
+  DescribeTaskDefinitionCommand,
 } from '@aws-sdk/client-ecs'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
@@ -158,18 +159,56 @@ export async function GET(
       )
     }
 
-    // Fall back to a generic description — DescribeServices doesn't
-    // expose the task-def env block (where OPENCLAW_ROLE_DESCRIPTION
-    // lives). Pulling the operator's actual role description would
-    // require a separate DescribeTaskDefinition call, which isn't
-    // worth the extra round-trip for a UX-nicety field that shows
-    // up only in Slack's app description. Phase-2.x can wire it
-    // through if/when there's a reason to.
-    const roleDescription = `Mission Control agent ${agentName}`
+    // Pull AGENT_DISPLAY_NAME + OPENCLAW_ROLE_DESCRIPTION from the
+    // task-def env block. DescribeServices doesn't expose env vars, so
+    // a second DescribeTaskDefinition call is required. Both values are
+    // operator-supplied via the create-agent form; when absent (legacy
+    // agents created before persona fields landed, or agents created
+    // without the optional displayName), the manifest falls back to
+    // agentName and a generic description.
+    const taskDefinition = target.taskDefinition
+    let displayName: string | undefined
+    let roleDescription = `Mission Control agent ${agentName}`
+    if (taskDefinition) {
+      try {
+        const tdResp = await ecsClient.send(
+          new DescribeTaskDefinitionCommand({ taskDefinition }),
+        )
+        const envByName = new Map<string, string>()
+        for (const container of tdResp.taskDefinition?.containerDefinitions ??
+          []) {
+          for (const kv of container.environment ?? []) {
+            if (kv.name && typeof kv.value === 'string') {
+              envByName.set(kv.name, kv.value)
+            }
+          }
+        }
+        const dn = envByName.get('AGENT_DISPLAY_NAME')
+        if (dn && dn.trim()) displayName = dn.trim()
+        const role = envByName.get('OPENCLAW_ROLE_DESCRIPTION')
+        if (role && role.trim()) roleDescription = role.trim()
+      } catch (err) {
+        // Non-fatal: log and fall through to the generic fallback so the
+        // operator still gets a working (if less personalized) manifest
+        // when DescribeTaskDefinition fails (IAM, throttle, etc.).
+        const e = err as { name?: string; message?: string }
+        logger.warn(
+          {
+            cluster: clusterName,
+            serviceName,
+            taskDefinition,
+            errorName: e.name,
+            errorMessage: e.message,
+          },
+          '[fleet] slack-manifest: DescribeTaskDefinition failed; using fallback values',
+        )
+      }
+    }
 
     const manifest = renderSlackManifest({
       agentName,
       roleDescription,
+      displayName,
     })
 
     return NextResponse.json(

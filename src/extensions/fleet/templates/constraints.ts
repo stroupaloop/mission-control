@@ -69,47 +69,45 @@ export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/
  * unbounded admin input becomes permanent storage anyone with
  * `ecs:DescribeTaskDefinition` can read.
  *
- * `roleDescription` reduced from 1024 → 200 bytes in #357 Phase-2: the
- * value now flows into IDENTITY.md as a single-line `Role:` bullet via
- * init-config (ender-stack#361), where a longer string would visually
- * break the markdown structure. init-config defensively truncates at
- * 200B; matching the form cap closes the trust gap (operators see the
- * post-truncation value at form-submit time, not after deploy).
+ * `roleDescription` is 200 bytes: the value flows into IDENTITY.md as
+ * a single-line `Role:` bullet via init-config (ender-stack#361), where
+ * a longer string would visually break the markdown structure.
+ * init-config defensively truncates at 200B; matching the form cap
+ * closes the trust gap (operators see the post-truncation value at
+ * form-submit time, not after deploy).
  *
- * Caps for the new #357 Phase-2 persona fields (displayName / emoji /
- * persona) follow the same posture: short single-line fields cap at
- * 200B or less; persona (multi-paragraph prose for SOUL.md) caps at
- * 1024B. init-config in ender-stack mirrors these with defensive
- * truncation in case the form is bypassed.
+ * Caps for the persona fields (displayName / persona) follow the same
+ * posture: short single-line fields cap at 200B or less; persona
+ * (multi-paragraph prose for SOUL.md) caps at 1024B. init-config in
+ * ender-stack mirrors these with defensive truncation in case the form
+ * is bypassed.
  */
 export const ROLE_DESCRIPTION_MAX_BYTES = 200
 export const IMAGE_MAX_BYTES = 512
 export const DISPLAY_NAME_MAX_BYTES = 64
-export const EMOJI_MAX_BYTES = 16
 export const PERSONA_MAX_BYTES = 1024
 
 /**
- * #357 Phase-2 persona-field validation regexes.
+ * Persona-field validation regexes.
  *
- * Markdown-structural-injection defense (#360 Item 1): reject ASCII
- * control chars (NUL through 0x1F + DEL) and the two markdown
- * list-item prefix forms that would land in IDENTITY.md as net-new
- * trusted bullets — `^- ` and `^* `. Numbered-list prefix (`^1. `)
- * is intentionally allowed because legitimate role names contain
- * "1." (e.g. "Tier 1. SRE"). The agent reads IDENTITY.md as trusted
- * persona config, so any character that visually breaks the markdown
- * structure is an injection vector once Phase-2 wires operator-
- * supplied form input to AGENT_DISPLAY_NAME / AGENT_ROLE / AGENT_EMOJI.
+ * Markdown-structural-injection defense: reject ASCII control chars
+ * (NUL through 0x1F + DEL) and the markdown list-item prefix forms
+ * that would land in IDENTITY.md as net-new trusted bullets:
+ * `^- `, `^* `, `^+ `, and `^<digits>. ` (numbered lists). The agent
+ * reads IDENTITY.md as trusted persona config, so any character that
+ * visually breaks the markdown structure is an injection vector once
+ * operator-supplied form input is wired to AGENT_DISPLAY_NAME /
+ * AGENT_ROLE.
  *
- * displayName / role / emoji fields apply this restriction; persona
- * (free-form prose for SOUL.md) does NOT — operators legitimately want
- * to write markdown in SOUL.md.
+ * displayName / roleDescription apply this restriction. persona
+ * (free-form prose for SOUL.md) does NOT — operators legitimately
+ * want to write markdown in SOUL.md.
  *
  * Implementation: the regex rejects strings that EITHER contain a
  * control char OR start with a list-item prefix. Tests assert both
  * negatives are caught.
  */
-export const PERSONA_FIELD_DISALLOWED_PREFIX_RE = /^[-*][ \t]/
+export const PERSONA_FIELD_DISALLOWED_PREFIX_RE = /^(?:[-*+][ \t]|\d+\.[ \t])/
 // eslint-disable-next-line no-control-regex
 export const PERSONA_FIELD_CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/
 

@@ -534,21 +534,20 @@ describe('POST /api/fleet/agents — happy path', () => {
     expect(resp.status).toBe(201)
   })
 
-  it('#357 Phase-2: forwards optional persona fields from request body to RegisterTaskDefinition env', async () => {
+  it('forwards optional persona fields from request body to RegisterTaskDefinition env', async () => {
     happyPathMocks()
     const POST = await importHandler()
     const resp = await POST(
       mkRequest({
         ...validBody(),
         displayName: 'Aria',
-        emoji: '🦊',
         persona: 'Direct, opinionated. Skip filler.',
       }),
     )
     expect(resp.status).toBe(201)
     // Find the RegisterTaskDefinition call and inspect the
-    // init-config container's env. Phase-2 emits the persona fields
-    // on commonEnv so both containers see them.
+    // init-config container's env. The persona fields are emitted on
+    // commonEnv so both containers see them.
     const registerCall = ecsSendMock.mock.calls.find(
       (c) =>
         (c[0] as { __type: string }).__type === 'RegisterTaskDefinitionCommand',
@@ -564,14 +563,17 @@ describe('POST /api/fleet/agents — happy path', () => {
     }).input
     const init = taskDef.containerDefinitions.find((c) => c.name === 'init-config')
     expect(init?.environment).toContainEqual({ name: 'AGENT_DISPLAY_NAME', value: 'Aria' })
-    expect(init?.environment).toContainEqual({ name: 'AGENT_EMOJI', value: '🦊' })
     expect(init?.environment).toContainEqual({
       name: 'AGENT_PERSONA',
       value: 'Direct, opinionated. Skip filler.',
     })
+    // Emoji removed — must never appear.
+    expect(
+      init?.environment?.find((e) => e.name === 'AGENT_EMOJI'),
+    ).toBeUndefined()
   })
 
-  it('#357 Phase-2: omits persona fields from RegisterTaskDefinition env when request body omits them (legacy clients)', async () => {
+  it('omits persona fields from RegisterTaskDefinition env when request body omits them', async () => {
     happyPathMocks()
     const POST = await importHandler()
     const resp = await POST(mkRequest(validBody())) // no persona fields
@@ -593,14 +595,11 @@ describe('POST /api/fleet/agents — happy path', () => {
       init?.environment?.find((e) => e.name === 'AGENT_DISPLAY_NAME'),
     ).toBeUndefined()
     expect(
-      init?.environment?.find((e) => e.name === 'AGENT_EMOJI'),
-    ).toBeUndefined()
-    expect(
       init?.environment?.find((e) => e.name === 'AGENT_PERSONA'),
     ).toBeUndefined()
   })
 
-  it('#357 Phase-2: rejects request body with non-string optional field (type guard)', async () => {
+  it('rejects request body with non-string optional field (type guard)', async () => {
     const POST = await importHandler()
     // displayName: 42 should fail the isOptString check in the type guard.
     const resp = await POST(

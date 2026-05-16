@@ -259,14 +259,12 @@ export interface CreateAgentRequest {
   roleDescription: string
   image: string
   /**
-   * #357 Phase-2: optional persona fields surfaced by the create-agent
-   * form. Init-config (ender-stack#361) hard-templates IDENTITY.md +
-   * SOUL.md from these values. All optional; legacy clients that omit
-   * them get the same Phase-1 behavior (canonical placeholders +
-   * BOOTSTRAP.md first-run conversation fills in identity).
+   * Optional persona fields surfaced by the create-agent form.
+   * Init-config (ender-stack#361) hard-templates IDENTITY.md +
+   * SOUL.md from these values. Both optional; clients that omit them
+   * get the canonical-placeholder + BOOTSTRAP.md first-run behavior.
    */
   displayName?: string
-  emoji?: string
   persona?: string
 }
 
@@ -484,11 +482,10 @@ function getMissingEnv(env: ResolvedEnv): string[] {
 function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
   if (!body || typeof body !== 'object') return false
   const b = body as Record<string, unknown>
-  // #357 Phase-2 persona fields are optional — when present they must
-  // be strings; otherwise must be absent / undefined. Length + content
-  // validation lands in validateOpenClawInput (templates/index.ts) so
-  // the operator-facing error messages live with the other field
-  // checks.
+  // Persona fields are optional — when present they must be strings;
+  // otherwise must be absent / undefined. Length + content validation
+  // lands in validateOpenClawInput (templates/index.ts) so the
+  // operator-facing error messages live with the other field checks.
   const isOptString = (v: unknown) => v === undefined || typeof v === 'string'
   return (
     typeof b.harnessType === 'string' &&
@@ -498,7 +495,6 @@ function isCreateAgentRequest(body: unknown): body is CreateAgentRequest {
     typeof b.roleDescription === 'string' &&
     typeof b.image === 'string' &&
     isOptString(b.displayName) &&
-    isOptString(b.emoji) &&
     isOptString(b.persona)
   )
 }
@@ -548,11 +544,10 @@ export async function POST(request: NextRequest) {
     agentName: body.agentName,
     roleDescription: body.roleDescription,
     image: body.image,
-    // #357 Phase-2: forward optional persona fields. Undefined when
-    // omitted by the client; the template's conditional emission means
-    // omitted fields produce no env-var entry on the task-def.
+    // Forward optional persona fields. Undefined when omitted by the
+    // client; the template's conditional emission means omitted fields
+    // produce no env-var entry on the task-def.
     displayName: body.displayName,
-    emoji: body.emoji,
     persona: body.persona,
   }
 

@@ -9,6 +9,10 @@ vi.mock('@aws-sdk/client-ecs', () => ({
     __type: 'DescribeServicesCommand',
     input,
   })),
+  DescribeTaskDefinitionCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DescribeTaskDefinitionCommand',
+    input,
+  })),
 }))
 
 vi.mock('@/lib/logger', () => ({
@@ -131,7 +135,9 @@ describe('GET /api/fleet/agents/:name/slack/manifest — happy path', () => {
     expect(serialized).not.toContain('request_url')
   })
 
-  it('manifest sets bot_user.display_name to the agent name', async () => {
+  it('manifest sets bot_user.display_name to the agent name when no AGENT_DISPLAY_NAME env is present', async () => {
+    // Service has no taskDefinition ARN (DescribeTaskDefinition is
+    // skipped entirely) → fallback to agentName.
     ecsSendMock.mockResolvedValueOnce({
       services: [
         {
@@ -144,6 +150,120 @@ describe('GET /api/fleet/agents/:name/slack/manifest — happy path', () => {
         },
       ],
     })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as {
+      manifest: { features: { bot_user: { display_name: string } } }
+    }
+    expect(json.manifest.features.bot_user.display_name).toBe(AGENT)
+  })
+
+  it('manifest uses AGENT_DISPLAY_NAME from the task-def env when present', async () => {
+    // First call: DescribeServices returns a service with a taskDef ARN.
+    // Second call: DescribeTaskDefinition returns the env block with
+    // AGENT_DISPLAY_NAME = "Procurement Bot".
+    const TD_ARN = `arn:aws:ecs:us-east-1:111:task-definition/${SERVICE_NAME}:42`
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            taskDefinition: TD_ARN,
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        taskDefinition: {
+          containerDefinitions: [
+            {
+              name: 'init-config',
+              environment: [
+                { name: 'AGENT_DISPLAY_NAME', value: 'Procurement Bot' },
+                { name: 'OPENCLAW_ROLE_DESCRIPTION', value: 'Handles POs' },
+              ],
+            },
+            { name: 'gateway', environment: [] },
+          ],
+        },
+      })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as {
+      manifest: {
+        features: { bot_user: { display_name: string } }
+        display_information: { name: string; description: string }
+      }
+    }
+    expect(json.manifest.features.bot_user.display_name).toBe('Procurement Bot')
+    // Description also uses the operator's value, not the generic fallback.
+    expect(json.manifest.display_information.description).toBe('Handles POs')
+    // The app name (admin-facing in workspace install picker) is still
+    // the machine name — only display_name is user-facing.
+    expect(json.manifest.display_information.name).toBe(AGENT)
+  })
+
+  it('falls back to agentName when DescribeTaskDefinition fails', async () => {
+    // Non-fatal: handler logs + falls through to the canonical fallback.
+    const TD_ARN = `arn:aws:ecs:us-east-1:111:task-definition/${SERVICE_NAME}:1`
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            taskDefinition: TD_ARN,
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('throttled'), {
+          name: 'ThrottlingException',
+        }),
+      )
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      manifest: { features: { bot_user: { display_name: string } } }
+    }
+    expect(json.manifest.features.bot_user.display_name).toBe(AGENT)
+  })
+
+  it('falls back to agentName when AGENT_DISPLAY_NAME env is whitespace-only', async () => {
+    const TD_ARN = `arn:aws:ecs:us-east-1:111:task-definition/${SERVICE_NAME}:1`
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            taskDefinition: TD_ARN,
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        taskDefinition: {
+          containerDefinitions: [
+            {
+              name: 'init-config',
+              environment: [{ name: 'AGENT_DISPLAY_NAME', value: '   ' }],
+            },
+          ],
+        },
+      })
     const GET = await importHandler()
     const resp = await GET(mkRequest(), mkParams())
     const json = (await resp.json()) as {
@@ -432,5 +552,58 @@ describe('renderSlackManifest (template-level)', () => {
       roleDescription: 'Says hello',
     })
     expect(m.display_information.description).toBe('Says hello')
+  })
+
+  it('uses displayName for bot_user.display_name when supplied', async () => {
+    const { renderSlackManifest } = await import(
+      '../templates/slack-manifest'
+    )
+    const m = renderSlackManifest({
+      agentName: '260516-2',
+      roleDescription: 'Says hello',
+      displayName: 'Procurement Bot',
+    })
+    expect(m.features.bot_user.display_name).toBe('Procurement Bot')
+    // The app name is still the machine name — the manifest pastes
+    // into the operator's app blueprint where the app name is admin-
+    // facing (workspace install picker), display_name is user-facing.
+    expect(m.display_information.name).toBe('260516-2')
+  })
+
+  it('falls back to agentName for bot_user.display_name when displayName is missing or whitespace', async () => {
+    const { renderSlackManifest } = await import(
+      '../templates/slack-manifest'
+    )
+    const undef = renderSlackManifest({
+      agentName: '260516-2',
+      roleDescription: 'Says hello',
+    })
+    expect(undef.features.bot_user.display_name).toBe('260516-2')
+
+    const empty = renderSlackManifest({
+      agentName: '260516-2',
+      roleDescription: 'Says hello',
+      displayName: '',
+    })
+    expect(empty.features.bot_user.display_name).toBe('260516-2')
+
+    const whitespace = renderSlackManifest({
+      agentName: '260516-2',
+      roleDescription: 'Says hello',
+      displayName: '   ',
+    })
+    expect(whitespace.features.bot_user.display_name).toBe('260516-2')
+  })
+
+  it('trims displayName before using it as bot_user.display_name', async () => {
+    const { renderSlackManifest } = await import(
+      '../templates/slack-manifest'
+    )
+    const m = renderSlackManifest({
+      agentName: '260516-2',
+      roleDescription: 'Says hello',
+      displayName: '  Aria  ',
+    })
+    expect(m.features.bot_user.display_name).toBe('Aria')
   })
 })

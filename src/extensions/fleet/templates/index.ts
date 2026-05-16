@@ -25,7 +25,6 @@ import * as openclaw from './openclaw'
 import {
   AGENT_NAME_RE,
   DISPLAY_NAME_MAX_BYTES,
-  EMOJI_MAX_BYTES,
   HARNESS_TYPES,
   IMAGE_MAX_BYTES,
   PERSONA_FIELD_CONTROL_CHAR_RE,
@@ -197,26 +196,28 @@ function validateOpenClawInput(
       `roleDescription must be ≤ ${ROLE_DESCRIPTION_MAX_BYTES} bytes; got ${roleDescriptionBytes}`,
     )
   }
-  // roleDescription is rendered as a multi-line textarea in the form
-  // (pre-Phase-2 behavior preserved); the resulting AGENT_ROLE env var
-  // is normalized to single-line by ender-stack init-config's
-  // `normField` (CR/LF/U+2028/U+2029 → single space) before substitution
-  // into IDENTITY.md. So roleDescription tolerates LF/tab the same way
-  // persona does (multi-line prose acceptable); only non-LF/non-tab
-  // control chars are rejected.
+  // roleDescription is rendered as a multi-line textarea in the form;
+  // the resulting AGENT_ROLE env var is normalized to single-line by
+  // ender-stack init-config's `normField` (CR/LF/U+2028/U+2029 → single
+  // space) before substitution into IDENTITY.md. roleDescription
+  // tolerates LF/tab the same way persona does (multi-line prose
+  // acceptable); only non-LF/non-tab control chars are rejected.
   //
-  // The single-line-only `validatePersonaField` is reserved for
-  // displayName / emoji where the values land in IDENTITY.md without
-  // intermediate normalization that would collapse paragraph breaks.
-  // Claude bot R4 bug finding on PR #69: applying the strict
-  // single-line check to roleDescription regressed pre-Phase-2
-  // multi-line textarea support.
-  validateProseField('roleDescription', input.roleDescription)
+  // The disallowed-prefix check IS applied to the trimmed start of the
+  // value: a leading `- foo` would land as `Role: - foo` after the
+  // normField collapse and is almost always an injection attempt rather
+  // than a real role description. Internal `\n- foo` (line 2 of multi-
+  // line input) is fine — only the start matters because that's what
+  // becomes the start of the substituted bullet content.
+  validateProseField('roleDescription', input.roleDescription, {
+    rejectLeadingListPrefix: true,
+  })
 
-  // #357 Phase-2: optional persona fields. displayName / emoji apply
-  // the single-line guard (validatePersonaField — list-item prefix +
-  // ALL control chars). persona uses the multi-line prose guard
-  // (validateProseField — control chars except LF / tab).
+  // Optional persona fields. displayName applies the single-line guard
+  // (validatePersonaField — list-item prefix + ALL control chars).
+  // persona uses the multi-line prose guard (validateProseField —
+  // control chars except LF / tab; no leading-list-prefix check since
+  // operators legitimately write markdown in SOUL.md).
   if (input.displayName !== undefined) {
     const displayNameBytes = utf8Bytes(input.displayName)
     if (displayNameBytes > DISPLAY_NAME_MAX_BYTES) {
@@ -225,15 +226,6 @@ function validateOpenClawInput(
       )
     }
     if (input.displayName) validatePersonaField('displayName', input.displayName)
-  }
-  if (input.emoji !== undefined) {
-    const emojiBytes = utf8Bytes(input.emoji)
-    if (emojiBytes > EMOJI_MAX_BYTES) {
-      throw new Error(
-        `emoji must be ≤ ${EMOJI_MAX_BYTES} bytes; got ${emojiBytes}`,
-      )
-    }
-    if (input.emoji) validatePersonaField('emoji', input.emoji)
   }
   if (input.persona !== undefined) {
     const personaBytes = utf8Bytes(input.persona)
@@ -247,25 +239,42 @@ function validateOpenClawInput(
 }
 
 /**
- * Multi-line prose validator (roleDescription + persona). Rejects
- * disallowed control chars but ALLOWS LF and tab — operators
- * legitimately want paragraph breaks. Markdown is legitimate too;
- * no list-item-prefix check (init-config strips H1-H6 from persona
- * defensively at the boot boundary).
+ * Multi-line prose validator. Rejects disallowed control chars but
+ * ALLOWS LF and tab — operators legitimately want paragraph breaks.
+ *
+ * When `rejectLeadingListPrefix` is set (roleDescription), also rejects
+ * values whose trimmed start matches a markdown list-item prefix
+ * (`- `, `* `, `+ `, `<digits>. `). This blocks injection attempts that
+ * would land as new trusted bullets in IDENTITY.md after init-config
+ * collapses newlines.
  */
-function validateProseField(name: string, value: string): void {
-  if (!PERSONA_FIELD_CONTROL_CHAR_RE.test(value)) return
-  const stripped = value.replace(/[\n\t]/g, '')
-  if (PERSONA_FIELD_CONTROL_CHAR_RE.test(stripped)) {
-    throw new Error(`${name} contains disallowed control characters`)
+function validateProseField(
+  name: string,
+  value: string,
+  opts: { rejectLeadingListPrefix?: boolean } = {},
+): void {
+  if (PERSONA_FIELD_CONTROL_CHAR_RE.test(value)) {
+    const stripped = value.replace(/[\n\t]/g, '')
+    if (PERSONA_FIELD_CONTROL_CHAR_RE.test(stripped)) {
+      throw new Error(`${name} contains disallowed control characters`)
+    }
+  }
+  if (
+    opts.rejectLeadingListPrefix &&
+    PERSONA_FIELD_DISALLOWED_PREFIX_RE.test(value.trim())
+  ) {
+    throw new Error(
+      `${name} cannot start with a markdown list-item prefix ` +
+        `('- ', '* ', '+ ', or 'N. '); use plain text.`,
+    )
   }
 }
 
 /**
- * Shared check for displayName / emoji — short single-line fields
- * that land in IDENTITY.md as markdown bullet content. Rejects
- * control chars and `^- `/`^* ` list-item prefixes that would inject
- * net-new trusted bullets into the agent's IDENTITY.md.
+ * Shared check for displayName — short single-line field that lands in
+ * IDENTITY.md as markdown bullet content. Rejects control chars and
+ * list-item prefixes that would inject net-new trusted bullets into the
+ * agent's IDENTITY.md.
  *
  * NOT used for roleDescription — that field uses validateProseField
  * (multi-line allowed via textarea, init-config normField collapses
@@ -277,12 +286,12 @@ function validatePersonaField(name: string, value: string): void {
   }
   // Check the trimmed value — the template emits trimmed values to
   // the task-def, so leading whitespace before a list-item prefix
-  // would otherwise bypass this check but land as a structural-look-
-  // alike after the emit-side trim. Claude bot R5 low on PR #69.
+  // would otherwise bypass this check but land as a structural look-
+  // alike after the emit-side trim.
   if (PERSONA_FIELD_DISALLOWED_PREFIX_RE.test(value.trim())) {
     throw new Error(
       `${name} cannot start with a markdown list-item prefix ` +
-        `('- ' or '* '); use plain text. (#357 Phase-2 / #360 Item 1)`,
+        `('- ', '* ', '+ ', or 'N. '); use plain text.`,
     )
   }
 }

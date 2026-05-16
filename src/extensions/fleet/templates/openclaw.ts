@@ -66,23 +66,22 @@ export interface OpenClawAgentInput {
   /** Container image (full ECR or GHCR URI with digest or tag). */
   image: string
   /**
-   * #357 Phase-2: optional persona fields supplied by the create-agent
-   * form. Each maps to one env var on the init container; init-config
+   * Optional persona fields supplied by the create-agent form. Each
+   * maps to one env var on the init container; init-config
    * (ender-stack#361) hard-templates IDENTITY.md placeholder lines and
    * a SOUL.md `Operator-Supplied Persona` section from these values.
    *
-   *   displayName → AGENT_DISPLAY_NAME → IDENTITY.md `**Name:**`
-   *   emoji       → AGENT_EMOJI        → IDENTITY.md `**Emoji:**`
+   *   displayName → AGENT_DISPLAY_NAME → IDENTITY.md `**Name:**` +
+   *                                       Slack `bot_user.display_name`
    *   persona     → AGENT_PERSONA      → SOUL.md section
    *
-   * All optional. When undefined or empty-string the env var is not
+   * Both optional. When undefined or empty-string the env var is not
    * emitted on the task-def at all (vs always-empty), keeping the
    * task-def env block cleaner for agents that don't use persona
    * scaffolding. init-config falls back to the canonical template
-   * placeholders in that case (Phase-1 behavior).
+   * placeholders in that case.
    */
   displayName?: string
-  emoji?: string
   persona?: string
   // Note: modelTier (and the OPENCLAW_MODEL env var) was removed in
   // Beat 3b.1. LiteLLM's smart-router is the authoritative model-
@@ -297,9 +296,6 @@ export function renderTaskDefinition(
     // Claude bot R4 low on PR #69.
     ...(input.displayName?.trim()
       ? [{ name: 'AGENT_DISPLAY_NAME', value: input.displayName.trim() }]
-      : []),
-    ...(input.emoji?.trim()
-      ? [{ name: 'AGENT_EMOJI', value: input.emoji.trim() }]
       : []),
     ...(input.persona?.trim()
       ? [{ name: 'AGENT_PERSONA', value: input.persona.trim() }]
