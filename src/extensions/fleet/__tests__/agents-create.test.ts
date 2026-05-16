@@ -1373,4 +1373,35 @@ describe('DEFAULT_LITELLM_MODEL_ALLOWLIST drift detection (#365)', () => {
     }
     expect(missing).toEqual([])
   })
+
+  // Claude reviewer R1 on #70: catch the other direction too —
+  // stale allowlist entries left behind after init-config drops a
+  // model. Without this, a removed model could linger in the
+  // allowlist indefinitely (no functional harm, but invites
+  // drift). Pair this with the forward direction above so the
+  // sets stay byte-equal modulo the prefix/bare split.
+  it('does not contain prefixed entries absent from init-config (no stale allowlist entries)', async () => {
+    const { DEFAULT_LITELLM_MODEL_ALLOWLIST } = await import(
+      '@/extensions/fleet/api/agents'
+    )
+    const catalogPrefixed = new Set<string>(INIT_CONFIG_MODEL_CATALOG)
+    const catalogBare = new Set<string>(
+      INIT_CONFIG_MODEL_CATALOG.map((m) => {
+        const slash = m.indexOf('/')
+        return slash === -1 ? m : m.slice(slash + 1)
+      }),
+    )
+    const stale: string[] = []
+    for (const entry of DEFAULT_LITELLM_MODEL_ALLOWLIST) {
+      const hasSlash = entry.includes('/')
+      if (hasSlash) {
+        // Prefixed entries must appear verbatim in init-config.
+        if (!catalogPrefixed.has(entry)) stale.push(entry)
+      } else {
+        // Bare entries must correspond to a prefixed catalog entry.
+        if (!catalogBare.has(entry)) stale.push(entry)
+      }
+    }
+    expect(stale).toEqual([])
+  })
 })

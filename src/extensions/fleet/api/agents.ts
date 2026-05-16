@@ -71,7 +71,8 @@ import {
  *      every model is enumerated in both `provider/name` and bare
  *      `name` form. Until OpenClaw is patched upstream to forward
  *      the prefixed form (or LiteLLM gains prefix-aware matching),
- *      both variants must be present.
+ *      both variants must be present. Tracked: ender-stack#367
+ *      (workaround removal contract).
  *
  * Drift between this list and init-config is asserted in the
  * `DEFAULT_LITELLM_MODEL_ALLOWLIST drift detection` test in
