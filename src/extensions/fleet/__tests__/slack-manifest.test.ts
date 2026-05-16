@@ -272,6 +272,97 @@ describe('GET /api/fleet/agents/:name/slack/manifest — happy path', () => {
     expect(json.manifest.features.bot_user.display_name).toBe(AGENT)
   })
 
+  it('reads AGENT_DISPLAY_NAME from init-config container first (not last-writer-wins across containers)', async () => {
+    // If a future refactor adds a container-specific override that
+    // differs from commonEnv, the init-config value (authoritative,
+    // operator-supplied via the form) must win. Mock a task-def where
+    // gateway has a different value to lock the priority.
+    const TD_ARN = `arn:aws:ecs:us-east-1:111:task-definition/${SERVICE_NAME}:5`
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            taskDefinition: TD_ARN,
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        taskDefinition: {
+          containerDefinitions: [
+            {
+              name: 'gateway',
+              environment: [
+                { name: 'AGENT_DISPLAY_NAME', value: 'STALE Gateway Override' },
+              ],
+            },
+            {
+              name: 'init-config',
+              environment: [
+                { name: 'AGENT_DISPLAY_NAME', value: 'Procurement Bot' },
+              ],
+            },
+          ],
+        },
+      })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as {
+      manifest: { features: { bot_user: { display_name: string } } }
+    }
+    expect(json.manifest.features.bot_user.display_name).toBe('Procurement Bot')
+  })
+
+  it('collapses interior whitespace in OPENCLAW_ROLE_DESCRIPTION for the Slack app description', async () => {
+    // Operators may enter multi-line role descriptions via the textarea.
+    // The Slack app description is single-line (truncated to 140 chars);
+    // a value with embedded LFs/tabs would render awkwardly. The handler
+    // collapses whitespace before passing to the manifest renderer.
+    const TD_ARN = `arn:aws:ecs:us-east-1:111:task-definition/${SERVICE_NAME}:6`
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            taskDefinition: TD_ARN,
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        taskDefinition: {
+          containerDefinitions: [
+            {
+              name: 'gateway',
+              environment: [
+                {
+                  name: 'OPENCLAW_ROLE_DESCRIPTION',
+                  value: 'Handles  POs\nfor the\tChicago office',
+                },
+              ],
+            },
+          ],
+        },
+      })
+    const GET = await importHandler()
+    const resp = await GET(mkRequest(), mkParams())
+    const json = (await resp.json()) as {
+      manifest: { display_information: { description: string } }
+    }
+    expect(json.manifest.display_information.description).toBe(
+      'Handles POs for the Chicago office',
+    )
+  })
+
   it('manifest scopes match the standard OpenClaw Slack-app shape (RAID-aligned 2026-05-04)', async () => {
     // Beat 5e validation surfaced that the prior narrower scope
     // set caused SlackMissingScope from conversations.list because

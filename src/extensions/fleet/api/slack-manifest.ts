@@ -163,9 +163,18 @@ export async function GET(
     // task-def env block. DescribeServices doesn't expose env vars, so
     // a second DescribeTaskDefinition call is required. Both values are
     // operator-supplied via the create-agent form; when absent (legacy
-    // agents created before persona fields landed, or agents created
-    // without the optional displayName), the manifest falls back to
-    // agentName and a generic description.
+    // agents, or agents created without the optional displayName), the
+    // manifest falls back to agentName and a generic description.
+    //
+    // Read from the init-config container first, falling back to other
+    // containers. Today AGENT_DISPLAY_NAME lives on commonEnv (same
+    // value on every container) and OPENCLAW_ROLE_DESCRIPTION on
+    // gatewayOnlyEnv (gateway container only), so a flat last-writer-
+    // wins map would happen to be correct — but the templates layout
+    // is the only thing making it correct. A future refactor that moves
+    // either var or adds a container-specific override should not
+    // silently get the wrong value here. Mirror the targeted lookup
+    // pattern in slack-channels.ts.
     const taskDefinition = target.taskDefinition
     let displayName: string | undefined
     let roleDescription = `Mission Control agent ${agentName}`
@@ -174,19 +183,28 @@ export async function GET(
         const tdResp = await ecsClient.send(
           new DescribeTaskDefinitionCommand({ taskDefinition }),
         )
-        const envByName = new Map<string, string>()
-        for (const container of tdResp.taskDefinition?.containerDefinitions ??
-          []) {
-          for (const kv of container.environment ?? []) {
-            if (kv.name && typeof kv.value === 'string') {
-              envByName.set(kv.name, kv.value)
+        const containers = tdResp.taskDefinition?.containerDefinitions ?? []
+        const orderedContainers = [
+          ...containers.filter((c) => c.name === 'init-config'),
+          ...containers.filter((c) => c.name !== 'init-config'),
+        ]
+        const readEnv = (name: string): string | undefined => {
+          for (const c of orderedContainers) {
+            for (const kv of c.environment ?? []) {
+              if (kv.name === name && typeof kv.value === 'string') {
+                const trimmed = kv.value.trim()
+                if (trimmed) return trimmed
+              }
             }
           }
+          return undefined
         }
-        const dn = envByName.get('AGENT_DISPLAY_NAME')
-        if (dn && dn.trim()) displayName = dn.trim()
-        const role = envByName.get('OPENCLAW_ROLE_DESCRIPTION')
-        if (role && role.trim()) roleDescription = role.trim()
+        displayName = readEnv('AGENT_DISPLAY_NAME')
+        const role = readEnv('OPENCLAW_ROLE_DESCRIPTION')
+        // Collapse interior whitespace so a multi-line role description
+        // (textarea input) renders cleanly in Slack's single-line app
+        // description. truncateForSlack still enforces the 140-char cap.
+        if (role) roleDescription = role.replace(/\s+/g, ' ')
       } catch (err) {
         // Non-fatal: log and fall through to the generic fallback so the
         // operator still gets a working (if less personalized) manifest
