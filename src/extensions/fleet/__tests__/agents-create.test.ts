@@ -1374,12 +1374,23 @@ describe('DEFAULT_LITELLM_MODEL_ALLOWLIST drift detection (#365)', () => {
     expect(missing).toEqual([])
   })
 
-  // Claude reviewer R1 on #70: catch the other direction too —
-  // stale allowlist entries left behind after init-config drops a
-  // model. Without this, a removed model could linger in the
-  // allowlist indefinitely (no functional harm, but invites
-  // drift). Pair this with the forward direction above so the
-  // sets stay byte-equal modulo the prefix/bare split.
+  // Catch the other direction too — stale allowlist entries left
+  // behind after init-config drops a model. Without this, a
+  // removed model could linger in the allowlist indefinitely (no
+  // functional harm, but invites drift). Pair this with the
+  // forward direction above so the sets stay byte-equal modulo
+  // the prefix/bare split.
+  //
+  // Known limitation: INIT_CONFIG_MODEL_CATALOG is a manually-
+  // maintained literal copy of init-config.sh. If a developer
+  // removes a model from init-config AND forgets to update this
+  // fixture, both tests still pass. The companion ender-stack PR
+  // adds a same-file consistency check on the init-config side
+  // (every primary/fallback/subagent model in agents.defaults.models),
+  // which closes the cross-side gap at the cost of a manual sync
+  // step here. Until init-config and MC share a single catalog
+  // (deferred — see ender-stack#367), this fixture must be
+  // hand-synced when init-config's modelsAllowlist changes.
   it('does not contain prefixed entries absent from init-config (no stale allowlist entries)', async () => {
     const { DEFAULT_LITELLM_MODEL_ALLOWLIST } = await import(
       '@/extensions/fleet/api/agents'
