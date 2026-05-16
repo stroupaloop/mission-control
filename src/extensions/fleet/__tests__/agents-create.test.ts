@@ -984,10 +984,27 @@ describe('POST /api/fleet/agents — per-agent LiteLLM virtual key (#354)', () =
     const body = JSON.parse(init.body as string)
     expect(body.key_alias).toBe('ender-stack-dev-hello-bot')
     expect(body.models).toEqual([
-      'openai/smart-router',
-      'anthropic/claude-haiku-4-5',
-      'anthropic/claude-sonnet-4-6',
-      'anthropic/claude-opus-4-7',
+      // Smart router (primary)
+      'openai/smart-router', 'smart-router',
+      // Anthropic
+      'anthropic/claude-opus-4-6',   'claude-opus-4-6',
+      'anthropic/claude-opus-4-7',   'claude-opus-4-7',
+      'anthropic/claude-sonnet-4-6', 'claude-sonnet-4-6',
+      'anthropic/claude-haiku-4-5',  'claude-haiku-4-5',
+      // OpenAI
+      'openai/gpt-5.5',      'gpt-5.5',
+      'openai/gpt-5.4',      'gpt-5.4',
+      'openai/gpt-5.4-mini', 'gpt-5.4-mini',
+      'openai/gpt-5.4-nano', 'gpt-5.4-nano',
+      'openai/o3',           'o3',
+      // Google
+      'google/gemini-3.1-pro-preview', 'gemini-3.1-pro-preview',
+      'google/gemini-3-flash',         'gemini-3-flash',
+      // xAI
+      'xai/grok-4-1-fast-reasoning', 'grok-4-1-fast-reasoning',
+      // Perplexity
+      'perplexity/sonar',     'sonar',
+      'perplexity/sonar-pro', 'sonar-pro',
     ])
     expect(body.max_budget).toBe(50)
 
@@ -1306,5 +1323,54 @@ describe('POST /api/fleet/agents — per-agent LiteLLM virtual key (#354)', () =
     )
     // SM write failed → no ARN to surface.
     expect(json.partialResources?.litellmSecretArn).toBeUndefined()
+  })
+})
+
+/**
+ * Drift detection for `DEFAULT_LITELLM_MODEL_ALLOWLIST` (#365).
+ *
+ * Every model referenced by ender-stack's init-config.sh MUST be in
+ * MC's per-agent virtual-key allowlist, in BOTH `provider/name` and
+ * bare `name` form — OpenClaw strips the provider prefix before
+ * calling LiteLLM, and LiteLLM does exact string match.
+ *
+ * `INIT_CONFIG_MODEL_CATALOG` is a literal copy of init-config's
+ * `modelsAllowlist` (line ~559). If you add a model in either repo
+ * without updating the other, this test fails — that's the whole
+ * point. To resync: update both this fixture AND the allowlist in
+ * agents.ts.
+ */
+describe('DEFAULT_LITELLM_MODEL_ALLOWLIST drift detection (#365)', () => {
+  const INIT_CONFIG_MODEL_CATALOG = [
+    'anthropic/claude-opus-4-6',
+    'anthropic/claude-opus-4-7',
+    'anthropic/claude-sonnet-4-6',
+    'anthropic/claude-haiku-4-5',
+    'openai/gpt-5.5',
+    'openai/gpt-5.4',
+    'openai/gpt-5.4-mini',
+    'openai/gpt-5.4-nano',
+    'openai/o3',
+    'openai/smart-router',
+    'google/gemini-3.1-pro-preview',
+    'google/gemini-3-flash',
+    'xai/grok-4-1-fast-reasoning',
+    'perplexity/sonar',
+    'perplexity/sonar-pro',
+  ] as const
+
+  it('contains every init-config model in prefixed and unprefixed form', async () => {
+    const { DEFAULT_LITELLM_MODEL_ALLOWLIST } = await import(
+      '@/extensions/fleet/api/agents'
+    )
+    const allowlistSet = new Set(DEFAULT_LITELLM_MODEL_ALLOWLIST)
+    const missing: string[] = []
+    for (const prefixed of INIT_CONFIG_MODEL_CATALOG) {
+      const slash = prefixed.indexOf('/')
+      const bare = slash === -1 ? prefixed : prefixed.slice(slash + 1)
+      if (!allowlistSet.has(prefixed)) missing.push(prefixed)
+      if (!allowlistSet.has(bare)) missing.push(bare)
+    }
+    expect(missing).toEqual([])
   })
 })
