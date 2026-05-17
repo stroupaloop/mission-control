@@ -291,6 +291,138 @@ describe('renderTaskDefinition', () => {
     expect(initEnv.find((e) => e?.name === 'AGENT_PERSONA')).toBeUndefined()
   })
 
+  it('#376: archetype + owner-layer env vars are emitted on both containers when provided (commonEnv)', () => {
+    const taskDef = renderTaskDefinition(
+      {
+        ...fixtureInput,
+        archetype: 'software-engineer',
+        ownerName: 'Andrew Stroup',
+        ownerSlackId: 'U01ABCDEF23',
+        ownerTimezone: 'America/New_York',
+      },
+      fixtureEnv,
+    )
+    const init = findContainer(taskDef, 'init-config')
+    const gateway = findContainer(taskDef, 'gateway')
+
+    for (const c of [init, gateway]) {
+      const env = c?.environment ?? []
+      expect(env).toContainEqual({
+        name: 'AGENT_ARCHETYPE',
+        value: 'software-engineer',
+      })
+      expect(env).toContainEqual({
+        name: 'AGENT_OWNER_NAME',
+        value: 'Andrew Stroup',
+      })
+      expect(env).toContainEqual({
+        name: 'AGENT_OWNER_SLACK_ID',
+        value: 'U01ABCDEF23',
+      })
+      expect(env).toContainEqual({
+        name: 'AGENT_OWNER_TZ',
+        value: 'America/New_York',
+      })
+    }
+  })
+
+  it('#376: archetype + owner-layer env vars are OMITTED from the task-def when unset', () => {
+    const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv) // no archetype/owner fields
+    const init = findContainer(taskDef, 'init-config')
+    const gateway = findContainer(taskDef, 'gateway')
+
+    for (const c of [init, gateway]) {
+      const env = c?.environment ?? []
+      for (const name of [
+        'AGENT_ARCHETYPE',
+        'AGENT_OWNER_NAME',
+        'AGENT_OWNER_SLACK_ID',
+        'AGENT_OWNER_TZ',
+      ]) {
+        expect(env.find((e) => e?.name === name)).toBeUndefined()
+      }
+    }
+  })
+
+  it('#376: archetype + owner fields with empty strings are omitted (== absent)', () => {
+    const taskDef = renderTaskDefinition(
+      {
+        ...fixtureInput,
+        archetype: '',
+        ownerName: '',
+        ownerSlackId: '',
+        ownerTimezone: '',
+      },
+      fixtureEnv,
+    )
+    const init = findContainer(taskDef, 'init-config')
+    const initEnv = init?.environment ?? []
+    for (const name of [
+      'AGENT_ARCHETYPE',
+      'AGENT_OWNER_NAME',
+      'AGENT_OWNER_SLACK_ID',
+      'AGENT_OWNER_TZ',
+    ]) {
+      expect(initEnv.find((e) => e?.name === name)).toBeUndefined()
+    }
+  })
+
+  it('#376: archetype + owner fields with whitespace-only values are omitted (== absent)', () => {
+    const taskDef = renderTaskDefinition(
+      {
+        ...fixtureInput,
+        archetype: '  ',
+        ownerName: '   ',
+        ownerSlackId: ' U01ABCDEF23 ',
+        ownerTimezone: '\n',
+      },
+      fixtureEnv,
+    )
+    const init = findContainer(taskDef, 'init-config')
+    const initEnv = init?.environment ?? []
+    // archetype + ownerName + ownerTimezone: whitespace-only → omitted.
+    expect(
+      initEnv.find((e) => e?.name === 'AGENT_ARCHETYPE'),
+    ).toBeUndefined()
+    expect(
+      initEnv.find((e) => e?.name === 'AGENT_OWNER_NAME'),
+    ).toBeUndefined()
+    expect(
+      initEnv.find((e) => e?.name === 'AGENT_OWNER_TZ'),
+    ).toBeUndefined()
+    // ownerSlackId: trim leaves the canonical U-prefix string, so the
+    // template emits the trimmed value. init-config validates the
+    // format defensively at the boot boundary.
+    expect(initEnv).toContainEqual({
+      name: 'AGENT_OWNER_SLACK_ID',
+      value: 'U01ABCDEF23',
+    })
+  })
+
+  it('#376: partial archetype + owner set is OK — fields are independently optional', () => {
+    // Operator may supply only an archetype (e.g., for an unowned
+    // platform agent) or only an owner without archetype (custom is
+    // valid). Each field's emission is independent.
+    const taskDef = renderTaskDefinition(
+      { ...fixtureInput, archetype: 'sdr' },
+      fixtureEnv,
+    )
+    const initEnv =
+      findContainer(taskDef, 'init-config')?.environment ?? []
+    expect(initEnv).toContainEqual({
+      name: 'AGENT_ARCHETYPE',
+      value: 'sdr',
+    })
+    // Owner fields are absent.
+    for (const name of [
+      'AGENT_OWNER_NAME',
+      'AGENT_OWNER_SLACK_ID',
+      'AGENT_OWNER_TZ',
+    ]) {
+      expect(initEnv.find((e) => e?.name === name)).toBeUndefined()
+    }
+  })
+
   it('#354: attaches LITELLM_VIRTUAL_KEY secret to both containers from the per-agent ARN', () => {
     const envWithSecret: OpenClawAgentEnv = {
       ...fixtureEnv,
@@ -891,6 +1023,109 @@ describe('HARNESS_TEMPLATES.companion/openclaw validateInput', () => {
     expect(() =>
       validate({ ...fixtureInput, persona: 'has \x07 bell' }),
     ).toThrow(/persona.*control characters/)
+  })
+
+  it('#376: accepts known archetype slug + valid owner fields', () => {
+    expect(() =>
+      validate({
+        ...fixtureInput,
+        archetype: 'software-engineer',
+        ownerName: 'Andrew Stroup',
+        ownerSlackId: 'U01ABCDEF23',
+        ownerTimezone: 'America/New_York',
+      }),
+    ).not.toThrow()
+  })
+
+  it('#376: rejects unknown archetype slug (allowlist check via ARCHETYPE_SLUGS)', () => {
+    expect(() =>
+      validate({ ...fixtureInput, archetype: 'not-a-real-archetype' }),
+    ).toThrow(/archetype.*not in the known archetype set/)
+  })
+
+  it('#376: rejects archetype that fails the slug regex (uppercase, path-traversal, etc.)', () => {
+    expect(() =>
+      validate({ ...fixtureInput, archetype: 'UPPERCASE' }),
+    ).toThrow(/archetype must match/)
+    expect(() =>
+      validate({ ...fixtureInput, archetype: '../etc/passwd' }),
+    ).toThrow(/archetype must match/)
+    expect(() =>
+      validate({ ...fixtureInput, archetype: '-leading-hyphen' }),
+    ).toThrow(/archetype must match/)
+  })
+
+  it('#376: accepts the custom archetype slug', () => {
+    // custom is the explicit "no scaffold" choice — must be in the
+    // allowlist so operators can pick it.
+    expect(() =>
+      validate({ ...fixtureInput, archetype: 'custom' }),
+    ).not.toThrow()
+  })
+
+  it('#376: rejects ownerName over the byte cap', () => {
+    expect(() =>
+      validate({ ...fixtureInput, ownerName: 'a'.repeat(201) }),
+    ).toThrow(/ownerName.*200/)
+  })
+
+  it('#376: rejects ownerSlackId that fails the U[A-Z0-9]{8,} format', () => {
+    expect(() =>
+      validate({ ...fixtureInput, ownerSlackId: 'u-lowercase-bad' }),
+    ).toThrow(/ownerSlackId must match/)
+    expect(() =>
+      validate({ ...fixtureInput, ownerSlackId: 'W01ABCDEF23' }),
+    ).toThrow(/ownerSlackId must match/)
+    expect(() =>
+      validate({ ...fixtureInput, ownerSlackId: 'U123' }),
+    ).toThrow(/ownerSlackId must match/)
+  })
+
+  it('#376: accepts a valid Slack user-ID', () => {
+    expect(() =>
+      validate({ ...fixtureInput, ownerSlackId: 'U01ABCDEF23' }),
+    ).not.toThrow()
+    // Longer IDs are fine.
+    expect(() =>
+      validate({ ...fixtureInput, ownerSlackId: 'U07XYZ1234567' }),
+    ).not.toThrow()
+  })
+
+  it('#376: rejects ownerTimezone over the byte cap', () => {
+    expect(() =>
+      validate({ ...fixtureInput, ownerTimezone: 'A'.repeat(65) }),
+    ).toThrow(/ownerTimezone.*64/)
+  })
+
+  it('#376: accepts standard IANA timezone names', () => {
+    for (const tz of [
+      'America/New_York',
+      'Europe/London',
+      'Asia/Tokyo',
+      'UTC',
+      'Pacific/Auckland',
+    ]) {
+      expect(() =>
+        validate({ ...fixtureInput, ownerTimezone: tz }),
+      ).not.toThrow()
+    }
+  })
+
+  it('#376: archetype + owner fields are independently optional', () => {
+    // Each can be supplied without the others. Backward compat for
+    // legacy task-defs created without #376 in scope.
+    expect(() =>
+      validate({ ...fixtureInput, archetype: 'sdr' }),
+    ).not.toThrow()
+    expect(() =>
+      validate({ ...fixtureInput, ownerName: 'Andrew' }),
+    ).not.toThrow()
+    expect(() =>
+      validate({ ...fixtureInput, ownerSlackId: 'U01ABCDEF23' }),
+    ).not.toThrow()
+    expect(() =>
+      validate({ ...fixtureInput, ownerTimezone: 'America/New_York' }),
+    ).not.toThrow()
   })
 
   it('enforces deployment-aware combined-name cap when prefix is provided (round-2 audit on PR #39)', () => {

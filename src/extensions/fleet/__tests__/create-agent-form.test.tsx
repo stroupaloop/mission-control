@@ -10,6 +10,13 @@ const validInputs = {
   agentName: 'smoke-2',
   image: 'ghcr.io/stroupaloop/openclaw:sha-abc1234',
   roleDescription: 'Phase 2.2 vertical-slice smoke test',
+  // #376: archetype + owner fields became required in PR C. Tests fill
+  // them via the shared `fill()` helper so any case that called
+  // `fill()` for the legacy 3-field shape keeps passing without
+  // updating each test individually.
+  archetype: 'software-engineer',
+  ownerName: 'Andrew Stroup',
+  ownerSlackId: 'U01ABCDEF23',
 }
 
 function fill(inputs: Partial<typeof validInputs> = {}) {
@@ -22,6 +29,17 @@ function fill(inputs: Partial<typeof validInputs> = {}) {
   })
   fireEvent.change(screen.getByLabelText(/Role description/i), {
     target: { value: merged.roleDescription },
+  })
+  // #376 required fields. The archetype select uses native <select>;
+  // fireEvent.change with target.value selects the matching option.
+  fireEvent.change(screen.getByLabelText(/Role archetype/i), {
+    target: { value: merged.archetype },
+  })
+  fireEvent.change(screen.getByLabelText(/Owner name/i), {
+    target: { value: merged.ownerName },
+  })
+  fireEvent.change(screen.getByLabelText(/Owner Slack ID/i), {
+    target: { value: merged.ownerSlackId },
   })
 }
 
@@ -313,12 +331,30 @@ describe('<CreateAgentForm />', () => {
     const body = JSON.parse(
       (postCall?.[1]?.body as string) ?? '{}',
     ) as Record<string, unknown>
-    expect(body).toEqual({
+    // #376: archetype + owner-layer fields are now part of the
+    // required POST shape. ownerTimezone is pre-filled from the
+    // browser's locale (Intl.DateTimeFormat().resolvedOptions().timeZone),
+    // which in the JSDOM test environment defaults to UTC. The test
+    // asserts presence + non-empty rather than a specific tz value
+    // since the JSDOM tz can vary by host.
+    const expectedFields = {
       harnessType: 'companion/openclaw',
       agentName: 'smoke-2',
       image: 'ghcr.io/stroupaloop/openclaw:sha-abc1234',
       roleDescription: 'Phase 2.2 vertical-slice smoke test',
-    })
+      archetype: 'software-engineer',
+      ownerName: 'Andrew Stroup',
+      ownerSlackId: 'U01ABCDEF23',
+    }
+    for (const [k, v] of Object.entries(expectedFields)) {
+      expect(body[k]).toEqual(v)
+    }
+    // ownerTimezone is browser-locale pre-fill: present and a string
+    // when the JSDOM env exposes Intl; absent when it doesn't.
+    if (body.ownerTimezone !== undefined) {
+      expect(typeof body.ownerTimezone).toBe('string')
+      expect((body.ownerTimezone as string).length).toBeGreaterThan(0)
+    }
 
     // Warning code surfaced verbatim — Beat 3a uses stable codes
     // specifically so the UI can render specific guidance without
@@ -792,19 +828,27 @@ describe('<CreateAgentForm />', () => {
     ).not.toBeDisabled()
   })
 
-  it('marks Agent name, Container image, and Role description as required (visual asterisks + native required attr for screen readers)', () => {
+  it('marks required fields with visual asterisks + native required attr for screen readers (#376 expands the set)', () => {
     mockFetch({})
     render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
     // Modal renders via React.createPortal into document.body, so
     // the rendered container is empty — query the document directly.
     const marks = document.body.querySelectorAll('[data-testid="required-mark"]')
-    expect(marks.length).toBe(3)
+    // #376 added 3 more required fields: Role archetype, Owner name,
+    // Owner Slack ID. Total = 6 (Agent name, Container image, Role
+    // description, Role archetype, Owner name, Owner Slack ID). Persona
+    // becomes required dynamically when archetype = Custom (not counted
+    // here because no archetype is selected on initial render).
+    expect(marks.length).toBe(6)
     const labelTexts = Array.from(marks).map(
       (m) => m.parentElement?.textContent ?? '',
     )
     expect(labelTexts.some((t) => t.includes('Agent name'))).toBe(true)
     expect(labelTexts.some((t) => t.includes('Container image'))).toBe(true)
     expect(labelTexts.some((t) => t.includes('Role description'))).toBe(true)
+    expect(labelTexts.some((t) => t.includes('Role archetype'))).toBe(true)
+    expect(labelTexts.some((t) => t.includes('Owner name'))).toBe(true)
+    expect(labelTexts.some((t) => t.includes('Owner Slack ID'))).toBe(true)
     // Marks are decorative — aria-hidden so screen readers rely on
     // the native `required` attribute on the inputs (the canonical
     // semantic signal).
@@ -816,6 +860,9 @@ describe('<CreateAgentForm />', () => {
     expect(screen.getByLabelText(/Agent name/i)).toBeRequired()
     expect(screen.getByLabelText(/Container image/i)).toBeRequired()
     expect(screen.getByLabelText(/Role description/i)).toBeRequired()
+    expect(screen.getByLabelText(/Role archetype/i)).toBeRequired()
+    expect(screen.getByLabelText(/Owner name/i)).toBeRequired()
+    expect(screen.getByLabelText(/Owner Slack ID/i)).toBeRequired()
   })
 
   it('accepts an agent name starting with a digit (date prefix like `2026-04-30-bot`)', () => {
@@ -827,5 +874,132 @@ describe('<CreateAgentForm />', () => {
     expect(
       screen.getByRole('button', { name: /Create agent/i }),
     ).not.toBeDisabled()
+  })
+
+  describe('#376: role archetype + owner-layer fields', () => {
+    it('archetype select renders all 8 archetypes including custom', () => {
+      mockFetch({})
+      render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+      const select = screen.getByLabelText(/Role archetype/i) as HTMLSelectElement
+      const optionValues = Array.from(select.options).map((o) => o.value)
+      // Empty-string sentinel + 8 archetype slugs.
+      expect(optionValues).toContain('')
+      expect(optionValues).toContain('technical-support')
+      expect(optionValues).toContain('software-engineer')
+      expect(optionValues).toContain('go-to-market')
+      expect(optionValues).toContain('revops')
+      expect(optionValues).toContain('sdr')
+      expect(optionValues).toContain('account-executive')
+      expect(optionValues).toContain('operations')
+      expect(optionValues).toContain('custom')
+    })
+
+    it('persona becomes required when archetype = custom; otherwise optional', () => {
+      mockFetch({})
+      render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+      // Initially nothing picked → persona optional.
+      const persona = screen.getByLabelText(/^Persona/i)
+      expect(persona).not.toBeRequired()
+      // Pick software-engineer → still optional (archetype provides scaffold).
+      fireEvent.change(screen.getByLabelText(/Role archetype/i), {
+        target: { value: 'software-engineer' },
+      })
+      expect(screen.getByLabelText(/^Persona/i)).not.toBeRequired()
+      // Pick custom → persona becomes required.
+      fireEvent.change(screen.getByLabelText(/Role archetype/i), {
+        target: { value: 'custom' },
+      })
+      expect(screen.getByLabelText(/^Persona/i)).toBeRequired()
+    })
+
+    it('custom archetype + empty persona blocks Create even with all other fields filled', () => {
+      mockFetch({})
+      render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+      fill({ archetype: 'custom' })
+      // Persona left empty → custom requires it → submit disabled.
+      expect(
+        screen.getByRole('button', { name: /Create agent/i }),
+      ).toBeDisabled()
+      // Filling persona unlocks submit.
+      fireEvent.change(screen.getByLabelText(/^Persona/i), {
+        target: { value: 'You are a kind, witty assistant for a vintage radio repair shop.' },
+      })
+      expect(
+        screen.getByRole('button', { name: /Create agent/i }),
+      ).not.toBeDisabled()
+    })
+
+    it('ownerSlackId with invalid format blocks Create', () => {
+      mockFetch({})
+      render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+      fill({ ownerSlackId: 'u-lowercase-bad' })
+      expect(
+        screen.getByRole('button', { name: /Create agent/i }),
+      ).toBeDisabled()
+    })
+
+    it('archetype preview card surfaces the description when an archetype is picked', () => {
+      mockFetch({})
+      render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+      // No preview before selection.
+      expect(screen.queryByTestId('archetype-preview')).not.toBeInTheDocument()
+      // Pick software-engineer.
+      fireEvent.change(screen.getByLabelText(/Role archetype/i), {
+        target: { value: 'software-engineer' },
+      })
+      const preview = screen.getByTestId('archetype-preview')
+      expect(preview).toHaveTextContent('Software Engineer')
+      expect(preview).toHaveTextContent(/Code, architecture, reviews/i)
+      // Pick custom → preview switches to the custom description.
+      fireEvent.change(screen.getByLabelText(/Role archetype/i), {
+        target: { value: 'custom' },
+      })
+      expect(screen.getByTestId('archetype-preview')).toHaveTextContent(
+        'Custom (free-form)',
+      )
+    })
+
+    it('archetype + owner fields included in POST body when set', async () => {
+      const fetchMock = mockFetch({
+        post: new Response(
+          JSON.stringify({
+            ok: true,
+            agentName: 'smoke-2',
+            resources: {
+              serviceArn: 'arn:test',
+              taskDefinitionArn: 'arn:test',
+              targetGroupArn: 'arn:test',
+              listenerRuleArn: 'arn:test',
+              logGroup: '/test',
+              listenerPath: '/test',
+            },
+            warnings: [],
+          }),
+          { status: 201, headers: { 'content-type': 'application/json' } },
+        ) as unknown as Response,
+      })
+      render(<CreateAgentForm open={true} onCreated={vi.fn()} onClose={vi.fn()} />)
+      fill({
+        archetype: 'revops',
+        ownerName: 'Test Owner',
+        ownerSlackId: 'U02XYZ1234567',
+      })
+      fireEvent.click(screen.getByRole('button', { name: /Create agent/i }))
+      await waitFor(() =>
+        expect(screen.getByTestId('create-agent-success')).toBeInTheDocument(),
+      )
+      const postCall = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          typeof url === 'string' &&
+          url === '/api/fleet/agents' &&
+          init?.method === 'POST',
+      )
+      const body = JSON.parse(
+        (postCall?.[1]?.body as string) ?? '{}',
+      ) as Record<string, unknown>
+      expect(body.archetype).toBe('revops')
+      expect(body.ownerName).toBe('Test Owner')
+      expect(body.ownerSlackId).toBe('U02XYZ1234567')
+    })
   })
 })
