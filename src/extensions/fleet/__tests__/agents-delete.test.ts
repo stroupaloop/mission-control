@@ -1393,6 +1393,61 @@ describe('DELETE /api/fleet/agents/:name — per-agent IAM role cleanup (#134)',
     )
   })
 
+  it('populates failedResources.iamRolesDeleted when the outer catch fires (#134)', async () => {
+    // Closes the Claude Auditor P1 from round 3: if an AWS error in
+    // steps 1-11 fires, step 12 (IAM cleanup) never runs. Without
+    // this, the 502 response listed ECS/ELB/CW resources to clean
+    // up but said nothing about the IAM role pair — operator with
+    // no context misses the orphan entirely.
+    ecsSendMock.mockResolvedValueOnce({
+      services: [
+        {
+          serviceArn: SERVICE_ARN,
+          status: 'ACTIVE',
+          tags: [
+            { key: 'Component', value: 'agent-harness' },
+            { key: 'ManagedBy', value: 'mission-control' },
+          ],
+        },
+      ],
+    })
+    // Step 2 UpdateService throws an unrecoverable AWS error.
+    ecsSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('Internal failure'), { name: 'ServerException' }),
+    )
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as {
+      failedResources: { iamRolesDeleted?: string[] }
+    }
+    expect(json.failedResources.iamRolesDeleted).toEqual([
+      `${PREFIX}-companion-openclaw-${AGENT}-task`,
+      `${PREFIX}-companion-openclaw-${AGENT}-exec`,
+    ])
+  })
+
+  it('accepts legacy 21-32 char agent names for backward compat (#134)', async () => {
+    // Closes the Claude Auditor P2 from round 3: tightening
+    // AGENT_NAME_RE to 3-20 chars without a permissive DELETE regex
+    // would strand existing agents created before this PR. The
+    // DELETE handler uses AGENT_NAME_DELETE_RE (legacy 3-32) so
+    // pre-existing 21-32 char agents remain teardown-eligible.
+    const longName = 'a' + 'b'.repeat(23) + 'c' // 25 chars, legacy-valid
+    // Service-not-found is fine for this test — we just need to
+    // assert the regex check passes (not 400).
+    ecsSendMock.mockResolvedValueOnce({ services: [] })
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams(longName))
+    // 404 (ServiceNotFoundException) — NOT 400 InvalidAgentName.
+    expect(resp.status).toBe(404)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('ServiceNotFoundException')
+    expect(json.error).not.toBe('InvalidAgentName')
+  })
+
   it('reports only the fresh role in iamRolesDeleted when one role is absent (partial idempotent)', async () => {
     happyAwsTeardown()
     // Detach succeeds, DeleteRolePolicy task succeeds, DeleteRolePolicy

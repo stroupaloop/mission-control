@@ -67,6 +67,24 @@ export const AGENT_NAME_MIN_LENGTH = 3
 export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9-]{1,18}[a-z0-9]$/
 
 /**
+ * Backward-compatible regex used by the DELETE handler. Matches the
+ * legacy 3-32 char range so agents created before AGENT_NAME_RE was
+ * tightened to 3-20 (#134 per-agent IAM role-name budget) can still
+ * be torn down through the API. The security argument for the
+ * stricter regex is on CREATE only — `ecs:RegisterTaskDefinition`
+ * is granted Resource:"*" with no resource-level auth, so the regex
+ * is the security boundary on family-name shape. DELETE has no
+ * equivalent escalation surface; the ECS/ELB/CW/IAM verbs on the MC
+ * task role are all scoped by `companion-openclaw-*` ARN patterns
+ * that the legacy 32-char names already fit under.
+ *
+ * After all legacy agents are torn down (or migrated by manual
+ * `aws ecs delete-service` + this regex's natural decay), DELETE can
+ * collapse back to AGENT_NAME_RE in a follow-up PR.
+ */
+export const AGENT_NAME_DELETE_RE = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/
+
+/**
  * Caps mirror the rationale that drove dropping slackWebhookUrl —
  * task-def revisions are immutable and retained indefinitely, so an
  * unbounded admin input becomes permanent storage anyone with

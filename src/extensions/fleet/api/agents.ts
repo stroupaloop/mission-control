@@ -1069,6 +1069,13 @@ export async function POST(request: NextRequest) {
           // events for the same agent can match them up.
           litellmKeyAlias,
           litellmSecretArn: partial.litellmSecretArn,
+          // #134: per-agent IAM role ARNs. Deterministic by name +
+          // prefix, but an incident responder correlating the audit
+          // log against IAM CloudTrail benefits from the literal
+          // ARNs. Same audit-symmetry rationale as the LiteLLM
+          // fields above.
+          iamTaskRoleArn: minted.taskRoleArn,
+          iamExecutionRoleArn: minted.executionRoleArn,
         }),
       })
     } catch (auditErr) {

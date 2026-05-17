@@ -23,7 +23,7 @@ import {
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 import { logSecurityEvent } from '@/lib/security-events'
-import { AGENT_NAME_RE } from '@/extensions/fleet/templates/constraints'
+import { AGENT_NAME_DELETE_RE } from '@/extensions/fleet/templates/constraints'
 import { resolveFleetPrefix } from '@/extensions/fleet/lib/fleet-prefix'
 import { isAgentHarness } from '@/extensions/fleet/lib/ecs-guards'
 import {
@@ -178,17 +178,21 @@ export async function DELETE(
 
   const { name: agentName } = await params
 
-  // Same regex as POST (templates/constraints.ts AGENT_NAME_RE) — the
-  // load-bearing security control. The IAM grants on ECS/ELBv2/Logs
-  // delete verbs are scoped to ARN patterns derived from this regex;
-  // a malformed name could either 4xx at AWS or, worse, traverse out
-  // of the agent-harness scope (e.g. `..` in path-segment context).
-  // Catch it here.
-  if (!agentName || !AGENT_NAME_RE.test(agentName)) {
+  // Backward-compatible regex on the legacy 3-32 range — see
+  // AGENT_NAME_DELETE_RE in templates/constraints.ts for the
+  // CREATE-vs-DELETE asymmetry rationale. Same character-set
+  // anchoring + load-bearing path-segment guard (rejects `..` and
+  // anything outside `[a-z0-9-]`), just relaxed on the upper length
+  // bound so agents created before AGENT_NAME_RE tightened to 3-20
+  // remain teardown-eligible through the API. The IAM grants on
+  // ECS/ELBv2/Logs delete verbs are scoped to ARN patterns derived
+  // from this regex; the legacy 32-char names already fit those
+  // patterns.
+  if (!agentName || !AGENT_NAME_DELETE_RE.test(agentName)) {
     return NextResponse.json(
       {
         error: 'InvalidAgentName',
-        detail: `agentName must match ${AGENT_NAME_RE.source}`,
+        detail: `agentName must match ${AGENT_NAME_DELETE_RE.source}`,
       } satisfies DeleteAgentErrorResponse,
       { status: 400 },
     )
@@ -743,6 +747,18 @@ export async function DELETE(
     }
     if (!deleted.serviceArn) {
       failed.serviceArn = discoveredServiceArn ?? serviceName
+    }
+    // #134: When the outer catch fires (an AWS error in steps 1-11),
+    // step 12 (IAM cleanup) never runs. The role pair is deterministic
+    // by name so an operator can clean up manually, but they need a
+    // signal in the response that it exists at all — otherwise an
+    // unfamiliar reader sees the 502 listing ECS/ELB/CW resources and
+    // misses the IAM orphan entirely. Surface the deterministic names.
+    if (!deleted.iamRolesDeleted) {
+      failed.iamRolesDeleted = [
+        `${prefix}-companion-openclaw-${agentName}-task`,
+        `${prefix}-companion-openclaw-${agentName}-exec`,
+      ]
     }
     return NextResponse.json(
       {

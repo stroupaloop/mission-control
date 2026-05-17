@@ -322,55 +322,104 @@ export async function mintAgentRoles(
     input.prefix,
     input.agentName,
   )
+
+  // Fail fast with a clear error if the constructed role name
+  // exceeds AWS's 64-char IAM role-name limit. AGENT_NAME_RE caps
+  // the agent name at 20 chars based on the longest realistic
+  // staging prefix (`ender-stack-staging` = 19) + `-companion-
+  // openclaw-` (20) + `-task` (5) = 64. A non-standard
+  // (longer) cluster prefix would overflow at the IAM layer with a
+  // confusing `ValidationException` 502; surface as a
+  // ConfigurationError at the application layer instead.
+  if (taskRoleName.length > 64 || executionRoleName.length > 64) {
+    const err = new Error(
+      `Computed IAM role name exceeds AWS 64-char limit. ` +
+        `task=${taskRoleName.length} exec=${executionRoleName.length}. ` +
+        `Shorten the deployment prefix or the agent name.`,
+    )
+    err.name = 'ConfigurationError'
+    throw err
+  }
+
   const tags = mintTags({
     projectName: input.projectName,
     environment: input.environment,
     agentName: input.agentName,
   })
 
-  const taskRoleArn = await createOrGetRole({
-    roleName: taskRoleName,
-    boundaryArn: input.boundaryArn,
-    tags,
-  })
+  // Atomic-on-failure wrapper: if any step after the first
+  // CreateRole fails, tear down whatever was created before
+  // re-throwing. The outer caller still tracks
+  // partial.iamTaskRoleArn / partial.iamExecutionRoleArn ONLY when
+  // this function returns successfully — but if we throw without
+  // cleaning up, the role(s) live on with no operator signal. Each
+  // teardown step suppresses NoSuchEntity, so cleanup of partial
+  // state is safe even when only one role / no policies exist.
+  try {
+    const taskRoleArn = await createOrGetRole({
+      roleName: taskRoleName,
+      boundaryArn: input.boundaryArn,
+      tags,
+    })
 
-  const executionRoleArn = await createOrGetRole({
-    roleName: executionRoleName,
-    boundaryArn: input.boundaryArn,
-    tags,
-  })
+    const executionRoleArn = await createOrGetRole({
+      roleName: executionRoleName,
+      boundaryArn: input.boundaryArn,
+      tags,
+    })
 
-  await iamClient.send(
-    new PutRolePolicyCommand({
-      RoleName: taskRoleName,
-      PolicyName: INLINE_POLICY_NAME,
-      PolicyDocument: renderTaskInlinePolicy(input),
-    }),
-  )
+    await iamClient.send(
+      new PutRolePolicyCommand({
+        RoleName: taskRoleName,
+        PolicyName: INLINE_POLICY_NAME,
+        PolicyDocument: renderTaskInlinePolicy(input),
+      }),
+    )
 
-  await iamClient.send(
-    new PutRolePolicyCommand({
-      RoleName: executionRoleName,
-      PolicyName: INLINE_POLICY_NAME,
-      PolicyDocument: renderExecInlinePolicy(input),
-    }),
-  )
+    await iamClient.send(
+      new PutRolePolicyCommand({
+        RoleName: executionRoleName,
+        PolicyName: INLINE_POLICY_NAME,
+        PolicyDocument: renderExecInlinePolicy(input),
+      }),
+    )
 
-  // AttachRolePolicy is idempotent by AWS spec — attaching an
-  // already-attached policy returns 200, no exception. Per memory
-  // item #4 in project_phase2_resequencing.
-  await iamClient.send(
-    new AttachRolePolicyCommand({
-      RoleName: executionRoleName,
-      PolicyArn: MANAGED_EXEC_POLICY_ARN,
-    }),
-  )
+    // AttachRolePolicy is idempotent by AWS spec — attaching an
+    // already-attached policy returns 200, no exception. Per memory
+    // item #4 in project_phase2_resequencing.
+    await iamClient.send(
+      new AttachRolePolicyCommand({
+        RoleName: executionRoleName,
+        PolicyArn: MANAGED_EXEC_POLICY_ARN,
+      }),
+    )
 
-  return {
-    taskRoleArn,
-    executionRoleArn,
-    taskRoleName,
-    executionRoleName,
+    return {
+      taskRoleArn,
+      executionRoleArn,
+      taskRoleName,
+      executionRoleName,
+    }
+  } catch (mintErr) {
+    // Best-effort cleanup of any partial state. NoSuchEntity is
+    // suppressed inside deleteAgentRoles so this is safe even if
+    // CreateRole task was the first failure (zero state to tear
+    // down). Cleanup-failure is swallowed — the original mintErr is
+    // what the caller needs to see + handle.
+    try {
+      await deleteAgentRoles({
+        agentName: input.agentName,
+        prefix: input.prefix,
+      })
+    } catch {
+      // Best-effort rollback failed too. The caller's catch path
+      // will still see the original mintErr; the outer handler
+      // (agents.ts) does not record partial.iamTaskRoleArn for an
+      // internal-mintAgentRoles failure (the success-path
+      // assignment never ran), so the response's failedResources
+      // path will include the IAM role names regardless.
+    }
+    throw mintErr
   }
 }
 

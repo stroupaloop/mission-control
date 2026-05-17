@@ -361,6 +361,82 @@ describe('mintAgentRoles — invariants (#134)', () => {
       name: 'AccessDenied',
     })
   })
+
+  it('cleans up partial state when a step inside mintAgentRoles fails (atomic-on-failure)', async () => {
+    // CreateRole task succeeds; CreateRole exec fails. Without
+    // internal cleanup, the task role would orphan with no operator
+    // signal (the outer agents.ts rollback only fires when the
+    // success-path partial.iamTaskRoleArn was set, which only
+    // happens AFTER mintAgentRoles returns).
+    iamSendMock
+      .mockResolvedValueOnce({ Role: { Arn: TASK_ROLE_ARN } }) // CreateRole task OK
+      .mockRejectedValueOnce(
+        Object.assign(new Error('quota'), { name: 'LimitExceededException' }),
+      )
+      // Cleanup: 5 calls in deleteAgentRoles, all resolve OK
+      // (NoSuchEntity on the absent exec role/policies is suppressed).
+      .mockResolvedValueOnce({}) // Detach exec — succeeds
+      .mockResolvedValueOnce({}) // Delete inline task
+      .mockRejectedValueOnce(
+        Object.assign(new Error('absent'), { name: 'NoSuchEntity' }),
+      ) // Delete inline exec (never created)
+      .mockResolvedValueOnce({}) // Delete role task
+      .mockRejectedValueOnce(
+        Object.assign(new Error('absent'), { name: 'NoSuchEntity' }),
+      ) // Delete role exec (never created)
+    const { mintAgentRoles } = await importModule()
+    await expect(mintAgentRoles(baseInput())).rejects.toMatchObject({
+      name: 'LimitExceededException',
+    })
+    // Verify the cleanup chain fired (2 mint attempts + 5 teardown).
+    const allCommandTypes = iamSendMock.mock.calls.map(
+      (c) => (c[0] as { __type: string }).__type,
+    )
+    expect(allCommandTypes).toEqual([
+      'CreateRoleCommand', // task — succeeded
+      'CreateRoleCommand', // exec — threw
+      'DetachRolePolicyCommand', // cleanup: detach exec managed policy
+      'DeleteRolePolicyCommand', // cleanup: delete task inline
+      'DeleteRolePolicyCommand', // cleanup: delete exec inline (NoSuchEntity)
+      'DeleteRoleCommand', // cleanup: delete task role
+      'DeleteRoleCommand', // cleanup: delete exec role (NoSuchEntity)
+    ])
+  })
+
+  it('still re-throws the original mintErr when internal cleanup itself fails', async () => {
+    iamSendMock
+      .mockResolvedValueOnce({ Role: { Arn: TASK_ROLE_ARN } })
+      .mockRejectedValueOnce(
+        Object.assign(new Error('quota'), { name: 'LimitExceededException' }),
+      )
+      // Cleanup fails on the first call (e.g., transient throttle).
+      .mockRejectedValueOnce(
+        Object.assign(new Error('slow down'), { name: 'Throttling' }),
+      )
+    const { mintAgentRoles } = await importModule()
+    // The original mintErr (LimitExceededException) surfaces — NOT
+    // the cleanup-failure error. The caller's error path is what
+    // needs the original signal.
+    await expect(mintAgentRoles(baseInput())).rejects.toMatchObject({
+      name: 'LimitExceededException',
+    })
+  })
+
+  it('throws ConfigurationError when the computed role name exceeds 64 chars', async () => {
+    // Non-standard cluster prefix would overflow AWS's 64-char
+    // IAM role-name limit. Surface as a clean app-layer error
+    // instead of a confusing AWS ValidationException 502.
+    const { mintAgentRoles } = await importModule()
+    await expect(
+      mintAgentRoles({
+        ...baseInput(),
+        prefix: 'my-very-long-cluster-prefix-that-overflows', // 42 chars
+        agentName: 'mediumname-12-chars', // would push past 64
+      }),
+    ).rejects.toMatchObject({ name: 'ConfigurationError' })
+    // No IAM calls — fail-fast before CreateRole.
+    expect(iamSendMock).not.toHaveBeenCalled()
+  })
 })
 
 describe('deleteAgentRoles — invariants (#134)', () => {
