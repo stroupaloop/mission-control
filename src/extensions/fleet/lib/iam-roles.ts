@@ -172,6 +172,19 @@ export interface MintAgentRolesResult {
   executionRoleArn: string
   taskRoleName: string
   executionRoleName: string
+  /**
+   * True if EITHER role was recovered via `GetRole` (i.e., already
+   * existed when this call started). Callers MUST skip the
+   * rollback-on-failure path when this is true — otherwise a
+   * concurrent create-agent for the same name would let the
+   * later-arriving handler delete the earlier handler's live roles
+   * on its own catch path. Same TOCTOU posture as the existing
+   * LiteLLM-key race (step 0.4 conflict check is the only mitigation
+   * in single-MC), but with a worse blast radius because deleting
+   * a running task's execution role breaks secret injection at the
+   * next task restart.
+   */
+  alreadyExisted: boolean
 }
 
 /**
@@ -348,26 +361,34 @@ export async function mintAgentRoles(
     agentName: input.agentName,
   })
 
-  // Atomic-on-failure wrapper: if any step after the first
-  // CreateRole fails, tear down whatever was created before
-  // re-throwing. The outer caller still tracks
-  // partial.iamTaskRoleArn / partial.iamExecutionRoleArn ONLY when
-  // this function returns successfully — but if we throw without
-  // cleaning up, the role(s) live on with no operator signal. Each
-  // teardown step suppresses NoSuchEntity, so cleanup of partial
-  // state is safe even when only one role / no policies exist.
+  // Track whether either role pre-existed (via GetRole recovery).
+  // When true, the rollback-on-failure path is destructive — we
+  // would be deleting a role another in-flight create-agent is
+  // using. Skip rollback in that case; the recovered role's inline
+  // policy is idempotent so the partial state is recoverable on
+  // re-run without operator action.
+  let taskRolePreExisted = false
+  let execRolePreExisted = false
+
+  // Atomic-on-failure wrapper: if any step fails AND we know we
+  // freshly created the role(s), tear down whatever was created
+  // before re-throwing. Each teardown step suppresses NoSuchEntity,
+  // so cleanup of partial state is safe even when only one role /
+  // no policies exist.
   try {
-    const taskRoleArn = await createOrGetRole({
+    const taskResult = await createOrGetRole({
       roleName: taskRoleName,
       boundaryArn: input.boundaryArn,
       tags,
     })
+    taskRolePreExisted = !taskResult.created
 
-    const executionRoleArn = await createOrGetRole({
+    const execResult = await createOrGetRole({
       roleName: executionRoleName,
       boundaryArn: input.boundaryArn,
       tags,
     })
+    execRolePreExisted = !execResult.created
 
     await iamClient.send(
       new PutRolePolicyCommand({
@@ -396,12 +417,33 @@ export async function mintAgentRoles(
     )
 
     return {
-      taskRoleArn,
-      executionRoleArn,
+      taskRoleArn: taskResult.arn,
+      executionRoleArn: execResult.arn,
       taskRoleName,
       executionRoleName,
+      alreadyExisted: taskRolePreExisted || execRolePreExisted,
     }
   } catch (mintErr) {
+    // Skip rollback if EITHER role pre-existed — another in-flight
+    // mintAgentRoles (or a leftover Terraform-managed role) owns it,
+    // and deleting it would break that ownership. The inline-policy
+    // updates we may have done are idempotent (same content on any
+    // call for the same agent), so leaving the partial state is
+    // safe; a future retried create-agent converges to a healthy
+    // configuration.
+    if (taskRolePreExisted || execRolePreExisted) {
+      logger.warn(
+        {
+          agentName: input.agentName,
+          prefix: input.prefix,
+          taskRolePreExisted,
+          execRolePreExisted,
+          mintErrorName: (mintErr as { name?: string })?.name,
+        },
+        '[fleet] mintAgentRoles: skipping rollback — at least one role pre-existed (concurrent-create suspected)',
+      )
+      throw mintErr
+    }
     // Best-effort cleanup of any partial state. NoSuchEntity is
     // suppressed inside deleteAgentRoles so this is safe even if
     // CreateRole task was the first failure (zero state to tear
@@ -444,13 +486,25 @@ interface CreateOrGetRoleInput {
   tags: Array<{ Key: string; Value: string }>
 }
 
+interface CreateOrGetRoleResult {
+  arn: string
+  /** True if CreateRole succeeded; false if recovered via GetRole. */
+  created: boolean
+}
+
 /**
  * CreateRole-with-fallback-to-GetRole. The idempotent-retry primitive.
  * Catches `EntityAlreadyExists` (with and without the `Exception`
  * suffix — the SDK varies) and falls through to GetRole to recover
  * the existing role's ARN.
+ *
+ * Returns `created: false` when the role pre-existed so the caller
+ * can distinguish "I made this" from "I observed this" and skip
+ * destructive rollback on the recovered path.
  */
-async function createOrGetRole(input: CreateOrGetRoleInput): Promise<string> {
+async function createOrGetRole(
+  input: CreateOrGetRoleInput,
+): Promise<CreateOrGetRoleResult> {
   try {
     const resp = await iamClient.send(
       new CreateRoleCommand({
@@ -468,7 +522,7 @@ async function createOrGetRole(input: CreateOrGetRoleInput): Promise<string> {
       // task-def references.
       throw new Error(`CreateRole returned no ARN for ${input.roleName}`)
     }
-    return arn
+    return { arn, created: true }
   } catch (err) {
     const name = (err as { name?: string })?.name
     if (
@@ -479,7 +533,9 @@ async function createOrGetRole(input: CreateOrGetRoleInput): Promise<string> {
       // retry PutRolePolicy + AttachRolePolicy (both idempotent), so
       // the net effect of a retried create is a fully-configured
       // role pair regardless of which step in the prior attempt
-      // failed.
+      // failed. Marks `created: false` so the outer mint loop knows
+      // it didn't create this role — important for skipping
+      // rollback in the concurrent-create-by-same-name case.
       const getResp = await iamClient.send(
         new GetRoleCommand({ RoleName: input.roleName }),
       )
@@ -489,7 +545,7 @@ async function createOrGetRole(input: CreateOrGetRoleInput): Promise<string> {
           `GetRole fallback returned no ARN for ${input.roleName}`,
         )
       }
-      return arn
+      return { arn, created: false }
     }
     throw err
   }

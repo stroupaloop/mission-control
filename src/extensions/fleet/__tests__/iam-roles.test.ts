@@ -343,11 +343,64 @@ describe('mintAgentRoles — invariants (#134)', () => {
     const result = await mintAgentRoles(baseInput())
     expect(result.taskRoleArn).toBe(TASK_ROLE_ARN)
     expect(result.executionRoleArn).toBe(EXEC_ROLE_ARN)
+    // alreadyExisted=true: the caller's rollback path should be
+    // skipped because we recovered the task role rather than
+    // creating it. (See the corresponding agents-create test for the
+    // outer-rollback-skipped assertion.)
+    expect(result.alreadyExisted).toBe(true)
     // Verify the GetRole call was made.
     const getRoleCalls = iamSendMock.mock.calls.filter(
       (c) => (c[0] as { __type: string }).__type === 'GetRoleCommand',
     )
     expect(getRoleCalls).toHaveLength(1)
+  })
+
+  it('returns alreadyExisted=false when both roles are freshly created', async () => {
+    primeMintHappy()
+    const { mintAgentRoles } = await importModule()
+    const result = await mintAgentRoles(baseInput())
+    expect(result.alreadyExisted).toBe(false)
+  })
+
+  it('skips internal rollback when a role pre-existed (concurrent-create protection)', async () => {
+    // Closes the round-5 Claude Auditor concurrency concern: B
+    // hits EntityAlreadyExists on task (because A already created
+    // it), then a downstream step fails. Without this guard, B's
+    // rollback would delete the task role A's live service is
+    // using.
+    iamSendMock
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Role already exists'), {
+          name: 'EntityAlreadyExistsException',
+        }),
+      )
+      .mockResolvedValueOnce({ Role: { Arn: TASK_ROLE_ARN } }) // GetRole task — pre-existed
+      .mockResolvedValueOnce({ Role: { Arn: EXEC_ROLE_ARN } }) // CreateRole exec OK (fresh)
+      .mockRejectedValueOnce(
+        Object.assign(new Error('quota'), {
+          name: 'LimitExceededException',
+        }),
+      ) // PutRolePolicy task fails
+    // Then NO rollback calls — verified below.
+    const { mintAgentRoles } = await importModule()
+    await expect(mintAgentRoles(baseInput())).rejects.toMatchObject({
+      name: 'LimitExceededException',
+    })
+    // Assert NO DeleteRole / DetachRolePolicy calls fired (4 calls
+    // total: CreateRole task + GetRole task + CreateRole exec +
+    // PutRolePolicy task fail — and that's it).
+    const commandTypes = iamSendMock.mock.calls.map(
+      (c) => (c[0] as { __type: string }).__type,
+    )
+    expect(commandTypes).toEqual([
+      'CreateRoleCommand', // task — EntityAlreadyExists
+      'GetRoleCommand', // task recovery — alreadyExisted=true
+      'CreateRoleCommand', // exec — fresh
+      'PutRolePolicyCommand', // task — fails
+    ])
+    // No rollback commands appended.
+    expect(commandTypes).not.toContain('DeleteRoleCommand')
+    expect(commandTypes).not.toContain('DetachRolePolicyCommand')
   })
 
   it('propagates non-EntityAlreadyExists errors on CreateRole', async () => {

@@ -1581,6 +1581,71 @@ describe('POST /api/fleet/agents — per-agent LiteLLM virtual key (#354)', () =
     ])
   })
 
+  it('skips outer IAM rollback when mintAgentRoles returns alreadyExisted=true (concurrent-create protection, #134)', async () => {
+    // Closes the round-5 audit concurrency finding: another
+    // in-flight handler already minted the role pair; our
+    // mintAgentRoles fell through to GetRole and returned
+    // alreadyExisted=true. If a downstream step fails after this,
+    // we must NOT roll back the IAM roles — the other handler's
+    // service may already be live and using them.
+    ecsSendMock.mockResolvedValueOnce({ services: [] })
+    // Mint: task hits EntityAlreadyExists → GetRole succeeds. Exec
+    // is fresh. PutRolePolicy + AttachRolePolicy succeed.
+    iamSendMock
+      .mockRejectedValueOnce(
+        Object.assign(new Error('exists'), {
+          name: 'EntityAlreadyExistsException',
+        }),
+      )
+      .mockResolvedValueOnce({
+        Role: {
+          Arn: 'arn:aws:iam::398152419239:role/ender-stack-dev-companion-openclaw-hello-bot-task',
+        },
+      }) // GetRole task
+      .mockResolvedValueOnce({
+        Role: {
+          Arn: 'arn:aws:iam::398152419239:role/ender-stack-dev-companion-openclaw-hello-bot-exec',
+        },
+      }) // CreateRole exec fresh
+      .mockResolvedValueOnce({}) // PutRolePolicy task
+      .mockResolvedValueOnce({}) // PutRolePolicy exec
+      .mockResolvedValueOnce({}) // AttachRolePolicy exec
+    smSendMock.mockResolvedValueOnce({
+      SecretString: 'sk-master-NEVER-LOG',
+    })
+    fetchMock.mockResolvedValueOnce(
+      ({
+        ok: false,
+        status: 503,
+        text: async () => 'upstream busy',
+        json: async () => ({}),
+      }) as unknown as Response,
+    )
+
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
+    // NO rollback IAM calls fired — only the 6 mint calls. The
+    // outer catch checked partial.iamTaskRoleArn (unset because
+    // alreadyExisted=true) and skipped deleteAgentRoles.
+    const iamCommandTypes = iamSendMock.mock.calls.map(
+      (c) => (c[0] as { __type: string }).__type,
+    )
+    expect(iamCommandTypes).toHaveLength(6)
+    expect(iamCommandTypes).not.toContain('DeleteRoleCommand')
+    expect(iamCommandTypes).not.toContain('DetachRolePolicyCommand')
+    // partialResources also omits IAM ARNs (correctness: we don't
+    // own them).
+    const json = (await resp.json()) as {
+      partialResources?: {
+        iamTaskRoleArn?: string
+        iamExecutionRoleArn?: string
+      }
+    }
+    expect(json.partialResources?.iamTaskRoleArn).toBeUndefined()
+    expect(json.partialResources?.iamExecutionRoleArn).toBeUndefined()
+  })
+
   it('preserves IAM ARNs in partialResources when rollback itself fails (#134)', async () => {
     // Defensive: if deleteAgentRoles throws (e.g., transient
     // throttling), the IAM roles are still orphaned. Surface them

@@ -803,8 +803,17 @@ export async function POST(request: NextRequest) {
       projectName: resolved.projectName,
       environment: resolved.environment,
     })
-    partial.iamTaskRoleArn = minted.taskRoleArn
-    partial.iamExecutionRoleArn = minted.executionRoleArn
+    // Only mark roles for rollback if mintAgentRoles actually
+    // CREATED them. Recovery-via-GetRole (alreadyExisted=true) means
+    // another in-flight handler (or stale Terraform-managed role)
+    // owns the role pair — deleting them on our catch path would
+    // break that owner. Same TOCTOU posture as the LiteLLM key
+    // recovery, but explicit here because the IAM blast radius is
+    // larger (breaks running task's secret injection).
+    if (!minted.alreadyExisted) {
+      partial.iamTaskRoleArn = minted.taskRoleArn
+      partial.iamExecutionRoleArn = minted.executionRoleArn
+    }
     env.taskRoleArn = minted.taskRoleArn
     env.executionRoleArn = minted.executionRoleArn
 
