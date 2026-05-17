@@ -159,7 +159,17 @@ export interface MintAgentRolesInput {
   accountId: string
   region: string
   secretsKmsKeyArn: string
-  /** e.g. `ender-stack/dev/companion-openclaw` — handler appends `-{agent}-*`. */
+  /**
+   * Secret-name prefix (no trailing dash), e.g.
+   * `ender-stack/dev/companion-openclaw`. The handler appends
+   * `-{agentName}-*` to build the per-agent inline-policy resource
+   * ARN. Load-bearing coupling with `lib/secrets-manager.ts`
+   * `secretName(prefix, agentName, type)` which builds
+   * `${prefix}-${agentName}-${type}` — if that helper ever changes
+   * its naming scheme, this scope silently stops covering the new
+   * secret names. Cross-checked by the round-12 audit test asserting
+   * the per-agent secret ARN format.
+   */
   secretsNamePrefix: string
   /** e.g. `/ecs/ender-stack-dev` — handler appends `/companion-openclaw-{agent}-*`. */
   logGroupPrefix: string

@@ -810,6 +810,13 @@ export async function POST(request: NextRequest) {
     // break that owner. Same TOCTOU posture as the LiteLLM key
     // recovery, but explicit here because the IAM blast radius is
     // larger (breaks running task's secret injection).
+    //
+    // Trade-off: if alreadyExisted=true AND a downstream step fails,
+    // the 502 response's `partialResources` will NOT carry the IAM
+    // ARNs — the operator must resolve role names from the
+    // deterministic `roleNames()` formula instead. The roles
+    // themselves are not orphaned (whoever pre-created them still
+    // owns them); the absence is intentional, not a missed signal.
     if (!minted.alreadyExisted) {
       partial.iamTaskRoleArn = minted.taskRoleArn
       partial.iamExecutionRoleArn = minted.executionRoleArn

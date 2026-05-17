@@ -182,6 +182,12 @@ export async function DELETE(
   if ('error' in auth) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })
   }
+  // Narrow auth.user after the guard. The `'user' in auth` form
+  // gives TS the same narrowing the `'error' in auth` guard above
+  // did; using `auth.user?.id` here would produce `undefined` on
+  // an unreachable path and silently strip the actor from audit
+  // entries (the agents.ts create handler uses this same form).
+  const actor = 'user' in auth ? auth.user.id : undefined
 
   const { name: agentName } = await params
 
@@ -264,7 +270,7 @@ export async function DELETE(
         {
           cluster: clusterName,
           serviceName,
-          actor: auth.user?.id,
+          actor,
         },
         '[fleet] delete-agent: refused — target is not an MC-managed agent harness',
       )
@@ -273,7 +279,7 @@ export async function DELETE(
         severity: 'warning',
         source: 'fleet',
         agent_name: agentName,
-        detail: `actor=${auth.user?.id} service=${serviceName}`,
+        detail: `actor=${actor} service=${serviceName}`,
       })
       // 404 (not 403) — refuse to confirm the existence of a
       // non-harness service to a caller asking about it.
@@ -660,12 +666,12 @@ export async function DELETE(
     // policy but before deleting the role) finishes idempotently on
     // re-run. Surfaces the alreadyDeleted list as a warning entry so
     // operators see which IAM resources were absent vs. fresh-deleted.
+    const { taskRoleName, executionRoleName: execRoleName } = roleNames(
+      prefix,
+      agentName,
+    )
     try {
       const iamResult = await deleteAgentRoles({ agentName, prefix })
-      const { taskRoleName, executionRoleName: execRoleName } = roleNames(
-        prefix,
-        agentName,
-      )
       // Mirror the litellm-secret reporting shape (lines ~602-625):
       // `deleted.*` is populated only when the role was actually
       // present; a `*-already-deleted` warning covers the fully-
@@ -697,14 +703,12 @@ export async function DELETE(
       // cleanup manually via `aws iam delete-role-policy` +
       // `aws iam delete-role`.
       const errName = (err as { name?: string })?.name ?? 'UnknownError'
-      const { taskRoleName: taskName, executionRoleName: execName } =
-        roleNames(prefix, agentName)
       warnings.push({
         code: 'iam-roles-delete-failed',
         message:
           `Could not delete per-agent IAM roles for ${agentName} (${errName}). ` +
           'Detach AmazonECSTaskExecutionRolePolicy from the exec role, then delete inline ' +
-          `policies + roles manually: ${taskName} and ${execName}.`,
+          `policies + roles manually: ${taskRoleName} and ${execRoleName}.`,
       })
       logger.warn(
         { agentName, errorName: errName },
@@ -712,13 +716,24 @@ export async function DELETE(
       )
     }
 
-    logSecurityEvent({
-      event_type: 'fleet.delete-agent.success',
-      severity: 'info',
-      source: 'fleet',
-      agent_name: agentName,
-      detail: `actor=${auth.user?.id} resources=${JSON.stringify(deleted)}`,
-    })
+    // Audit logging is best-effort — a SQLite hiccup must not turn a
+    // fully-successful teardown into a 502 via the outer catch. The
+    // create handler wraps its corresponding logSecurityEvent call
+    // for exactly this reason (agents.ts ~line 1072).
+    try {
+      logSecurityEvent({
+        event_type: 'fleet.delete-agent.success',
+        severity: 'info',
+        source: 'fleet',
+        agent_name: agentName,
+        detail: `actor=${actor} resources=${JSON.stringify(deleted)}`,
+      })
+    } catch (auditErr) {
+      logger.warn(
+        { err: auditErr, agentName },
+        '[fleet] delete-agent: audit log write failed (best-effort; CloudWatch entry above is the authoritative record)',
+      )
+    }
 
     return NextResponse.json(
       {
