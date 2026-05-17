@@ -229,11 +229,14 @@ function renderTaskInlinePolicy(input: MintAgentRolesInput): string {
 /**
  * Build the per-agent EXEC role inline policy. Mirrors
  * `mc_agent_shared_execution` (ender-stack
- * terraform/modules/iam/main.tf:1514), scoped to `{agentName}-*` for
- * secrets/logs and pinned to the platform's secrets KMS key for
- * decrypt. `kms:DescribeKey` is included alongside `kms:Decrypt` —
- * the boundary caps both, and DescribeKey is required for some KMS
- * client paths that pre-flight key state before Decrypt.
+ * terraform/modules/iam/main.tf:1514), scoped to the per-agent log
+ * group + `{agentName}-*` secret namespace, pinned to the platform's
+ * secrets KMS key for decrypt. The shared exec role grants both
+ * `kms:Decrypt` AND `kms:DescribeKey`, but the per-agent boundary's
+ * `BoundaryKMSDecryptForSecrets` covers `kms:Decrypt` only — so this
+ * inline grants Decrypt only (granting DescribeKey would overstate
+ * effective permissions, since the boundary implicit-denies it).
+ * SM secret decryption does not require DescribeKey.
  *
  * Note: `logs:CreateLogGroup` is included here as a defense-in-depth
  * fallback for `awslogs-create-group: true` on the task-def (matches

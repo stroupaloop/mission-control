@@ -651,15 +651,31 @@ export async function DELETE(
     // operators see which IAM resources were absent vs. fresh-deleted.
     try {
       const iamResult = await deleteAgentRoles({ agentName, prefix })
-      deleted.iamRolesDeleted = [
-        `${prefix}-companion-openclaw-${agentName}-task`,
-        `${prefix}-companion-openclaw-${agentName}-exec`,
-      ]
-      if (iamResult.alreadyDeleted.length > 0) {
+      const taskRoleName = `${prefix}-companion-openclaw-${agentName}-task`
+      const execRoleName = `${prefix}-companion-openclaw-${agentName}-exec`
+      // Mirror the litellm-secret reporting shape (lines ~602-625):
+      // `deleted.*` is populated only when the role was actually
+      // present; a `*-already-deleted` warning covers the fully-
+      // idempotent case. Avoids the ambiguous state where the
+      // response says both "deleted X" AND "X was already gone".
+      const taskAlreadyGone = iamResult.alreadyDeleted.includes(taskRoleName)
+      const execAlreadyGone = iamResult.alreadyDeleted.includes(execRoleName)
+      const freshDeleted: string[] = []
+      if (!taskAlreadyGone) freshDeleted.push(taskRoleName)
+      if (!execAlreadyGone) freshDeleted.push(execRoleName)
+      if (freshDeleted.length > 0) {
+        deleted.iamRolesDeleted = freshDeleted
+      }
+      if (taskAlreadyGone && execAlreadyGone) {
+        warnings.push({
+          code: 'iam-roles-already-deleted',
+          message: `Per-agent IAM roles for ${agentName} were already absent (idempotent path).`,
+        })
+      } else if (iamResult.alreadyDeleted.length > 0) {
         warnings.push({
           code: 'iam-roles-partially-already-gone',
           message:
-            `Some per-agent IAM resources were already absent (idempotent path): ${iamResult.alreadyDeleted.join(', ')}.`,
+            `Some per-agent IAM sub-resources were already absent (idempotent path): ${iamResult.alreadyDeleted.join(', ')}.`,
         })
       }
     } catch (err) {

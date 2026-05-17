@@ -130,17 +130,19 @@ const DEFAULT_LITELLM_MAX_BUDGET_USD = 50
  *   deferred to Beat 3c (the scheduled reconciler).
  *
  * Validation:
- *   `agentName` must match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` (length
- *   3-32, alphanumeric start AND end — no leading or trailing
- *   hyphens). Digit-start is permitted; AWS doesn't require
- *   letter-start for any of the resources MC creates. The IAM policy
- *   doc for `task_ecs_write`
- *   (ender-stack PR #208) explicitly cites this regex as load-bearing
- *   — `ecs:RegisterTaskDefinition` is granted Resource:"*" because the
- *   AWS verb has no resource-level auth, so this regex is the only
- *   thing keeping a compromised request from registering a task-def
- *   with an arbitrary family name (e.g., overwriting `litellm`). Treat
- *   it accordingly: it's a security control, not a UX nicety.
+ *   `agentName` must match `AGENT_NAME_RE` (see
+ *   `templates/constraints.ts` for the canonical pattern + rationale).
+ *   Today: 3-20 chars, alphanumeric start AND end (no leading/trailing
+ *   hyphens), `[a-z0-9-]` in the middle. The 20-char ceiling lets the
+ *   per-agent IAM role name fit AWS's 64-char limit in the longest
+ *   realistic staging-prefix deployment. Digit-start is permitted; AWS
+ *   doesn't require letter-start for any of the resources MC creates.
+ *   The regex is load-bearing on `ecs:RegisterTaskDefinition` (granted
+ *   Resource:"*" because the AWS verb has no resource-level auth, so
+ *   this regex is the only thing keeping a compromised request from
+ *   registering a task-def with an arbitrary family name like
+ *   `litellm`). Treat it accordingly: it's a security control, not a
+ *   UX nicety.
  *
  * Error response shape:
  *   - **AWS-SDK errors (5xx + 4xx-on-AWS)**: only the SDK `error.name`

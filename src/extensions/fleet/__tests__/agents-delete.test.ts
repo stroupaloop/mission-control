@@ -1321,3 +1321,112 @@ describe('DELETE /api/fleet/agents/:name — per-agent LiteLLM virtual key (#354
     expect(incompleteMsg).toContain('MC_LITELLM_ALB_DNS_NAME')
   })
 })
+
+describe('DELETE /api/fleet/agents/:name — per-agent IAM role cleanup (#134)', () => {
+  // Match the AWS-resource already-deleted semantics elsewhere in
+  // this handler: `deletedResources` is populated only when the
+  // resource was actually present; a `*-already-deleted` warning
+  // covers the fully-idempotent case. Avoids the ambiguous "we
+  // deleted X" AND "X was already gone" state in the same response.
+
+  const happyAwsTeardown = () => {
+    smSendMock
+      .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' })
+      .mockResolvedValueOnce({})
+    fetchMock.mockResolvedValueOnce(mkLiteLLMDeleteResponse(200))
+    ecsSendMock
+      .mockResolvedValueOnce({
+        services: [
+          {
+            serviceArn: SERVICE_ARN,
+            status: 'ACTIVE',
+            tags: [
+              { key: 'Component', value: 'agent-harness' },
+              { key: 'ManagedBy', value: 'mission-control' },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ taskDefinitionArns: [] })
+      .mockResolvedValueOnce({})
+    elbv2SendMock
+      .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
+      .mockResolvedValueOnce({
+        Listeners: [{ ListenerArn: LISTENER_ARN, Protocol: 'HTTP' }],
+      })
+      .mockResolvedValueOnce({
+        Rules: [
+          {
+            RuleArn: RULE_ARN,
+            Conditions: [
+              { Field: 'path-pattern', Values: [`/agent/${AGENT}`] },
+            ],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ TargetGroups: [{ TargetGroupArn: TG_ARN }] })
+      .mockResolvedValueOnce({})
+    logsSendMock.mockResolvedValueOnce({})
+  }
+
+  it('omits iamRolesDeleted and warns "iam-roles-already-deleted" when BOTH roles are absent (idempotent re-run)', async () => {
+    happyAwsTeardown()
+    // All 5 IAM calls 4xx with NoSuchEntity — both roles absent.
+    const noSuchEntity = Object.assign(new Error('absent'), {
+      name: 'NoSuchEntity',
+    })
+    iamSendMock.mockRejectedValue(noSuchEntity)
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      deletedResources: { iamRolesDeleted?: string[] }
+      warnings: Array<{ code: string }>
+    }
+    // No fresh deletes ⇒ no iamRolesDeleted field.
+    expect(json.deletedResources.iamRolesDeleted).toBeUndefined()
+    expect(json.warnings.map((w) => w.code)).toContain(
+      'iam-roles-already-deleted',
+    )
+  })
+
+  it('reports only the fresh role in iamRolesDeleted when one role is absent (partial idempotent)', async () => {
+    happyAwsTeardown()
+    // Detach succeeds, DeleteRolePolicy task succeeds, DeleteRolePolicy
+    // exec NoSuchEntity, DeleteRole task succeeds, DeleteRole exec
+    // NoSuchEntity. The exec role pre-existed only as a detached
+    // shell (no inline) and got removed in a prior partial run; the
+    // task role is still fresh.
+    const noSuchEntity = Object.assign(new Error('absent'), {
+      name: 'NoSuchEntity',
+    })
+    iamSendMock
+      .mockResolvedValueOnce({}) // Detach exec — succeeds
+      .mockResolvedValueOnce({}) // Delete inline task
+      .mockRejectedValueOnce(noSuchEntity) // Delete inline exec — gone
+      .mockResolvedValueOnce({}) // Delete role task
+      .mockRejectedValueOnce(noSuchEntity) // Delete role exec — gone
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    expect(resp.status).toBe(200)
+    const json = (await resp.json()) as {
+      deletedResources: { iamRolesDeleted?: string[] }
+      warnings: Array<{ code: string }>
+    }
+    // Only the task role is reported fresh.
+    expect(json.deletedResources.iamRolesDeleted).toEqual([
+      `${PREFIX}-companion-openclaw-${AGENT}-task`,
+    ])
+    expect(json.warnings.map((w) => w.code)).toContain(
+      'iam-roles-partially-already-gone',
+    )
+    // Crucially: NOT the fully-gone warning code (mutually exclusive).
+    expect(json.warnings.map((w) => w.code)).not.toContain(
+      'iam-roles-already-deleted',
+    )
+  })
+})
