@@ -198,9 +198,17 @@ function renderTaskInlinePolicy(input: MintAgentRolesInput): string {
         Sid: 'AgentLogWrites',
         Effect: 'Allow',
         Action: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+        // The log group MC pre-creates for the agent is exactly
+        // `${logGroupPrefix}/companion-openclaw-{agentName}` (no
+        // suffix); the `:*` ARN variant matches any log stream
+        // within it. A trailing `-*` on the group name was the
+        // earlier shape — incorrect, since it would only match
+        // groups with a hyphenated suffix (none of which exist).
+        // The result was awslogs failing CreateLogStream at task
+        // launch.
         Resource: [
-          `arn:aws:logs:${region}:${accountId}:log-group:${logGroupPrefix}/companion-openclaw-${agentName}-*`,
-          `arn:aws:logs:${region}:${accountId}:log-group:${logGroupPrefix}/companion-openclaw-${agentName}-*:*`,
+          `arn:aws:logs:${region}:${accountId}:log-group:${logGroupPrefix}/companion-openclaw-${agentName}`,
+          `arn:aws:logs:${region}:${accountId}:log-group:${logGroupPrefix}/companion-openclaw-${agentName}:*`,
         ],
       },
       {
@@ -260,9 +268,12 @@ function renderExecInlinePolicy(input: MintAgentRolesInput): string {
           'logs:CreateLogStream',
           'logs:PutLogEvents',
         ],
+        // Same exact-name posture as the task role's AgentLogWrites
+        // — see that statement's comment for why the trailing `-*`
+        // suffix variant would silently misroute.
         Resource: [
-          `arn:aws:logs:${region}:${accountId}:log-group:${logGroupPrefix}/companion-openclaw-${agentName}-*`,
-          `arn:aws:logs:${region}:${accountId}:log-group:${logGroupPrefix}/companion-openclaw-${agentName}-*:*`,
+          `arn:aws:logs:${region}:${accountId}:log-group:${logGroupPrefix}/companion-openclaw-${agentName}`,
+          `arn:aws:logs:${region}:${accountId}:log-group:${logGroupPrefix}/companion-openclaw-${agentName}:*`,
         ],
       },
       {

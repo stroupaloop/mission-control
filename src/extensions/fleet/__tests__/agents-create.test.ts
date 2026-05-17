@@ -1520,6 +1520,102 @@ describe('POST /api/fleet/agents — per-agent LiteLLM virtual key (#354)', () =
     // SM write failed → no ARN to surface.
     expect(json.partialResources?.litellmSecretArn).toBeUndefined()
   })
+
+  it('rolls back per-agent IAM roles when a downstream step fails (#134)', async () => {
+    // Closes the Greptile/pr-agent P1 from the initial PR review:
+    // step 0.45 mintAgentRoles succeeds, but step 0.5 LiteLLM
+    // mint then fails. Without rollback, the DELETE handler would
+    // 404 (no ECS service exists yet) and the IAM roles would
+    // orphan with no operator-accessible cleanup path. The catch
+    // block must call deleteAgentRoles + clear partialResources
+    // for the IAM ARNs.
+    ecsSendMock.mockResolvedValueOnce({ services: [] }) // step 0.4
+    primeIamMintHappy() // step 0.45 mintAgentRoles succeeds
+    smSendMock.mockResolvedValueOnce({
+      SecretString: 'sk-master-NEVER-LOG',
+    }) // master-key read OK
+    fetchMock.mockResolvedValueOnce(
+      ({
+        ok: false,
+        status: 503,
+        text: async () => 'upstream busy',
+        json: async () => ({}),
+      }) as unknown as Response,
+    ) // /key/generate 503 → step 0.5 fails
+    // Rollback: deleteAgentRoles issues 5 calls (Detach → Delete×2
+    // inline → Delete×2 role). All succeed.
+    iamSendMock
+      .mockResolvedValueOnce({}) // DetachRolePolicy exec
+      .mockResolvedValueOnce({}) // DeleteRolePolicy task
+      .mockResolvedValueOnce({}) // DeleteRolePolicy exec
+      .mockResolvedValueOnce({}) // DeleteRole task
+      .mockResolvedValueOnce({}) // DeleteRole exec
+
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as {
+      error: string
+      partialResources?: {
+        iamTaskRoleArn?: string
+        iamExecutionRoleArn?: string
+        litellmKeyAlias?: string
+      }
+    }
+    // IAM roles were cleaned up — must NOT appear in partialResources.
+    expect(json.partialResources?.iamTaskRoleArn).toBeUndefined()
+    expect(json.partialResources?.iamExecutionRoleArn).toBeUndefined()
+    // Verify the 5 rollback IAM calls actually fired.
+    const iamCallTypes = iamSendMock.mock.calls.map(
+      (c) => (c[0] as { __type: string }).__type,
+    )
+    // 5 mint + 5 rollback = 10 total
+    expect(iamCallTypes).toHaveLength(10)
+    // The last 5 are the rollback sequence.
+    expect(iamCallTypes.slice(-5)).toEqual([
+      'DetachRolePolicyCommand',
+      'DeleteRolePolicyCommand',
+      'DeleteRolePolicyCommand',
+      'DeleteRoleCommand',
+      'DeleteRoleCommand',
+    ])
+  })
+
+  it('preserves IAM ARNs in partialResources when rollback itself fails (#134)', async () => {
+    // Defensive: if deleteAgentRoles throws (e.g., transient
+    // throttling), the IAM roles are still orphaned. Surface them
+    // in the response so the operator can clean up manually.
+    ecsSendMock.mockResolvedValueOnce({ services: [] })
+    primeIamMintHappy()
+    smSendMock.mockResolvedValueOnce({
+      SecretString: 'sk-master-NEVER-LOG',
+    })
+    fetchMock.mockResolvedValueOnce(
+      ({
+        ok: false,
+        status: 503,
+        text: async () => 'upstream busy',
+        json: async () => ({}),
+      }) as unknown as Response,
+    )
+    // Rollback fails on the first IAM call.
+    iamSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('throttled'), { name: 'Throttling' }),
+    )
+
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as {
+      error: string
+      partialResources?: {
+        iamTaskRoleArn?: string
+        iamExecutionRoleArn?: string
+      }
+    }
+    expect(json.partialResources?.iamTaskRoleArn).toBeDefined()
+    expect(json.partialResources?.iamExecutionRoleArn).toBeDefined()
+  })
 })
 
 /**

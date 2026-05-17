@@ -43,7 +43,7 @@ import {
   getLiteLLMMasterKey,
   writeAgentLiteLLMKey,
 } from '@/extensions/fleet/lib/secrets-manager'
-import { mintAgentRoles } from '@/extensions/fleet/lib/iam-roles'
+import { mintAgentRoles, deleteAgentRoles } from '@/extensions/fleet/lib/iam-roles'
 import {
   LiteLLMManagementClient,
   LiteLLMManagementError,
@@ -1112,6 +1112,50 @@ export async function POST(request: NextRequest) {
       },
       '[fleet] create-agent failed',
     )
+    // #134: roll back the per-agent IAM roles if they were minted
+    // before this failure. The DELETE handler refuses to run when
+    // there's no ECS service (step 1 returns 404), so a failure
+    // between step 0.45 (mintAgentRoles) and step 6 (CreateService)
+    // would otherwise orphan the role pair with no operator-
+    // accessible cleanup. deleteAgentRoles is idempotent on
+    // NoSuchEntity, so it's safe to call even when only one role
+    // (or neither) actually exists.
+    //
+    // Best-effort: a failure here doesn't change the response — the
+    // operator still sees the original AWS error. The orphan-role
+    // case is logged separately so operators reviewing CloudWatch
+    // can confirm the cleanup happened (or didn't, in which case
+    // they fall back to `aws iam delete-role` manually).
+    if (partial.iamTaskRoleArn || partial.iamExecutionRoleArn) {
+      try {
+        const rollback = await deleteAgentRoles({
+          agentName: input.agentName,
+          prefix: resolved.prefix,
+        })
+        logger.info(
+          {
+            agentName: input.agentName,
+            alreadyDeleted: rollback.alreadyDeleted,
+          },
+          '[fleet] create-agent rollback: per-agent IAM roles torn down after partial-failure',
+        )
+        // Roles are gone — drop them from partialResources so the
+        // operator-facing response doesn't suggest they need manual
+        // cleanup.
+        delete partial.iamTaskRoleArn
+        delete partial.iamExecutionRoleArn
+      } catch (rollbackErr) {
+        logger.error(
+          {
+            agentName: input.agentName,
+            errorName: (rollbackErr as { name?: string })?.name,
+          },
+          '[fleet] create-agent rollback: IAM role teardown failed (operator must delete roles manually)',
+        )
+        // Roles remain — keep them in partialResources so the operator
+        // sees them in the error response and can clean up manually.
+      }
+    }
     // Conflict statuses (service already exists, target group name
     // taken, etc.) → 409. Validation / IAM / account quota → 502.
     //

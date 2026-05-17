@@ -206,6 +206,20 @@ describe('mintAgentRoles — invariants (#134)', () => {
     expect(secretsStmt!.Resource).toBe(
       'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/companion-openclaw-hello-bot-*',
     )
+    // Log ARN scope — must reference the EXACT log group name
+    // (no `-*` suffix). MC pre-creates `/ecs/{prefix}/companion-
+    // openclaw-{agentName}` as the literal group; an inline policy
+    // that only matches `{agentName}-*` 403s CreateLogStream at
+    // task launch. The `:*` variant matches log streams within
+    // the group.
+    const logStmt = taskPolicy.Statement.find(
+      (s) => s.Sid === 'AgentLogWrites',
+    )
+    expect(logStmt).toBeDefined()
+    expect(logStmt!.Resource).toEqual([
+      'arn:aws:logs:us-east-1:398152419239:log-group:/ecs/ender-stack-dev/companion-openclaw-hello-bot',
+      'arn:aws:logs:us-east-1:398152419239:log-group:/ecs/ender-stack-dev/companion-openclaw-hello-bot:*',
+    ])
   })
 
   it('scopes the exec-role inline policy secret ARN to {agentName}-* (not *)', async () => {
@@ -240,6 +254,19 @@ describe('mintAgentRoles — invariants (#134)', () => {
     expect(secretsStmt!.Resource).toBe(
       'arn:aws:secretsmanager:us-east-1:398152419239:secret:ender-stack/dev/companion-openclaw-hello-bot-*',
     )
+    // Log ARN scope on the exec inline policy — same exact-name
+    // posture as the task role. The exec role additionally allows
+    // logs:CreateLogGroup (the awslogs-create-group fallback path);
+    // the resource list still references the literal group name,
+    // not a `-*` suffix variant.
+    const execLogStmt = execPolicy.Statement.find(
+      (s) => s.Sid === 'AgentLogWrites',
+    )
+    expect(execLogStmt).toBeDefined()
+    expect(execLogStmt!.Resource).toEqual([
+      'arn:aws:logs:us-east-1:398152419239:log-group:/ecs/ender-stack-dev/companion-openclaw-hello-bot',
+      'arn:aws:logs:us-east-1:398152419239:log-group:/ecs/ender-stack-dev/companion-openclaw-hello-bot:*',
+    ])
   })
 
   it('grants only kms:Decrypt (not kms:DescribeKey) on the exec inline policy — matches the boundary scope', async () => {
