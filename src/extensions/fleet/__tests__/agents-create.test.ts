@@ -611,6 +611,100 @@ describe('POST /api/fleet/agents — happy path', () => {
     )
   })
 
+  it('#376: forwards archetype + owner fields to RegisterTaskDefinition env', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({
+        ...validBody(),
+        archetype: 'software-engineer',
+        ownerName: 'Andrew Stroup',
+        ownerSlackId: 'U01ABCDEF23',
+        ownerTimezone: 'America/New_York',
+      }),
+    )
+    expect(resp.status).toBe(201)
+    const registerCall = ecsSendMock.mock.calls.find(
+      (c) =>
+        (c[0] as { __type: string }).__type === 'RegisterTaskDefinitionCommand',
+    )
+    const taskDef = (registerCall![0] as {
+      input: {
+        containerDefinitions: Array<{
+          name: string
+          environment?: Array<{ name: string; value: string }>
+        }>
+      }
+    }).input
+    const init = taskDef.containerDefinitions.find((c) => c.name === 'init-config')
+    expect(init?.environment).toContainEqual({
+      name: 'AGENT_ARCHETYPE',
+      value: 'software-engineer',
+    })
+    expect(init?.environment).toContainEqual({
+      name: 'AGENT_OWNER_NAME',
+      value: 'Andrew Stroup',
+    })
+    expect(init?.environment).toContainEqual({
+      name: 'AGENT_OWNER_SLACK_ID',
+      value: 'U01ABCDEF23',
+    })
+    expect(init?.environment).toContainEqual({
+      name: 'AGENT_OWNER_TZ',
+      value: 'America/New_York',
+    })
+  })
+
+  it('#376: rejects unknown archetype slug at the type guard boundary', async () => {
+    // ARCHETYPE_SLUGS allowlist defends against a compromised admin
+    // injecting an arbitrary slug that init-config would attempt to
+    // resolve as a directory path. The type guard is the load-bearing
+    // gate.
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ ...validBody(), archetype: 'not-a-real-archetype' }),
+    )
+    expect(resp.status).toBe(400)
+    expect(((await resp.json()) as { error: string }).error).toBe(
+      'InvalidRequestShape',
+    )
+  })
+
+  it('#376: rejects non-string archetype (type guard isOptString check)', async () => {
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ ...validBody(), archetype: 42 }),
+    )
+    expect(resp.status).toBe(400)
+    expect(((await resp.json()) as { error: string }).error).toBe(
+      'InvalidRequestShape',
+    )
+  })
+
+  it('#376: accepts the custom archetype slug', async () => {
+    happyPathMocks()
+    const POST = await importHandler()
+    const resp = await POST(
+      mkRequest({ ...validBody(), archetype: 'custom' }),
+    )
+    expect(resp.status).toBe(201)
+  })
+
+  it('#376: rejects non-string owner fields (type guard isOptString check)', async () => {
+    const POST = await importHandler()
+    for (const bad of [
+      { ownerName: 42 },
+      { ownerSlackId: { id: 'U01ABCDEF23' } },
+      { ownerTimezone: ['America/New_York'] },
+    ]) {
+      const resp = await POST(mkRequest({ ...validBody(), ...bad }))
+      expect(resp.status).toBe(400)
+      expect(((await resp.json()) as { error: string }).error).toBe(
+        'InvalidRequestShape',
+      )
+    }
+  })
+
   it('returns an empty warnings array on 201', async () => {
     // The `warnings` field shape is preserved on 201 responses so
     // the response contract is stable for future warnings, but the

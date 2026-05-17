@@ -88,6 +88,50 @@ export const DISPLAY_NAME_MAX_BYTES = 64
 export const PERSONA_MAX_BYTES = 1024
 
 /**
+ * Role-archetype slug constraints (#376).
+ *
+ * `AGENT_ARCHETYPE` is a directory slug under
+ * `services/companion/openclaw/workspace-defaults/archetypes/<slug>/`
+ * in ender-stack. init-config.sh enforces the same shape with a POSIX
+ * shell glob (`*[!abcdef…0123456789-]*` — explicit enumeration to be
+ * locale-immune; `[a-z0-9-]` collation-matches uppercase under
+ * en_US.UTF-8). The 32-byte cap matches the directory-name limit and
+ * keeps the slug short enough to fit comfortably in CloudWatch log
+ * lines.
+ *
+ * Validates both the form-side select (allowlisted against the
+ * archetypes.ts static array) AND the server-side type guard.
+ */
+export const ARCHETYPE_SLUG_MAX_BYTES = 32
+export const ARCHETYPE_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/
+
+/**
+ * Owner-layer fields written into the agent's USER.md on first boot
+ * (#376 PR B). init-config.sh normalizes + length-caps each field
+ * (CR/LF/U+2028/U+2029 → space; trim; UTF-8 byte cap) before
+ * substitution, but the MC form is the primary boundary — the caps
+ * below define what an operator can submit at all.
+ *
+ *   AGENT_OWNER_NAME (200B) — Owner display name. Lands in USER.md
+ *                              `**Name:**` bullet. Cap matches the
+ *                              IDENTITY.md `Role:` bullet (single-line
+ *                              markdown), so the same prompt-injection
+ *                              defenses apply.
+ *   AGENT_OWNER_SLACK_ID    — Slack workspace user-ID. init-config
+ *                              renders as `<@U...>` so the agent sees a
+ *                              clickable mention. Format: U-prefix +
+ *                              8+ uppercase alphanumeric (canonical
+ *                              Slack user-ID shape).
+ *   AGENT_OWNER_TZ   (64B)  — IANA timezone name (e.g.,
+ *                              "America/New_York"). Longest IANA name
+ *                              is ~32 chars; 64B leaves headroom for
+ *                              the rare extra-long region.
+ */
+export const OWNER_NAME_MAX_BYTES = 200
+export const OWNER_TZ_MAX_BYTES = 64
+export const OWNER_SLACK_ID_RE = /^U[A-Z0-9]{8,}$/
+
+/**
  * Persona-field validation regexes.
  *
  * Markdown-structural-injection defense: reject ASCII control chars

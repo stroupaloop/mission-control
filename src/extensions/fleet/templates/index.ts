@@ -24,15 +24,20 @@
 import * as openclaw from './openclaw'
 import {
   AGENT_NAME_RE,
+  ARCHETYPE_SLUG_RE,
   DISPLAY_NAME_MAX_BYTES,
   HARNESS_TYPES,
   IMAGE_MAX_BYTES,
+  OWNER_NAME_MAX_BYTES,
+  OWNER_SLACK_ID_RE,
+  OWNER_TZ_MAX_BYTES,
   PERSONA_FIELD_CONTROL_CHAR_RE,
   PERSONA_FIELD_DISALLOWED_PREFIX_RE,
   PERSONA_MAX_BYTES,
   ROLE_DESCRIPTION_MAX_BYTES,
   type HarnessType,
 } from './constraints'
+import { ARCHETYPE_SLUGS } from './archetypes'
 
 // Re-export for callers that already imported from this module.
 // Constants live in `./constraints` (no AWS SDK imports) so client
@@ -234,6 +239,57 @@ function validateOpenClawInput(
       )
     }
     if (input.persona) validateProseField('persona', input.persona)
+  }
+  // #376: archetype slug + owner-layer fields. The type guard in
+  // api/agents.ts already allowlists `archetype` against
+  // ARCHETYPE_SLUGS — re-check here for the direct-template-test
+  // path (unit tests bypass the HTTP boundary). Slug regex defends
+  // against any caller that bypasses the allowlist.
+  if (input.archetype !== undefined && input.archetype !== '') {
+    if (!ARCHETYPE_SLUG_RE.test(input.archetype)) {
+      throw new Error(
+        `archetype must match ${ARCHETYPE_SLUG_RE}; got ${JSON.stringify(input.archetype)}`,
+      )
+    }
+    if (!ARCHETYPE_SLUGS.has(input.archetype)) {
+      throw new Error(
+        `archetype "${input.archetype}" is not in the known archetype set; ` +
+          `add it to templates/archetypes.ts and the matching directory ` +
+          `under workspace-defaults/archetypes/ in ender-stack.`,
+      )
+    }
+  }
+  if (input.ownerName !== undefined && input.ownerName !== '') {
+    const ownerNameBytes = utf8Bytes(input.ownerName)
+    if (ownerNameBytes > OWNER_NAME_MAX_BYTES) {
+      throw new Error(
+        `ownerName must be ≤ ${OWNER_NAME_MAX_BYTES} bytes; got ${ownerNameBytes}`,
+      )
+    }
+    // ownerName lands in USER.md as a markdown bullet — same single-line
+    // / list-item-prefix defenses as displayName. The init-config
+    // normField on the boot side also collapses CR/LF/U+2028/U+2029.
+    validatePersonaField('ownerName', input.ownerName)
+  }
+  if (input.ownerSlackId !== undefined && input.ownerSlackId !== '') {
+    if (!OWNER_SLACK_ID_RE.test(input.ownerSlackId)) {
+      throw new Error(
+        `ownerSlackId must match ${OWNER_SLACK_ID_RE}; got ${JSON.stringify(input.ownerSlackId)}`,
+      )
+    }
+  }
+  if (input.ownerTimezone !== undefined && input.ownerTimezone !== '') {
+    const ownerTzBytes = utf8Bytes(input.ownerTimezone)
+    if (ownerTzBytes > OWNER_TZ_MAX_BYTES) {
+      throw new Error(
+        `ownerTimezone must be ≤ ${OWNER_TZ_MAX_BYTES} bytes; got ${ownerTzBytes}`,
+      )
+    }
+    // ownerTimezone lands in USER.md as a single-line bullet. Same
+    // structural defenses as displayName. IANA tz names are slash-
+    // separated (`America/New_York`) so the control-char + list-prefix
+    // checks are the right shape.
+    validatePersonaField('ownerTimezone', input.ownerTimezone)
   }
 }
 
