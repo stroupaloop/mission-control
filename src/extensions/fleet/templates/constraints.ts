@@ -32,6 +32,18 @@ export type HarnessType = (typeof HARNESS_TYPES)[number]
 export const AGENT_NAME_MIN_LENGTH = 3
 
 /**
+ * Maximum allowed agentName length. Mirrors the upper bound encoded
+ * in AGENT_NAME_RE's `{1,18}` middle window (1 start + 18 middle + 1
+ * end = 20 chars). Exported as a separate constant so callers
+ * surfacing the limit to operators (error messages, future CLI help
+ * text, UI validation) don't have to reverse-engineer it from the
+ * regex literal — same posture as AGENT_NAME_MIN_LENGTH. The IAM
+ * role-name 64-char budget is the load-bearing reason this is 20;
+ * see the AGENT_NAME_RE docblock below for the prefix math.
+ */
+export const AGENT_NAME_MAX_LENGTH = 20
+
+/**
  * agentName must:
  * - start with an alphanumeric (no leading hyphen — ELBv2 + ECS
  *   reject names with leading hyphens).

@@ -30,7 +30,7 @@ import {
   getLiteLLMMasterKey,
   deleteAgentLiteLLMKey,
 } from '@/extensions/fleet/lib/secrets-manager'
-import { deleteAgentRoles } from '@/extensions/fleet/lib/iam-roles'
+import { deleteAgentRoles, roleNames } from '@/extensions/fleet/lib/iam-roles'
 import {
   LiteLLMManagementClient,
   LiteLLMManagementError,
@@ -120,9 +120,16 @@ interface DeletedResources {
   /** #354: Secrets Manager secret name scheduled for deletion. */
   litellmSecretName?: string
   /**
-   * #134: Names of per-agent IAM roles deleted in step 12. Populated
-   * even when some resources were already absent (idempotent path) —
-   * see warnings for the `iam-roles-partially-already-gone` code.
+   * #134: Names of per-agent IAM roles touched in step 12. On
+   * `deletedResources`, only roles that were actually present (not
+   * in `alreadyDeleted`) appear here. On `failedResources` (outer
+   * catch fires before step 12), both deterministic names appear
+   * regardless of whether the agent was created post-#134 — for
+   * legacy shared-role agents (pre-#134) these names refer to
+   * roles that never existed, in which case the operator may see
+   * NoSuchEntity from a manual lookup. Operationally benign;
+   * tracked as a known pre-#134 artifact until shared-role
+   * retirement.
    */
   iamRolesDeleted?: string[]
 }
@@ -655,8 +662,10 @@ export async function DELETE(
     // operators see which IAM resources were absent vs. fresh-deleted.
     try {
       const iamResult = await deleteAgentRoles({ agentName, prefix })
-      const taskRoleName = `${prefix}-companion-openclaw-${agentName}-task`
-      const execRoleName = `${prefix}-companion-openclaw-${agentName}-exec`
+      const { taskRoleName, executionRoleName: execRoleName } = roleNames(
+        prefix,
+        agentName,
+      )
       // Mirror the litellm-secret reporting shape (lines ~602-625):
       // `deleted.*` is populated only when the role was actually
       // present; a `*-already-deleted` warning covers the fully-
@@ -688,12 +697,14 @@ export async function DELETE(
       // cleanup manually via `aws iam delete-role-policy` +
       // `aws iam delete-role`.
       const errName = (err as { name?: string })?.name ?? 'UnknownError'
+      const { taskRoleName: taskName, executionRoleName: execName } =
+        roleNames(prefix, agentName)
       warnings.push({
         code: 'iam-roles-delete-failed',
         message:
           `Could not delete per-agent IAM roles for ${agentName} (${errName}). ` +
           'Detach AmazonECSTaskExecutionRolePolicy from the exec role, then delete inline ' +
-          `policies + roles manually: ${prefix}-companion-openclaw-${agentName}-task and -exec.`,
+          `policies + roles manually: ${taskName} and ${execName}.`,
       })
       logger.warn(
         { agentName, errorName: errName },
@@ -755,10 +766,8 @@ export async function DELETE(
     // unfamiliar reader sees the 502 listing ECS/ELB/CW resources and
     // misses the IAM orphan entirely. Surface the deterministic names.
     if (!deleted.iamRolesDeleted) {
-      failed.iamRolesDeleted = [
-        `${prefix}-companion-openclaw-${agentName}-task`,
-        `${prefix}-companion-openclaw-${agentName}-exec`,
-      ]
+      const names = roleNames(prefix, agentName)
+      failed.iamRolesDeleted = [names.taskRoleName, names.executionRoleName]
     }
     return NextResponse.json(
       {

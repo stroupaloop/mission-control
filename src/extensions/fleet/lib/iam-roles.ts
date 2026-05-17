@@ -72,6 +72,7 @@ import {
   DetachRolePolicyCommand,
   DeleteRoleCommand,
 } from '@aws-sdk/client-iam'
+import { logger } from '@/lib/logger'
 
 const AWS_REGION_AT_LOAD = process.env.AWS_REGION || 'us-east-1'
 const iamClient = new IAMClient({ region: AWS_REGION_AT_LOAD })
@@ -404,20 +405,34 @@ export async function mintAgentRoles(
     // Best-effort cleanup of any partial state. NoSuchEntity is
     // suppressed inside deleteAgentRoles so this is safe even if
     // CreateRole task was the first failure (zero state to tear
-    // down). Cleanup-failure is swallowed — the original mintErr is
-    // what the caller needs to see + handle.
+    // down). The original mintErr always re-throws — that's what
+    // the caller's error path needs to surface.
     try {
       await deleteAgentRoles({
         agentName: input.agentName,
         prefix: input.prefix,
       })
-    } catch {
-      // Best-effort rollback failed too. The caller's catch path
-      // will still see the original mintErr; the outer handler
-      // (agents.ts) does not record partial.iamTaskRoleArn for an
-      // internal-mintAgentRoles failure (the success-path
-      // assignment never ran), so the response's failedResources
-      // path will include the IAM role names regardless.
+    } catch (cleanupErr) {
+      // Internal rollback failed (e.g., transient throttling on a
+      // DeleteRole call). The orphan signal lives only in this log
+      // line — partial.iamTaskRoleArn in agents.ts is set ONLY
+      // after a successful mintAgentRoles return, so the
+      // create-agent response's `partialResources` won't include
+      // the IAM ARNs for this code path. Log loudly so operators
+      // reviewing CloudWatch see the orphan and can clean up via
+      // `aws iam delete-role` manually.
+      const cleanupErrName =
+        (cleanupErr as { name?: string })?.name ?? 'UnknownError'
+      const mintErrName = (mintErr as { name?: string })?.name ?? 'UnknownError'
+      logger.warn(
+        {
+          agentName: input.agentName,
+          prefix: input.prefix,
+          mintErrorName: mintErrName,
+          cleanupErrorName: cleanupErrName,
+        },
+        '[fleet] mintAgentRoles: best-effort rollback failed — partial IAM state may remain (clean up manually via aws iam delete-role)',
+      )
     }
     throw mintErr
   }
