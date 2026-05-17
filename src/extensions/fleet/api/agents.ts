@@ -42,8 +42,8 @@ import { resolveFleetPrefix } from '@/extensions/fleet/lib/fleet-prefix'
 import {
   getLiteLLMMasterKey,
   writeAgentLiteLLMKey,
-  requireSecretsPrefix,
 } from '@/extensions/fleet/lib/secrets-manager'
+import { mintAgentRoles } from '@/extensions/fleet/lib/iam-roles'
 import {
   LiteLLMManagementClient,
   LiteLLMManagementError,
@@ -184,8 +184,35 @@ interface ResolvedEnv {
   projectName: string
   environment: string
   prefix: string
-  taskRoleArn: string
-  executionRoleArn: string
+  /**
+   * #134: AWS account ID, sourced from `MC_AWS_ACCOUNT_ID` (the env
+   * composition pre-resolves `data.aws_caller_identity.current.account_id`
+   * so the handler doesn't have to STS:GetCallerIdentity at startup).
+   * Used to build full secret + log ARN templates for per-agent
+   * inline policies. Empty string → fail-fast getMissingEnv().
+   */
+  accountId: string
+  /**
+   * #134: ARN of the permissions boundary MUST be attached to every
+   * per-agent role MC creates. The MC task role's `iam:CreateRole`
+   * grant is conditioned on this exact ARN — CreateRole 403s without
+   * it. Empty string → fail-fast getMissingEnv() (no silent fallback
+   * to the shared role).
+   */
+  permissionsBoundaryArn: string
+  /**
+   * #134: ARN of the secrets-manager KMS key, used in the per-agent
+   * exec role's inline `kms:Decrypt` statement. The permissions
+   * boundary caps `kms:Decrypt` to this exact ARN + `kms:ViaService`
+   * = secretsmanager. Empty string → fail-fast.
+   */
+  secretsKmsKeyArn: string
+  /**
+   * #134: pre-built secret name prefix from the env composition,
+   * shape `{project}/{env}/companion-openclaw`. The handler appends
+   * `-{agentName}-*` to construct per-agent secret ARN scopes.
+   */
+  secretsNamePrefix: string
   logGroupPrefix: string
   logRetentionDays: number
   vpcId: string
@@ -221,8 +248,16 @@ function resolveEnv(): ResolvedEnv {
     projectName: fleetPrefix.projectName,
     environment: fleetPrefix.environment,
     prefix: fleetPrefix.prefix,
-    taskRoleArn: process.env.MC_AGENT_TASK_ROLE_ARN || '',
-    executionRoleArn: process.env.MC_AGENT_EXECUTION_ROLE_ARN || '',
+    // #134: per-agent IAM role mint inputs. The static
+    // MC_AGENT_TASK_ROLE_ARN / MC_AGENT_EXECUTION_ROLE_ARN env vars
+    // are no longer consumed by the create path — task/exec roles
+    // are minted per agent via mintAgentRoles(). Shared-role
+    // retirement is a follow-up; the env vars remain on the task def
+    // until that retirement lands.
+    accountId: process.env.MC_AWS_ACCOUNT_ID || '',
+    permissionsBoundaryArn: process.env.MC_AGENT_PERMISSIONS_BOUNDARY_ARN || '',
+    secretsKmsKeyArn: process.env.MC_AGENT_SECRETS_KMS_KEY_ARN || '',
+    secretsNamePrefix: process.env.MC_AGENT_SECRETS_NAME_PREFIX || '',
     logGroupPrefix:
       process.env.MC_AGENT_LOG_GROUP_PREFIX ||
       `/ecs/${fleetPrefix.clusterName}`,
@@ -368,6 +403,18 @@ export interface CreateAgentErrorResponse {
      * Round-4 audit on PR #37 (Beat 3b).
      */
     serviceArn?: string | null
+    /**
+     * #134: Per-agent IAM task + execution role ARNs minted by step
+     * 0.45 (mintAgentRoles). Present together — both succeed or
+     * mintAgentRoles throws before either becomes visible. If a
+     * downstream step (LiteLLM key, AWS provisioning) fails, the
+     * roles are orphaned and the operator should DELETE the agent
+     * (which idempotently tears down the roles via deleteAgentRoles)
+     * or retry the create (mintAgentRoles is idempotent on
+     * EntityAlreadyExists).
+     */
+    iamTaskRoleArn?: string
+    iamExecutionRoleArn?: string
   }
 }
 
@@ -451,8 +498,15 @@ function buildTags(env: ResolvedEnv): Record<string, string> {
 /** Returns the names of any required env vars that are unset. Empty list = all set. */
 function getMissingEnv(env: ResolvedEnv): string[] {
   const missing: string[] = []
-  if (!env.taskRoleArn) missing.push('MC_AGENT_TASK_ROLE_ARN')
-  if (!env.executionRoleArn) missing.push('MC_AGENT_EXECUTION_ROLE_ARN')
+  // #134: per-agent IAM mint inputs. Boundary ARN is the load-bearing
+  // gate — without it, the iam:CreateRole grant 403s and the entire
+  // create path fails at step 0.5. Surface as a clean
+  // ConfigurationError at the env-validation layer instead.
+  if (!env.permissionsBoundaryArn)
+    missing.push('MC_AGENT_PERMISSIONS_BOUNDARY_ARN')
+  if (!env.accountId) missing.push('MC_AWS_ACCOUNT_ID')
+  if (!env.secretsKmsKeyArn) missing.push('MC_AGENT_SECRETS_KMS_KEY_ARN')
+  if (!env.secretsNamePrefix) missing.push('MC_AGENT_SECRETS_NAME_PREFIX')
   if (!env.vpcId) missing.push('MC_AGENT_VPC_ID')
   if (env.subnetIds.length === 0) missing.push('MC_AGENT_SUBNET_IDS')
   if (!env.securityGroupId) missing.push('MC_AGENT_SECURITY_GROUP_ID')
@@ -460,21 +514,6 @@ function getMissingEnv(env: ResolvedEnv): string[] {
   // #354: MC reads the master key to mint per-agent virtual keys.
   if (!env.litellmMasterKeySecretArn)
     missing.push('MC_LITELLM_MASTER_KEY_SECRET_ARN')
-  // #354: per-agent virtual-key secret is written under this prefix.
-  // requireSecretsPrefix() throws ConfigurationError if unset; surface
-  // as a missing env entry rather than a 500 later. Catch is narrowed
-  // to ConfigurationError (round-5 audit) so a future error path from
-  // requireSecretsPrefix doesn't silently misdiagnose as a missing
-  // env var.
-  try {
-    requireSecretsPrefix()
-  } catch (err) {
-    if ((err as { name?: string })?.name === 'ConfigurationError') {
-      missing.push('MC_AGENT_SECRETS_NAME_PREFIX')
-    } else {
-      throw err
-    }
-  }
   return missing
 }
 
@@ -640,12 +679,20 @@ export async function POST(request: NextRequest) {
   // the template would emit an empty `secrets[]` array; the create
   // flow never reaches the template in that state (step 0.5
   // throws and we return 502).
+  //
+  // #134: `taskRoleArn` / `executionRoleArn` are filled in by step
+  // 0.45 below (mintAgentRoles). They were previously sourced from
+  // the static MC_AGENT_TASK_ROLE_ARN / MC_AGENT_EXECUTION_ROLE_ARN
+  // env vars (shared role for all agents); per-agent isolation
+  // requires minting them after the conflict check. Until the step
+  // runs they're empty strings; the create flow never reaches the
+  // template render without them set.
   const env: OpenClawAgentEnv = {
     region: resolved.region,
     prefix: resolved.prefix,
     clusterName: resolved.clusterName,
-    taskRoleArn: resolved.taskRoleArn,
-    executionRoleArn: resolved.executionRoleArn,
+    taskRoleArn: '',
+    executionRoleArn: '',
     logGroupPrefix: resolved.logGroupPrefix,
     vpcId: resolved.vpcId,
     subnetIds: resolved.subnetIds,
@@ -723,6 +770,41 @@ export async function POST(request: NextRequest) {
         { status: 409, headers: { 'Cache-Control': 'no-store' } },
       )
     }
+
+    // ================================================================
+    // Step 0.45: Mint per-agent IAM task + execution roles (#134)
+    // ================================================================
+    // Mints BEFORE step 0.5 so an IAM failure (boundary mismatch,
+    // tag-condition violation, transient throttling) leaves zero
+    // LiteLLM orphans. mintAgentRoles is idempotent on
+    // EntityAlreadyExists — a retried create after a prior partial
+    // attempt recovers ARNs via GetRole and re-applies the inline
+    // policies / managed-policy attachment.
+    //
+    // The inline policies scope secrets + logs to
+    // `companion-openclaw-{agentName}-*` (NOT the namespace-wide
+    // `companion-openclaw-*` the boundary allows). This per-agent
+    // scoping is the load-bearing isolation primitive that prevents
+    // agent A from reading agent B's Slack tokens / virtual key.
+    // Per-agent role ARNs flow into the task definition at step 3
+    // (RegisterTaskDefinition) via env.taskRoleArn /
+    // env.executionRoleArn.
+    const minted = await mintAgentRoles({
+      agentName: input.agentName,
+      prefix: resolved.prefix,
+      boundaryArn: resolved.permissionsBoundaryArn,
+      accountId: resolved.accountId,
+      region: resolved.region,
+      secretsKmsKeyArn: resolved.secretsKmsKeyArn,
+      secretsNamePrefix: resolved.secretsNamePrefix,
+      logGroupPrefix: resolved.logGroupPrefix,
+      projectName: resolved.projectName,
+      environment: resolved.environment,
+    })
+    partial.iamTaskRoleArn = minted.taskRoleArn
+    partial.iamExecutionRoleArn = minted.executionRoleArn
+    env.taskRoleArn = minted.taskRoleArn
+    env.executionRoleArn = minted.executionRoleArn
 
     // ================================================================
     // Step 0.5: Mint per-agent LiteLLM virtual key (#354)

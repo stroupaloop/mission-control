@@ -30,6 +30,7 @@ import {
   getLiteLLMMasterKey,
   deleteAgentLiteLLMKey,
 } from '@/extensions/fleet/lib/secrets-manager'
+import { deleteAgentRoles } from '@/extensions/fleet/lib/iam-roles'
 import {
   LiteLLMManagementClient,
   LiteLLMManagementError,
@@ -118,6 +119,12 @@ interface DeletedResources {
   litellmKeyAlias?: string
   /** #354: Secrets Manager secret name scheduled for deletion. */
   litellmSecretName?: string
+  /**
+   * #134: Names of per-agent IAM roles deleted in step 12. Populated
+   * even when some resources were already absent (idempotent path) —
+   * see warnings for the `iam-roles-partially-already-gone` code.
+   */
+  iamRolesDeleted?: string[]
 }
 
 export interface DeleteAgentResponse {
@@ -630,6 +637,48 @@ export async function DELETE(
           `LiteLLM virtual-key secret for ${agentName} was retained because the /key/delete revoke failed. ` +
           'After revoking the key manually via the LiteLLM dashboard, delete the secret with `aws secretsmanager delete-secret`.',
       })
+    }
+
+    // ================================================================
+    // Step 12: Delete per-agent IAM task + execution roles (#134)
+    // ================================================================
+    // Runs last so any in-flight reference to the roles by AWS (e.g.,
+    // ECS stopping the last task) is already gone. deleteAgentRoles
+    // suppresses NoSuchEntity per-step, so a half-cleaned agent
+    // (e.g., this step previously failed after deleting the inline
+    // policy but before deleting the role) finishes idempotently on
+    // re-run. Surfaces the alreadyDeleted list as a warning entry so
+    // operators see which IAM resources were absent vs. fresh-deleted.
+    try {
+      const iamResult = await deleteAgentRoles({ agentName, prefix })
+      deleted.iamRolesDeleted = [
+        `${prefix}-companion-openclaw-${agentName}-task`,
+        `${prefix}-companion-openclaw-${agentName}-exec`,
+      ]
+      if (iamResult.alreadyDeleted.length > 0) {
+        warnings.push({
+          code: 'iam-roles-partially-already-gone',
+          message:
+            `Some per-agent IAM resources were already absent (idempotent path): ${iamResult.alreadyDeleted.join(', ')}.`,
+        })
+      }
+    } catch (err) {
+      // Non-fatal — agent's AWS surface is gone at this point.
+      // Surface the failure and continue; operator can finish IAM
+      // cleanup manually via `aws iam delete-role-policy` +
+      // `aws iam delete-role`.
+      const errName = (err as { name?: string })?.name ?? 'UnknownError'
+      warnings.push({
+        code: 'iam-roles-delete-failed',
+        message:
+          `Could not delete per-agent IAM roles for ${agentName} (${errName}). ` +
+          'Detach AmazonECSTaskExecutionRolePolicy from the exec role, then delete inline ' +
+          `policies + roles manually: ${prefix}-companion-openclaw-${agentName}-task and -exec.`,
+      })
+      logger.warn(
+        { agentName, errorName: errName },
+        '[fleet] delete-agent: IAM role cleanup failed (continuing)',
+      )
     }
 
     logSecurityEvent({

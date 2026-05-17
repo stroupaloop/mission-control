@@ -5,6 +5,7 @@ const ecsSendMock = vi.fn()
 const elbv2SendMock = vi.fn()
 const logsSendMock = vi.fn()
 const smSendMock = vi.fn()
+const iamSendMock = vi.fn()
 const fetchMock = vi.fn()
 
 // AWS SDK mock — same pattern as agents-create.test.ts. Each Command
@@ -107,6 +108,43 @@ vi.mock('@aws-sdk/client-secrets-manager', () => ({
   })),
 }))
 
+// #134: IAM SDK mock for the per-agent role teardown path.
+// deleteAgentRoles issues:
+//   DetachRolePolicy (exec) → DeleteRolePolicy (task) →
+//   DeleteRolePolicy (exec) → DeleteRole (task) → DeleteRole (exec)
+// = 5 IAM calls total on the happy teardown.
+vi.mock('@aws-sdk/client-iam', () => ({
+  IAMClient: vi.fn().mockImplementation(() => ({ send: iamSendMock })),
+  CreateRoleCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'CreateRoleCommand',
+    input,
+  })),
+  GetRoleCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'GetRoleCommand',
+    input,
+  })),
+  PutRolePolicyCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'PutRolePolicyCommand',
+    input,
+  })),
+  DeleteRolePolicyCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DeleteRolePolicyCommand',
+    input,
+  })),
+  AttachRolePolicyCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'AttachRolePolicyCommand',
+    input,
+  })),
+  DetachRolePolicyCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DetachRolePolicyCommand',
+    input,
+  })),
+  DeleteRoleCommand: vi.fn().mockImplementation((input: unknown) => ({
+    __type: 'DeleteRoleCommand',
+    input,
+  })),
+}))
+
 vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
 }))
@@ -196,11 +234,26 @@ const litellmDeleteMocks = () => {
   fetchMock.mockResolvedValueOnce(mkLiteLLMDeleteResponse(200))
 }
 
+/**
+ * #134: prime iamSendMock for the happy deleteAgentRoles() path.
+ * Sequence: DetachRolePolicy (exec) → DeleteRolePolicy (task) →
+ * DeleteRolePolicy (exec) → DeleteRole (task) → DeleteRole (exec).
+ */
+const primeIamDeleteHappy = () => {
+  iamSendMock
+    .mockResolvedValueOnce({}) // DetachRolePolicy exec
+    .mockResolvedValueOnce({}) // DeleteRolePolicy task
+    .mockResolvedValueOnce({}) // DeleteRolePolicy exec
+    .mockResolvedValueOnce({}) // DeleteRole task
+    .mockResolvedValueOnce({}) // DeleteRole exec
+}
+
 const happyPathMocks = () => {
   ecsSendMock.mockReset()
   elbv2SendMock.mockReset()
   logsSendMock.mockReset()
   smSendMock.mockReset()
+  iamSendMock.mockReset()
   fetchMock.mockReset()
 
   // #354 step 10: resolve master key → /key/delete → 200.
@@ -209,6 +262,9 @@ const happyPathMocks = () => {
     .mockResolvedValueOnce({ SecretString: 'sk-master-NEVER-LOG' }) // master key read
     .mockResolvedValueOnce({}) // DeleteSecret OK
   fetchMock.mockResolvedValueOnce(mkLiteLLMDeleteResponse(200))
+
+  // #134 step 12: IAM role teardown.
+  primeIamDeleteHappy()
 
   ecsSendMock
     // 1. DescribeServices — service exists, ACTIVE, agent-harness + MC-managed
@@ -276,6 +332,7 @@ beforeEach(() => {
   elbv2SendMock.mockReset()
   logsSendMock.mockReset()
   smSendMock.mockReset()
+  iamSendMock.mockReset()
   fetchMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
 })
@@ -310,6 +367,11 @@ describe('DELETE /api/fleet/agents/:name — happy path', () => {
       // rather than the fleet prefix (dash-form).
       litellmKeyAlias: `${PREFIX}-${AGENT}`,
       litellmSecretName: `ender-stack/dev/companion-openclaw-${AGENT}-litellm-key`,
+      // #134: per-agent IAM task + exec role names deleted in step 12.
+      iamRolesDeleted: [
+        `${PREFIX}-companion-openclaw-${AGENT}-task`,
+        `${PREFIX}-companion-openclaw-${AGENT}-exec`,
+      ],
     })
     expect(json.warnings).toEqual([])
   })
