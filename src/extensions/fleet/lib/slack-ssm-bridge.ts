@@ -10,11 +10,25 @@
  * via `RegisterTaskDefinition`.
  *
  * Both the credentials POST and the channels PUT call this AFTER
- * `RegisterTaskDefinition` succeeds and BEFORE `UpdateService`. If the
- * SSM write fails we log and continue — the task-def we just registered
- * still carries the config, so the operator's intent lands on this
- * deploy; the only thing lost is drift-resistance on the next
- * `terraform apply`, which is a re-paste away from being re-armed.
+ * `UpdateService` succeeds. The ordering matters: writing SSM before
+ * `UpdateService` would mean a failed UpdateService leaves SSM advanced
+ * to a config that never deployed, and the next `terraform apply` would
+ * roll out a selection from an operation MC reported as failed
+ * (Greptile PR #77 P1). The current ordering keeps SSM in sync with
+ * what actually shipped — on UpdateService failure the bridge stays
+ * dormant and the operator re-pastes to retry.
+ *
+ * Failure semantics: best-effort. If the PutParameter call fails after
+ * UpdateService succeeded, the agent is already running the new config;
+ * only drift-resistance on the NEXT `terraform apply` is degraded.
+ * Recovery: re-paste to re-arm the bridge.
+ *
+ * Latency: the SSM call sits on the user-facing request path. We pin
+ * `maxAttempts: 1` so a throttled SSM doesn't burn the full default
+ * retry budget (3 attempts with exponential backoff ≈ 15s) before the
+ * catch returns — one attempt fails fast, logs, and returns (Claude
+ * Auditor PR #77 P1). A tighter wall-clock bound via AbortController
+ * is tracked in ender-stack#474.
  *
  * IAM grant: `task_ssm_slack_config` in ender-stack
  * `terraform/modules/iam/main.tf` (per-agent SSM PutParameter +
@@ -30,7 +44,14 @@ import {
 import { logger } from '@/lib/logger'
 
 const AWS_REGION_AT_LOAD = process.env.AWS_REGION || 'us-east-1'
-const ssmClient = new SSMClient({ region: AWS_REGION_AT_LOAD })
+const ssmClient = new SSMClient({
+  region: AWS_REGION_AT_LOAD,
+  // Best-effort: one attempt, no exponential-backoff retries. See
+  // module JSDoc above — Claude Auditor PR #77 P1 flagged that the
+  // default 3-attempt budget can add several seconds of user-visible
+  // latency before the catch fires.
+  maxAttempts: 1,
+})
 
 export interface WriteSlackChannelConfigInput {
   /** Project name from resolveFleetPrefix() — first path segment. */
