@@ -1319,6 +1319,37 @@ describe('PUT /api/fleet/agents/:name/slack/channels — channels-only update (#
       expect(input.Value as string).toContain('channels')
     })
 
+    it('does NOT write SSM when UpdateService fails (Greptile #77 P1)', async () => {
+      mockHarnessService()
+      ecsSendMock.mockResolvedValueOnce({
+        taskDefinition: {
+          family: 'ender-stack-dev-companion-openclaw-hello-bot',
+          taskDefinitionArn: TASK_DEF_ARN_OLD,
+          containerDefinitions: [initContainer(), gatewayContainer()],
+          cpu: '256',
+          memory: '512',
+        },
+        tags: [],
+      })
+      ecsSendMock.mockResolvedValueOnce({
+        taskDefinition: { taskDefinitionArn: TASK_DEF_ARN_NEW },
+      })
+      ecsSendMock.mockRejectedValueOnce(
+        Object.assign(new Error('throttled'), {
+          name: 'ThrottlingException',
+        }),
+      )
+      const PUT = await importPut()
+      const resp = await PUT(
+        mkPutRequest({ channels: ['C0123456789'] }),
+        mkParams(),
+      )
+      expect(resp.status).toBe(502)
+      // SSM only mirrors configs that actually deployed. Bridge stays
+      // dormant on UpdateService failure; re-paste rearms it.
+      expect(ssmSendMock).not.toHaveBeenCalled()
+    })
+
     it('SSM value matches the JSON injected onto the init-config env var', async () => {
       mockHappyPath()
       const PUT = await importPut()

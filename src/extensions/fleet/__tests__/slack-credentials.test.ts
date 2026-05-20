@@ -1124,22 +1124,46 @@ describe('POST /api/fleet/agents/:name/slack/credentials — SSM bridge (ender-s
     expect(input.Value as string).toContain('channels')
   })
 
-  it('SSM call fires only AFTER RegisterTaskDefinition (drift contract)', async () => {
+  it('SSM call fires only AFTER UpdateService (drift contract — Greptile #77 P1)', async () => {
     happyPathMocks()
     const POST = await importHandler()
     await POST(mkRequest(), mkParams())
     const ecsTypes = ecsSendMock.mock.calls.map(
       (c) => (c[0] as { __type: string }).__type,
     )
-    const registerIdx = ecsTypes.indexOf('RegisterTaskDefinitionCommand')
-    expect(registerIdx).toBeGreaterThanOrEqual(0)
+    expect(ecsTypes).toContain('RegisterTaskDefinitionCommand')
+    expect(ecsTypes).toContain('UpdateServiceCommand')
     // ssmSendMock is a separate client; the contract we're proving
-    // is "Register succeeded before SSM PutParameter ran". Since the
-    // handler awaits Register before calling the helper, by the time
-    // the test sees an ssmSendMock call the register mock has
-    // already resolved. Asserting both fired in the same run is
-    // sufficient — the await ordering in the handler covers the rest.
+    // is "Register AND UpdateService succeeded before SSM
+    // PutParameter ran". Since the handler awaits both ECS calls
+    // before calling the helper, by the time the test sees an
+    // ssmSendMock call both mocks have already resolved. Asserting
+    // all three fired in the same run is sufficient — the await
+    // ordering in the handler covers the sequencing.
     expect(ssmSendMock).toHaveBeenCalled()
+  })
+
+  it('does NOT write SSM when UpdateService fails (Greptile #77 P1)', async () => {
+    ecsSendMock.mockReset()
+    smSendMock.mockReset()
+    ssmSendMock.mockReset()
+    mockHarnessService()
+    smSendMock.mockResolvedValueOnce({ ARN: 'arn:1' })
+    smSendMock.mockResolvedValueOnce({ ARN: 'arn:2' })
+    smSendMock.mockResolvedValueOnce({ ARN: 'arn:3' })
+    mockTaskDef()
+    ecsSendMock.mockResolvedValueOnce({
+      taskDefinition: { taskDefinitionArn: NEW_TD_ARN, revision: 6 },
+    })
+    ecsSendMock.mockRejectedValueOnce(
+      Object.assign(new Error('throttled'), { name: 'ThrottlingException' }),
+    )
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    // Bridge stays dormant — SSM only mirrors configs that actually
+    // deployed. Re-paste rearms the bridge.
+    expect(ssmSendMock).not.toHaveBeenCalled()
   })
 
   it('returns 200 even when SSM PutParameter fails (non-fatal durability degradation)', async () => {

@@ -81,6 +81,11 @@ export async function writeSlackChannelConfigToSsm(
     await ssmClient.send(
       new PutParameterCommand({
         Name: ssmName,
+        // Must match the Terraform-bootstrapped SecureString — AWS
+        // returns ParameterTypeMismatchException on overwrite if the
+        // existing param has a different Type. Caught below; the
+        // result is a permanent (logged) SSM failure until the
+        // Terraform side is fixed, not a deploy break.
         Type: 'SecureString',
         Value: input.channelsConfigJson,
         Overwrite: true,

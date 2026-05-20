@@ -630,18 +630,6 @@ export async function PUT(
       )
     }
 
-    // Persist the channel config to SSM so Terraform reads it on the
-    // next `terraform apply` instead of overwriting the env var we
-    // just registered (ender-stack#470 / #473). Best-effort: failure
-    // here doesn't fail the operation — the task-def revision we
-    // registered above still carries the config for this deploy.
-    await writeSlackChannelConfigToSsm({
-      projectName: fleetPrefix.projectName,
-      environment: fleetPrefix.environment,
-      agentName,
-      channelsConfigJson,
-    })
-
     const updated = await ecsClient.send(
       new UpdateServiceCommand({
         cluster: clusterName,
@@ -653,6 +641,25 @@ export async function PUT(
     const deploymentId = updated.service?.deployments?.find(
       (d) => d.status === 'PRIMARY',
     )?.id
+
+    // Persist the channel config to SSM AFTER UpdateService succeeds
+    // so Terraform only sees configs that actually deployed
+    // (ender-stack#470 / #473). Greptile PR #77 P1: if SSM were written
+    // before UpdateService and UpdateService later failed, the next
+    // `terraform apply` would deploy channel config from an operation
+    // MC reported as failed — confusing for the operator and a real
+    // safety regression vs the pre-bridge "re-paste to retry" model.
+    //
+    // Best-effort: failure here doesn't fail the operation — the
+    // task-def revision + UpdateService already rolled the agent onto
+    // the new config; only drift-resistance on the NEXT `terraform
+    // apply` is degraded. Recovery: re-paste to re-arm.
+    await writeSlackChannelConfigToSsm({
+      projectName: fleetPrefix.projectName,
+      environment: fleetPrefix.environment,
+      agentName,
+      channelsConfigJson,
+    })
 
     // Round-1 audit on PR #55 (pr-agent): isolate audit-log
     // failures from the response. logSecurityEvent calls
