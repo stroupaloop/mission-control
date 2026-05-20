@@ -19,6 +19,7 @@ import {
   requireSecretsPrefix,
   type SlackSecretArns,
 } from '@/extensions/fleet/lib/secrets-manager'
+import { writeSlackChannelConfigToSsm } from '@/extensions/fleet/lib/slack-ssm-bridge'
 
 /**
  * POST /api/fleet/agents/:name/slack/credentials — Phase 2.4 Beat 5b.2.
@@ -577,6 +578,20 @@ export async function POST(
         { status: 502, headers: NO_STORE },
       )
     }
+
+    // Persist the channel config to SSM so Terraform reads it on the
+    // next `terraform apply` instead of overwriting the env var we
+    // just registered (ender-stack#470 / #473). Best-effort: failure
+    // here doesn't fail the operation — the task-def revision we
+    // registered above still carries the config for this deploy.
+    // The IAM grant `task_ssm_slack_config` (ender-stack iam module)
+    // is scoped to exactly this path pattern.
+    await writeSlackChannelConfigToSsm({
+      projectName: fleetPrefix.projectName,
+      environment: fleetPrefix.environment,
+      agentName,
+      channelsConfigJson,
+    })
 
     // ================================================================
     // Step 5: UpdateService → roll onto the new revision

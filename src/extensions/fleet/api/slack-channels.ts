@@ -29,6 +29,7 @@ import {
   type ChannelInput,
 } from '@/extensions/fleet/lib/slack-channel-injection'
 import { stripReadOnlyFields } from '@/extensions/fleet/lib/ecs-task-def-helpers'
+import { writeSlackChannelConfigToSsm } from '@/extensions/fleet/lib/slack-ssm-bridge'
 
 /**
  * GET /api/fleet/agents/:name/slack/channels — Phase 2.4 Beat 5b.3.
@@ -628,6 +629,18 @@ export async function PUT(
         { status: 502, headers: NO_STORE },
       )
     }
+
+    // Persist the channel config to SSM so Terraform reads it on the
+    // next `terraform apply` instead of overwriting the env var we
+    // just registered (ender-stack#470 / #473). Best-effort: failure
+    // here doesn't fail the operation — the task-def revision we
+    // registered above still carries the config for this deploy.
+    await writeSlackChannelConfigToSsm({
+      projectName: fleetPrefix.projectName,
+      environment: fleetPrefix.environment,
+      agentName,
+      channelsConfigJson,
+    })
 
     const updated = await ecsClient.send(
       new UpdateServiceCommand({
