@@ -113,8 +113,15 @@ cd tools/gstack && ./setup
 
 ### Update gstack
 
+Bump the submodule and record the new pin in the parent repo (a bare `git pull` inside
+`tools/gstack` updates the working tree but leaves the parent's gitlink unchanged, so the
+next `submodule update --init` reverts it):
+
 ```bash
-cd tools/gstack && git pull origin main
+git submodule update --remote tools/gstack
+git -C tools/gstack log -1          # verify the new commit before committing the pin
+git add tools/gstack
+git commit -s -m "chore: update gstack to $(git -C tools/gstack rev-parse --short HEAD)"
 ```
 
 ## Review gates
