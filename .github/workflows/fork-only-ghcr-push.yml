@@ -40,30 +40,44 @@ jobs:
     permissions:
       contents: read
       packages: write # write:packages scope for GHCR push
+      pull-requests: read # dorny/paths-filter reads changed files on PR events
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # PR builds run PR-controlled Dockerfiles; don't leave the token in
+          # .git/config (.git is also excluded via .dockerignore — defense in depth).
+          persist-credentials: false
 
       # On PRs to main, only build when source files changed. The job still
       # runs to completion and reports a green `build-and-push` status either
       # way, satisfying the ruleset without an expensive build on docs PRs.
+      # Scoped to PR events — push/workflow_dispatch always build regardless.
       - name: Detect source changes
         id: changes
+        if: github.event_name == 'pull_request'
         uses: dorny/paths-filter@v3
         with:
           filters: |
             source:
               - 'src/**'
+              - 'public/**'
               - 'Dockerfile'
+              - '.dockerignore'
+              - 'docker-entrypoint.sh'
               - 'docker-compose*.yml'
               - 'package.json'
               - 'pnpm-lock.yaml'
               - 'next.config.*'
               - 'tsconfig*.json'
+              - 'tailwind.config.*'
+              - 'postcss.config.*'
 
+      # PR builds use push: false, so no registry auth is needed — skip login
+      # on all PR events (avoids needless use of the reduced PR token).
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request' || steps.changes.outputs.source == 'true'
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
