@@ -74,6 +74,10 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
         with:
+          # `every` = a changed file matches `source` only if it satisfies ALL
+          # patterns, i.e. matches `**` AND is excluded by none of the `!` rules.
+          # The default (`some`) would match every file via `**` and never skip.
+          predicate-quantifier: every
           filters: |
             source:
               - '**'
