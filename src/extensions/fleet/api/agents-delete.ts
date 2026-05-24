@@ -65,7 +65,9 @@ import {
  *   array enumerating which steps were already idempotent.
  *
  * Tear-down order is load-bearing:
- *   1. DescribeServices → 404 if missing, 404 if not an agent-harness
+ *   1. DescribeServices → 404 if the service EXISTS but isn't an
+ *      agent-harness; if the service is absent or INACTIVE, skip
+ *      drain + DeleteService and continue the idempotent teardown (#478)
  *   2. UpdateService desiredCount=0 — drain
  *   3. Resolve listener rule ARN via DescribeRules pagination (the
  *      ARN is non-deterministic; AWS assigns at CreateRule time)
@@ -97,9 +99,11 @@ import {
  *     CloudWatch. `deletedResources` enumerates what was successfully
  *     cleaned up before the failure; `failedResources` enumerates
  *     what's left for the operator.
- *   - **404**: service not found OR exists but isn't an agent-harness.
- *     Same response shape for both — refusing to confirm the existence
- *     of a non-harness service to a caller asking about it.
+ *   - **404**: service EXISTS but isn't an MC-managed agent harness —
+ *     refusing to confirm the existence of a non-harness service to a
+ *     caller asking about it. An entirely-absent service does NOT 404
+ *     (#478): it returns 200 with `service-not-found` in `warnings`
+ *     after the idempotent downstream teardown.
  *   - **400**: agentName fails the regex check (security control;
  *     same regex as POST per templates/constraints.ts).
  */
@@ -244,6 +248,10 @@ export async function DELETE(
         include: ['TAGS'],
       }),
     )
+    // AWS reports an absent service in `failures[].reason='MISSING'`,
+    // not in `services[]`. Either way `!target` correctly identifies
+    // the absent case below, so `failures` is intentionally not
+    // inspected for this gate.
     const target = describe.services?.[0]
     // `serviceAlreadyDeleted` covers two "ECS portion already done"
     // cases; both skip drain (step 2) + DeleteService (step 8) and

@@ -961,6 +961,56 @@ describe('DELETE /api/fleet/agents/:name — partial failure', () => {
     expect(json.failedResources?.logGroup).toBeDefined()
     expect(json.failedResources?.taskDefinitionRevisions).toBeDefined()
   })
+
+  it('502 on absent-service path does NOT list serviceArn in failedResources (#478)', async () => {
+    // Regression for the absent-service catch-block fix: when
+    // DescribeServices proved the service absent (serviceWasAbsent),
+    // a later non-idempotent failure must not tell the operator to
+    // clean up a service that never existed. The OTHER resources still
+    // appear in failedResources (they may exist for a partially-created
+    // agent), but serviceArn is intentionally omitted.
+    ecsSendMock.mockReset()
+    elbv2SendMock.mockReset()
+    logsSendMock.mockReset()
+
+    ecsSendMock.mockResolvedValueOnce({ services: [] }) // absent — drain skipped
+
+    const accessDenied = Object.assign(new Error('AccessDenied'), {
+      name: 'AccessDeniedException',
+    })
+    elbv2SendMock
+      .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
+      .mockResolvedValueOnce({
+        Listeners: [{ ListenerArn: LISTENER_ARN, Protocol: 'HTTP' }],
+      })
+      .mockResolvedValueOnce({
+        Rules: [
+          {
+            RuleArn: RULE_ARN,
+            Conditions: [
+              { Field: 'path-pattern', Values: [`/agent/${AGENT}`] },
+            ],
+          },
+        ],
+      })
+      .mockRejectedValueOnce(accessDenied) // DeleteRule throws → outer catch
+
+    const DELETE = await importHandler()
+    const resp = await DELETE(mkRequest(), mkParams())
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as {
+      error: string
+      deletedResources?: Record<string, unknown>
+      failedResources?: Record<string, unknown>
+    }
+    expect(json.error).toBe('AccessDeniedException')
+    // The fix: serviceArn omitted because the service was proven absent.
+    expect(json.failedResources?.serviceArn).toBeUndefined()
+    expect(json.deletedResources?.serviceArn).toBeUndefined()
+    // Other resources still surfaced for manual cleanup.
+    expect(json.failedResources?.logGroup).toBeDefined()
+    expect(json.failedResources?.taskDefinitionRevisions).toBeDefined()
+  })
 })
 
 describe('DELETE /api/fleet/agents/:name — per-agent LiteLLM virtual key (#354)', () => {
