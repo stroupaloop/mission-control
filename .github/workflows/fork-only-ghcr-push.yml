@@ -32,6 +32,13 @@ on:
       - 'feat/**'
   workflow_dispatch:
 
+# Match the repo-wide convention (quality-gate, claude-review, docker-publish).
+# Cancel superseded PR validations to save runner minutes, but never cancel an
+# in-flight feat/** publish (avoid a half-pushed image).
+concurrency:
+  group: fork-only-ghcr-push-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-and-push:
     # Fork-only guard — see FORK.md rule #3
@@ -50,10 +57,18 @@ jobs:
           # .git/config (.git is also excluded via .dockerignore — defense in depth).
           persist-credentials: false
 
-      # On PRs to main, only build when source files changed. The job still
-      # runs to completion and reports a green `build-and-push` status either
-      # way, satisfying the ruleset without an expensive build on docs PRs.
-      # Scoped to PR events — push/workflow_dispatch always build regardless.
+      # On PRs to main, only build when a change can affect the Docker image.
+      # The job still runs to completion and reports a green `build-and-push`
+      # status either way, satisfying the ruleset without an expensive build on
+      # docs-/config-/submodule-only PRs. Scoped to PR events — push and
+      # workflow_dispatch always build regardless.
+      #
+      # Denylist (not allowlist): treat EVERY changed file as build-affecting
+      # except paths that provably never enter the runtime image. An allowlist
+      # silently skips the build when a new build input (e.g. scripts/ consumed
+      # by `pnpm build`, root configs, the entrypoint) is added — a false green.
+      # The safe failure mode here is an occasional unnecessary build, never a
+      # skipped build that hides a broken image.
       - name: Detect source changes
         id: changes
         if: github.event_name == 'pull_request'
@@ -61,18 +76,14 @@ jobs:
         with:
           filters: |
             source:
-              - 'src/**'
-              - 'public/**'
-              - 'Dockerfile'
-              - '.dockerignore'
-              - 'docker-entrypoint.sh'
-              - 'docker-compose*.yml'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'next.config.*'
-              - 'tsconfig*.json'
-              - 'tailwind.config.*'
-              - 'postcss.config.*'
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!.github/**'
+              - '!tools/gstack/**'
+              - '!.gitmodules'
+              - '!.gitignore'
+              - '!LICENSE'
 
       # PR builds use push: false, so no registry auth is needed — skip login
       # on all PR events (avoids needless use of the reduced PR token).
