@@ -107,6 +107,10 @@ git submodule update --init --recursive
 cd tools/gstack && ./setup
 ```
 
+> `gstack` is a third-party repo (`garrytan/gstack`), pinned by commit in `.gitmodules`.
+> `./setup` runs a script from that repo — confirm the checked-out commit matches the pin
+> (`git -C tools/gstack rev-parse HEAD`) before running it.
+
 ### Update gstack
 
 ```bash
@@ -115,7 +119,7 @@ cd tools/gstack && git pull origin main
 
 ## Review gates
 
-1. **AI reviewers** fire automatically on every PR: claude-code-action, CodeRabbit, Greptile.
+1. **AI reviewers** fire automatically on every PR: claude-code-action (`claude-review.yml`), GPT-5.5 via pr-agent (`gpt-review.yml`), and Greptile.
 2. **Human review** by Andrew (via Claude Code / Cursor in terminal).
 3. **Use `/review` and `/cso`** before opening PRs that touch `src/extensions/`,
    `src/app/api/` routes, or security-sensitive code (auth, `src/proxy.ts` allowlist,
@@ -200,15 +204,18 @@ Parallel branches follow the convention: `<type>/<short-description>-<issue-numb
 
 When parallel PRs touch overlapping files (e.g., both modify `extensions.config.ts`):
 1. Merge the lower-risk / smaller PR first.
-2. Rebase the other PR against the updated `main` (`git fetch origin` first).
-3. Resolve conflicts in the rebased PR, not during merge.
+2. Bring the other PR up to date against the new `main`. Per the Branch & PR Workflow
+   rule above, prefer cherry-picking your commits onto a fresh branch from `origin/main`
+   over rebasing a branch that already has an open PR.
+3. Resolve conflicts on that fresh branch, not during merge.
 
 ### File Overlap Detection
 
-Before starting a parallel session, check for file overlap against other open draft PRs:
+Before starting a parallel session, check for file overlap against **all** other open PRs
+(not just drafts — a ready-for-review open PR can conflict too):
 
 ```bash
-gh pr list --state open --draft --json files,number -q '.[].files[].path' | sort | uniq -d
+gh pr list --state open --json files,number -q '.[].files[].path' | sort | uniq -d
 ```
 
 ### What NOT to parallelize
