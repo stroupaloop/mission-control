@@ -228,6 +228,10 @@ export async function DELETE(
   // populate failedResources.serviceArn even when the failure
   // happens before DeleteService runs.
   let discoveredServiceArn: string | undefined
+  // Hoisted so the catch block can tell "service proven absent" (#478)
+  // from "service existed but a later step failed" when building
+  // failedResources.
+  let serviceWasAbsent = false
 
   try {
     // ================================================================
@@ -253,7 +257,7 @@ export async function DELETE(
     //      re-deleted. The old early 404 here stranded every other
     //      resource; instead treat the missing service as a no-op.
     let serviceAlreadyDeleted = false
-    const serviceWasAbsent = !target
+    serviceWasAbsent = !target
     if (!target) {
       // Service entirely absent (#478). The isAgentHarness tag guard
       // below cannot run — there are no service tags to inspect — so
@@ -788,7 +792,11 @@ export async function DELETE(
     if (!deleted.taskDefinitionRevisions) {
       failed.taskDefinitionRevisions = [`(family ${taskDefFamily}, all ACTIVE revisions)`]
     }
-    if (!deleted.serviceArn) {
+    // Don't list the service as a failed resource when DescribeServices
+    // already proved it absent (#478): the handler intentionally skipped
+    // service deletion, so a 502 from a later step must not tell the
+    // operator to clean up a service that never existed.
+    if (!deleted.serviceArn && !serviceWasAbsent) {
       failed.serviceArn = discoveredServiceArn ?? serviceName
     }
     // #134: When the outer catch fires (an AWS error in steps 1-11),
