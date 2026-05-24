@@ -1,0 +1,3 @@
+[submodule "tools/gstack"]
+	path = tools/gstack
+	url = https://github.com/garrytan/gstack.git
