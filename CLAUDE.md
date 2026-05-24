@@ -102,14 +102,14 @@ workflows.
 
 ### Setup
 
+`gstack` is a third-party repo (`garrytan/gstack`) and `./setup` runs a script from it, so
+verify the pinned commit **before** running setup:
+
 ```bash
 git submodule update --init --recursive
-cd tools/gstack && ./setup
+git -C tools/gstack rev-parse HEAD   # confirm it matches the pin in .gitmodules
+cd tools/gstack && ./setup           # only after the commit checks out as expected
 ```
-
-> `gstack` is a third-party repo (`garrytan/gstack`), pinned by commit in `.gitmodules`.
-> `./setup` runs a script from that repo — confirm the checked-out commit matches the pin
-> (`git -C tools/gstack rev-parse HEAD`) before running it.
 
 ### Update gstack
 
