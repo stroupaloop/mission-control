@@ -38,9 +38,18 @@
  * IAM grant: `task_ssm_lifecycle_lock` in ender-stack
  * `terraform/modules/iam/main.tf` grants `ssm:PutParameter` +
  * `ssm:GetParameter` + `ssm:DeleteParameter` scoped to the exact path
- * pattern below. The lock value is a plain `String` (not SecureString),
- * so no KMS grant is needed. A typo in the path here means a silent 403
- * → 503 on every create/delete, not a security hole.
+ * pattern below (`…/companion-openclaw/<agent>/lifecycle-lock`). The
+ * lock value is a plain `String` (not SecureString), so no KMS grant is
+ * needed. A typo in the path here means a silent 403 → 503 on every
+ * create/delete, not a security hole.
+ *
+ * Caller contract: `agentName` MUST already be validated against
+ * AGENT_NAME_RE / AGENT_NAME_DELETE_RE (lowercase alphanumeric + hyphen,
+ * no slashes) before calling. Both fleet handlers validate before
+ * acquiring. This is load-bearing twice over: the name is embedded in
+ * the lock path here, AND the IAM resource ARN wildcards on the
+ * agent-name segment — a slash would let the wildcard span path
+ * segments and escape the companion-openclaw namespace.
  *
  * NOTE: this lib lives outside `src/extensions/fleet/api/`, so the
  * `check-iam-coverage.mjs` scanner does not see these SDK calls (it
@@ -137,7 +146,13 @@ function parseHolder(raw: string | undefined): LifecycleLockHolder | undefined {
   if (!raw) return undefined
   try {
     const v = JSON.parse(raw) as Partial<LifecycleLockHolder>
-    if (typeof v.ts === 'number' && typeof v.op === 'string') {
+    // Narrow op to the LifecycleOp union (not just `string`) before the
+    // cast — a tampered/corrupt parameter with e.g. op:"arbitrary" would
+    // otherwise surface verbatim in the client-visible 409 detail.
+    if (
+      typeof v.ts === 'number' &&
+      (v.op === 'create' || v.op === 'delete')
+    ) {
       return v as LifecycleLockHolder
     }
   } catch {

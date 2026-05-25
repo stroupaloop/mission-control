@@ -757,7 +757,10 @@ export async function POST(request: NextRequest) {
             `A ${lock.heldBy.op} for "${input.agentName}" is already in progress. ` +
             'Retry once it completes.',
         } satisfies CreateAgentErrorResponse,
-        { status: 409, headers: { 'Cache-Control': 'no-store' } },
+        {
+          status: 409,
+          headers: { 'Cache-Control': 'no-store', 'Retry-After': '30' },
+        },
       )
     }
     // Genuine SSM error — fail closed rather than run unserialized.
@@ -766,7 +769,10 @@ export async function POST(request: NextRequest) {
         error: 'LifecycleLockUnavailable',
         detail: 'Could not acquire the lifecycle lock (SSM unavailable). Retry shortly.',
       } satisfies CreateAgentErrorResponse,
-      { status: 503, headers: { 'Cache-Control': 'no-store' } },
+      {
+        status: 503,
+        headers: { 'Cache-Control': 'no-store', 'Retry-After': '10' },
+      },
     )
   }
 

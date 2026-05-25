@@ -287,7 +287,10 @@ export async function DELETE(
             `A ${lock.heldBy.op} for "${agentName}" is already in progress. ` +
             'Retry once it completes.',
         } satisfies DeleteAgentErrorResponse,
-        { status: 409, headers: { 'Cache-Control': 'no-store' } },
+        {
+          status: 409,
+          headers: { 'Cache-Control': 'no-store', 'Retry-After': '30' },
+        },
       )
     }
     // Genuine SSM error — fail closed rather than run unserialized.
@@ -296,7 +299,10 @@ export async function DELETE(
         error: 'LifecycleLockUnavailable',
         detail: 'Could not acquire the lifecycle lock (SSM unavailable). Retry shortly.',
       } satisfies DeleteAgentErrorResponse,
-      { status: 503, headers: { 'Cache-Control': 'no-store' } },
+      {
+        status: 503,
+        headers: { 'Cache-Control': 'no-store', 'Retry-After': '10' },
+      },
     )
   }
 

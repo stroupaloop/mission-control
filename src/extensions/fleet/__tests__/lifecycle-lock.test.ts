@@ -169,6 +169,23 @@ describe('acquireLifecycleLock', () => {
     expect(res).toEqual({ ok: true, token: expect.any(String) })
   })
 
+  it('treats a valid-JSON lock with an out-of-union op as stale (parseHolder narrows op)', async () => {
+    // A tampered/corrupt value with op:"arbitrary" must NOT be honored as
+    // a held lock — otherwise it would surface verbatim in the 409 detail.
+    ssmSendMock
+      .mockRejectedValueOnce(awsError('ParameterAlreadyExists'))
+      .mockResolvedValueOnce({
+        Parameter: { Value: JSON.stringify({ op: 'arbitrary', ts: Date.now() }) },
+      })
+      .mockResolvedValueOnce({ Version: 5 }) // reclaim
+    const { acquireLifecycleLock } = await importLock()
+
+    const res = await acquireLifecycleLock({ ...baseInput, op: 'create' })
+
+    // Not returned as 'held' — parseHolder rejects the bad op → reclaimed.
+    expect(res).toEqual({ ok: true, token: expect.any(String) })
+  })
+
   it('fails closed (reason=error) on a non-contention SSM error during acquire', async () => {
     ssmSendMock.mockRejectedValueOnce(awsError('ThrottlingException'))
     const { acquireLifecycleLock } = await importLock()
