@@ -374,6 +374,34 @@ describe('POST /api/fleet/services/:name/redeploy — error redaction (ender-sta
   })
 })
 
+describe('POST /api/fleet/services/:name/redeploy — describe-failure classification (ender-stack#281)', () => {
+  it('returns 502 (not 404) when DescribeServices reports a non-MISSING failure', async () => {
+    sendMock.mockResolvedValueOnce({
+      services: [],
+      failures: [{ arn: 'svc-1', reason: 'ACCESS_DENIED' }],
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams('svc-1'))
+    const body = await resp.json()
+    expect(resp.status).toBe(502)
+    expect(body.error).toBe('UpstreamServiceError')
+    // Must not have attempted the UpdateService that follows the guard.
+    expect(sendMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('still 404s when DescribeServices reports a plain MISSING failure', async () => {
+    sendMock.mockResolvedValueOnce({
+      services: [],
+      failures: [{ arn: 'svc-1', reason: 'MISSING' }],
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams('svc-1'))
+    const body = await resp.json()
+    expect(resp.status).toBe(404)
+    expect(body.error).toBe('ServiceNotFoundException')
+  })
+})
+
 describe('POST /api/fleet/services/:name/redeploy — per-call timeout (ender-stack#280)', () => {
   it('passes an abortSignal as the 2nd arg to each ECS .send() call', async () => {
     sendMock.mockResolvedValueOnce(mkActiveAgentDescribe('svc-1'))

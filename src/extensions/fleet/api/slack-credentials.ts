@@ -12,7 +12,11 @@ import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 import { logSecurityEvent } from '@/lib/security-events'
 import { mutationLimiter } from '@/lib/rate-limit'
-import { withTimeout, upstreamErrorBody } from '@/extensions/fleet/lib/aws-hardening'
+import {
+  withTimeout,
+  upstreamErrorBody,
+  classifyEcsFailures,
+} from '@/extensions/fleet/lib/aws-hardening'
 import { AGENT_NAME_RE } from '@/extensions/fleet/templates/constraints'
 import { resolveFleetPrefix } from '@/extensions/fleet/lib/fleet-prefix'
 import { isAgentHarness } from '@/extensions/fleet/lib/ecs-guards'
@@ -468,6 +472,26 @@ export async function POST(
       )
     } finally {
       describeSvcTimeout.clear()
+    }
+    // ender-stack#281: a non-MISSING describe failure (IAM denial /
+    // transient ECS fault, no service object) must surface as a 502
+    // rather than be reported as not-found below.
+    const classifiedSvc = classifyEcsFailures(describeSvc.failures)
+    if (classifiedSvc.hasNonMissing) {
+      logger.error(
+        {
+          cluster: clusterName,
+          serviceName,
+          agentName,
+          denied: classifiedSvc.denied,
+          other: classifiedSvc.other,
+        },
+        '[fleet] slack-credentials: DescribeServices returned non-MISSING failures (likely IAM denial)',
+      )
+      return NextResponse.json(
+        upstreamErrorBody() satisfies SlackCredentialsErrorResponse,
+        { status: 502, headers: NO_STORE },
+      )
     }
     const target = describeSvc.services?.[0]
     // Round-2 audit on PR #48: tighten from "INACTIVE only" to

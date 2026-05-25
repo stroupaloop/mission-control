@@ -533,6 +533,31 @@ describe('POST /api/fleet/agents/:name/slack/credentials — refusal paths', () 
     expect(smSendMock).not.toHaveBeenCalled()
   })
 
+  it('returns 502 (not 404) when DescribeServices reports a non-MISSING failure (ender-stack#281)', async () => {
+    ecsSendMock.mockResolvedValueOnce({
+      services: [],
+      failures: [{ arn: SERVICE_ARN, reason: 'ACCESS_DENIED' }],
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    const json = (await resp.json()) as { error: string }
+    expect(resp.status).toBe(502)
+    expect(json.error).toBe('UpstreamServiceError')
+    // No secret writes when the preflight aborts on an upstream error.
+    expect(smSendMock).not.toHaveBeenCalled()
+  })
+
+  it('still 404s when DescribeServices reports a plain MISSING failure (ender-stack#281)', async () => {
+    ecsSendMock.mockResolvedValueOnce({
+      services: [],
+      failures: [{ arn: SERVICE_ARN, reason: 'MISSING' }],
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(), mkParams())
+    expect(resp.status).toBe(404)
+    expect(smSendMock).not.toHaveBeenCalled()
+  })
+
   it('returns 404 for non-MC-managed service (smoke-test protection)', async () => {
     ecsSendMock.mockResolvedValueOnce({
       services: [

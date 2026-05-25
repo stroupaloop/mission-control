@@ -25,6 +25,7 @@ import { logSecurityEvent } from '@/lib/security-events'
 import {
   withTimeout,
   upstreamErrorBody,
+  classifyEcsFailures,
 } from '@/extensions/fleet/lib/aws-hardening'
 import {
   HARNESS_TEMPLATES,
@@ -782,6 +783,28 @@ export async function POST(request: NextRequest) {
       )
     } finally {
       tDescribe.clear()
+    }
+    // ender-stack#281: a non-MISSING DescribeServices failure (IAM
+    // denial / transient ECS fault, with no service object returned)
+    // must NOT be read as "name is free, proceed." Aborting here keeps
+    // the create from minting IAM roles + rotating the LiteLLM key on
+    // top of an upstream error. MISSING is the expected case for a new
+    // agent name — only hasNonMissing aborts.
+    const existsFailures = classifyEcsFailures(existsCheck.failures)
+    if (existsFailures.hasNonMissing) {
+      logger.error(
+        {
+          cluster: resolved.clusterName,
+          serviceName,
+          denied: existsFailures.denied,
+          other: existsFailures.other,
+        },
+        '[fleet] create-agent preflight: DescribeServices returned non-MISSING failures (likely IAM denial) — aborting before any IAM/LiteLLM side effect',
+      )
+      return NextResponse.json(
+        upstreamErrorBody() satisfies CreateAgentErrorResponse,
+        { status: 502, headers: { 'Cache-Control': 'no-store' } },
+      )
     }
     if (existsCheck.services?.[0]?.status === 'ACTIVE') {
       logger.warn(

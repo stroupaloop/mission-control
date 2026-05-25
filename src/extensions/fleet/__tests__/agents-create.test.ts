@@ -1744,6 +1744,25 @@ describe('POST /api/fleet/agents — AWS-call hardening', () => {
     expect(json.error).not.toBe('AccessDeniedException')
   })
 
+  it('#281: a non-MISSING DescribeServices preflight failure aborts before any IAM/LiteLLM side effect', async () => {
+    // The exists-check is the very first ECS send. A non-MISSING
+    // failure (IAM denial, no service object) previously fell through
+    // and proceeded into role minting + LiteLLM key rotation.
+    ecsSendMock.mockResolvedValueOnce({
+      services: [],
+      failures: [{ arn: 'svc-1', reason: 'ACCESS_DENIED' }],
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(502)
+    const json = (await resp.json()) as { error: string }
+    expect(json.error).toBe('UpstreamServiceError')
+    // No downstream side effects: no IAM roles minted, no LiteLLM key.
+    expect(iamSendMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(smSendMock).not.toHaveBeenCalled()
+  })
+
   it('#280: passes an abortSignal as the second arg to every AWS .send() call', async () => {
     happyPathMocks()
     const POST = await importHandler()

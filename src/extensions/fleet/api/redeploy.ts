@@ -8,7 +8,11 @@ import {
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 import { mutationLimiter } from '@/lib/rate-limit'
-import { withTimeout, upstreamErrorBody } from '@/extensions/fleet/lib/aws-hardening'
+import {
+  withTimeout,
+  upstreamErrorBody,
+  classifyEcsFailures,
+} from '@/extensions/fleet/lib/aws-hardening'
 
 /**
  * POST /api/fleet/services/:name/redeploy — force-new-deployment on an
@@ -127,6 +131,25 @@ export async function POST(
         t.clear()
       }
     })()
+    // ender-stack#281: a non-MISSING describe failure (IAM denial /
+    // transient ECS fault, no service object) must surface as a 502
+    // rather than be collapsed into the not-found 404 below.
+    const classified = classifyEcsFailures(describe.failures)
+    if (classified.hasNonMissing) {
+      logger.error(
+        {
+          cluster: CLUSTER_NAME,
+          serviceName: name,
+          denied: classified.denied,
+          other: classified.other,
+        },
+        '[fleet] redeploy: DescribeServices returned non-MISSING failures (likely IAM denial)',
+      )
+      return NextResponse.json(
+        upstreamErrorBody() satisfies FleetRedeployErrorResponse,
+        { status: 502, headers: NO_STORE },
+      )
+    }
     const target = describe.services?.[0]
     if (!target || target.status !== 'ACTIVE') {
       // ServiceNotFound or stale (DRAINING/INACTIVE). Same 404 the
