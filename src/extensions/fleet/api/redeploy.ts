@@ -224,6 +224,7 @@ export async function POST(
     logger.error(
       {
         err,
+        errorName: error.name,
         cluster: CLUSTER_NAME,
         region: AWS_REGION,
         service: name,
