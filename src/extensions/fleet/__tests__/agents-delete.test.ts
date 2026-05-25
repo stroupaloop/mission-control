@@ -1012,6 +1012,9 @@ describe('DELETE /api/fleet/agents/:name — partial failure', () => {
       deletedResources?: Record<string, unknown>
       failedResources?: Record<string, unknown>
     }
+    // ender-stack#278: outer-catch 502 carries no-store like every
+    // other fleet error path — a transient failure must not be cached.
+    expect(resp.headers.get('Cache-Control')).toBe('no-store')
     // #274: raw SDK error name redacted to a stable client-facing code.
     expect(json.error).toBe('UpstreamServiceError')
     // The fix: serviceArn omitted because the service was proven absent.

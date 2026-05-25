@@ -358,7 +358,9 @@ export async function DELETE(
             error: 'ServiceNotFoundException',
             detail: `agent "${agentName}" not found`,
           } satisfies DeleteAgentErrorResponse,
-          { status: 404 },
+          // ender-stack#278: no-store, consistent with the other fleet
+          // refusal/error paths.
+          { status: 404, headers: { 'Cache-Control': 'no-store' } },
         )
       }
     }
@@ -922,7 +924,8 @@ export async function DELETE(
         deletedResources: deleted,
         failedResources: failed,
       } satisfies DeleteAgentErrorResponse,
-      { status: 502 },
+      // ender-stack#278: no-store so a transient 502 can't be cached.
+      { status: 502, headers: { 'Cache-Control': 'no-store' } },
     )
   }
 }

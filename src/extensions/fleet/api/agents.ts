@@ -1336,7 +1336,9 @@ export async function POST(request: NextRequest) {
         ...upstreamErrorBody(),
         ...(hasPartial ? { partialResources: partial } : {}),
       } satisfies CreateAgentErrorResponse,
-      { status },
+      // ender-stack#278: no-store so a transient 502 (or 409) from the
+      // outer catch can't be cached by a proxy/CDN and mislead a retry.
+      { status, headers: { 'Cache-Control': 'no-store' } },
     )
   }
 }
