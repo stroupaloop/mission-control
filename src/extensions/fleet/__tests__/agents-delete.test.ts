@@ -850,6 +850,43 @@ describe('DELETE /api/fleet/agents/:name — refusal paths', () => {
         }),
       )
     })
+
+    it('proceeds (does NOT 502) when the target group vanishes between resolution and DescribeTags (TOCTOU)', async () => {
+      // Greptile P2 / Claude audit: the TG can be deleted between
+      // findTargetGroupArn and DescribeTags (concurrent teardown, or a
+      // TF replacement completing). DescribeTags then throws
+      // TargetGroupNotFoundException — the guard treats it as 'absent'
+      // so an idempotent re-delete doesn't 502 on a resource that's
+      // already gone.
+      vi.mocked(logSecurityEvent).mockClear()
+      litellmDeleteMocks()
+      const tgGone = Object.assign(new Error('gone'), {
+        name: 'TargetGroupNotFoundException',
+      })
+      ecsSendMock
+        .mockResolvedValueOnce({ services: [] }) // DescribeServices — absent
+        .mockResolvedValueOnce({ taskDefinitionArns: [] }) // ListTaskDefinitions
+      elbv2SendMock
+        .mockResolvedValueOnce({ TargetGroups: [{ TargetGroupArn: TG_ARN }] }) // guard: DescribeTargetGroups — TG still there
+        .mockRejectedValueOnce(tgGone) // guard: DescribeTags — TG vanished
+        .mockResolvedValueOnce({ LoadBalancers: [{ LoadBalancerArn: ALB_ARN }] })
+        .mockResolvedValueOnce({
+          Listeners: [{ ListenerArn: LISTENER_ARN, Protocol: 'HTTP' }],
+        })
+        .mockResolvedValueOnce({ Rules: [] })
+        .mockResolvedValueOnce({ TargetGroups: [] })
+      logsSendMock.mockResolvedValueOnce({})
+
+      const DELETE = await importHandler()
+      const resp = await DELETE(mkRequest(), mkParams())
+
+      expect(resp.status).toBe(200)
+      expect(vi.mocked(logSecurityEvent)).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'fleet.delete-agent.refused-non-mc-downstream',
+        }),
+      )
+    })
   })
 
   it('continues teardown when service does not exist (idempotent, #478)', async () => {

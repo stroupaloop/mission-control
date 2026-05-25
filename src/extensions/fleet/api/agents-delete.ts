@@ -979,9 +979,27 @@ async function checkAbsentPathOwnership(
   const tgArn = await findTargetGroupArn(tgName)
   if (!tgArn) return 'absent'
 
-  const tagsResp = await elbv2Client.send(
-    new DescribeTagsCommand({ ResourceArns: [tgArn] }),
-  )
-  const tags = tagsResp.TagDescriptions?.[0]?.Tags
-  return isAgentHarnessElbv2Tags(tags) ? 'mc-managed' : 'foreign'
+  let tagsResp
+  try {
+    tagsResp = await elbv2Client.send(
+      new DescribeTagsCommand({ ResourceArns: [tgArn] }),
+    )
+  } catch (err) {
+    // TOCTOU: the TG can be deleted between findTargetGroupArn and this
+    // DescribeTags (a concurrent teardown, or a TF replacement
+    // completing). A vanished TG leaves nothing to attribute — treat it
+    // as 'absent' and let the idempotent teardown proceed, mirroring
+    // findTargetGroupArn's own not-found handling rather than letting
+    // the outer catch turn an idempotent re-delete into a 502. Other
+    // errors propagate (fail-closed).
+    if (isErrorOfType(err, [...NOT_FOUND_NAMES.targetGroup])) return 'absent'
+    throw err
+  }
+  // DescribeTags omits the ARN from TagDescriptions if the TG vanished
+  // after the call was accepted — same TOCTOU window, also 'absent'. A
+  // surviving TG with zero tags returns a present entry with empty Tags
+  // → 'foreign' (not provably MC-managed), which is the correct refusal.
+  const desc = tagsResp.TagDescriptions?.[0]
+  if (!desc) return 'absent'
+  return isAgentHarnessElbv2Tags(desc.Tags) ? 'mc-managed' : 'foreign'
 }
