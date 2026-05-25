@@ -69,12 +69,14 @@ describe('acquireLifecycleLock', () => {
 
     const res = await acquireLifecycleLock({ ...baseInput, op: 'create', actor: 7 })
 
-    expect(res).toEqual({ ok: true })
+    expect(res).toEqual({ ok: true, token: expect.any(String) })
     expect(cmdTypes()).toEqual(['PutParameterCommand'])
-    const put = cmdInputs()[0] as { Name: string; Overwrite: boolean; Type: string }
+    const put = cmdInputs()[0] as { Name: string; Overwrite: boolean; Type: string; Value: string }
     expect(put.Overwrite).toBe(false)
     expect(put.Type).toBe('String')
     expect(put.Name).toBe('/ender-stack/dev/companion-openclaw/hello-bot/lifecycle-lock')
+    // The fencing token written into the value matches the returned token.
+    expect((res as { token: string }).token).toBe(JSON.parse(put.Value).token)
   })
 
   it('returns held when a FRESH lock exists (contention → caller 409)', async () => {
@@ -104,7 +106,7 @@ describe('acquireLifecycleLock', () => {
 
     const res = await acquireLifecycleLock({ ...baseInput, op: 'delete' })
 
-    expect(res).toEqual({ ok: true })
+    expect(res).toEqual({ ok: true, token: expect.any(String) })
     expect(cmdTypes()).toEqual([
       'PutParameterCommand',
       'GetParameterCommand',
@@ -115,21 +117,44 @@ describe('acquireLifecycleLock', () => {
     expect(loggerWarnMock).toHaveBeenCalled() // stale-reclaim is logged
   })
 
-  it('reclaims when the lock vanished between acquire and read (ParameterNotFound on Get)', async () => {
+  it('RETRIES the atomic acquire (not an overwrite) when the lock vanished between acquire and read', async () => {
+    // #85 P1 "vanished lock clobbers holder": a NotFound on the staleness
+    // read means the slot is now free, so we re-attempt Overwrite:false
+    // — never Overwrite:true, which would clobber a holder that acquired
+    // in the gap.
     ssmSendMock
       .mockRejectedValueOnce(awsError('ParameterAlreadyExists')) // acquire blocked
-      .mockRejectedValueOnce(awsError('ParameterNotFound')) // GetParameter — released meanwhile
-      .mockResolvedValueOnce({ Version: 3 }) // reclaim PutParameter(Overwrite:true)
+      .mockRejectedValueOnce(awsError('ParameterNotFound')) // GetParameter — vanished
+      .mockResolvedValueOnce({ Version: 3 }) // retry: PutParameter(Overwrite:false)
     const { acquireLifecycleLock } = await importLock()
 
     const res = await acquireLifecycleLock({ ...baseInput, op: 'create' })
 
-    expect(res).toEqual({ ok: true })
+    expect(res).toEqual({ ok: true, token: expect.any(String) })
     expect(cmdTypes()).toEqual([
       'PutParameterCommand',
       'GetParameterCommand',
       'PutParameterCommand',
     ])
+    // The retry is an ATOMIC acquire, not a clobbering overwrite.
+    const retry = cmdInputs()[2] as { Overwrite: boolean }
+    expect(retry.Overwrite).toBe(false)
+  })
+
+  it('fails closed when the vanished-retry budget is exhausted under contention', async () => {
+    // Every attempt: acquire blocked → read vanished → retry. After
+    // MAX_ACQUIRE_ATTEMPTS the loop gives up rather than spin forever.
+    ssmSendMock.mockImplementation((cmd: { __type: string }) => {
+      if (cmd.__type === 'PutParameterCommand') {
+        return Promise.reject(awsError('ParameterAlreadyExists'))
+      }
+      return Promise.reject(awsError('ParameterNotFound')) // GetParameter
+    })
+    const { acquireLifecycleLock } = await importLock()
+
+    const res = await acquireLifecycleLock({ ...baseInput, op: 'create' })
+
+    expect(res).toEqual({ ok: false, reason: 'error', errorName: 'LockAcquireContention' })
   })
 
   it('treats an unparseable lock value as stale and reclaims it', async () => {
@@ -141,7 +166,7 @@ describe('acquireLifecycleLock', () => {
 
     const res = await acquireLifecycleLock({ ...baseInput, op: 'delete' })
 
-    expect(res).toEqual({ ok: true })
+    expect(res).toEqual({ ok: true, token: expect.any(String) })
   })
 
   it('fails closed (reason=error) on a non-contention SSM error during acquire', async () => {
@@ -167,7 +192,7 @@ describe('acquireLifecycleLock', () => {
 })
 
 describe('releaseLifecycleLock', () => {
-  it('deletes the lock parameter', async () => {
+  it('deletes the lock parameter unconditionally when no token is supplied', async () => {
     ssmSendMock.mockResolvedValueOnce({})
     const { releaseLifecycleLock } = await importLock()
 
@@ -176,6 +201,42 @@ describe('releaseLifecycleLock', () => {
     expect(cmdTypes()).toEqual(['DeleteParameterCommand'])
     const del = cmdInputs()[0] as { Name: string }
     expect(del.Name).toBe('/ender-stack/dev/companion-openclaw/hello-bot/lifecycle-lock')
+  })
+
+  it('deletes the lock when the stored fencing token matches (we still own it)', async () => {
+    ssmSendMock
+      .mockResolvedValueOnce({
+        Parameter: { Value: JSON.stringify({ op: 'create', ts: Date.now(), token: 'tok-A' }) },
+      }) // ownership read — our token
+      .mockResolvedValueOnce({}) // DeleteParameter
+    const { releaseLifecycleLock } = await importLock()
+
+    await releaseLifecycleLock({ ...baseInput, token: 'tok-A' })
+
+    expect(cmdTypes()).toEqual(['GetParameterCommand', 'DeleteParameterCommand'])
+  })
+
+  it('does NOT delete when the stored token differs — a newer op reclaimed the lock (#85 P1)', async () => {
+    ssmSendMock.mockResolvedValueOnce({
+      Parameter: { Value: JSON.stringify({ op: 'delete', ts: Date.now(), token: 'tok-SUCCESSOR' }) },
+    }) // ownership read — someone else's token
+    const { releaseLifecycleLock } = await importLock()
+
+    await releaseLifecycleLock({ ...baseInput, token: 'tok-A' })
+
+    // Get only — the successor's lock is left intact.
+    expect(cmdTypes()).toEqual(['GetParameterCommand'])
+    expect(loggerWarnMock).toHaveBeenCalled()
+  })
+
+  it('does NOT delete when the ownership read errors — leaves the lock to self-expire (avoids clobber)', async () => {
+    ssmSendMock.mockRejectedValueOnce(awsError('ThrottlingException')) // ownership read fails
+    const { releaseLifecycleLock } = await importLock()
+
+    await releaseLifecycleLock({ ...baseInput, token: 'tok-A' })
+
+    expect(cmdTypes()).toEqual(['GetParameterCommand']) // no Delete attempted
+    expect(loggerErrorMock).toHaveBeenCalled()
   })
 
   it('is idempotent — ParameterNotFound is swallowed (already released)', async () => {

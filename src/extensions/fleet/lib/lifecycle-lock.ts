@@ -49,6 +49,7 @@
  * the coverage gate.
  */
 
+import { randomUUID } from 'node:crypto'
 import {
   SSMClient,
   PutParameterCommand,
@@ -78,12 +79,28 @@ export interface LifecycleLockHolder {
   actor?: string | number
   /** Epoch ms when the lock was acquired — drives staleness. */
   ts: number
+  /**
+   * Per-acquisition fencing token. The release path only deletes the
+   * parameter when the stored token still matches the releaser's token,
+   * so a handler that ran past the TTL (and was reclaimed by a newer op)
+   * can't delete the successor's lock on its way out.
+   */
+  token?: string
 }
 
 export type AcquireLockResult =
-  | { ok: true }
+  | { ok: true; token: string }
   | { ok: false; reason: 'held'; heldBy: LifecycleLockHolder }
   | { ok: false; reason: 'error'; errorName: string }
+
+/**
+ * Bound on the vanished-lock retry loop. A lock that disappears between
+ * our failed atomic acquire and the staleness read is re-attempted as a
+ * fresh atomic acquire (never an overwrite — that would clobber a holder
+ * that acquired in the gap). The loop is tiny and only spins under
+ * active create-vs-delete contention churn.
+ */
+const MAX_ACQUIRE_ATTEMPTS = 3
 
 export interface LifecycleLockInput {
   projectName: string
@@ -148,104 +165,157 @@ export async function acquireLifecycleLock(
     input.environment,
     input.agentName,
   )
+  const token = randomUUID()
   const value: LifecycleLockHolder = {
     op: input.op,
     actor: input.actor,
     ts: Date.now(),
+    token,
   }
+  const valueJson = JSON.stringify(value)
 
-  // Atomic acquire: Overwrite=false throws ParameterAlreadyExists if a
-  // lock is already held.
-  try {
-    await ssmClient.send(
-      new PutParameterCommand({
-        Name: name,
-        Type: 'String',
-        Value: JSON.stringify(value),
-        Overwrite: false,
-      }),
-    )
-    return { ok: true }
-  } catch (err) {
-    if (errName(err) !== PARAM_ALREADY_EXISTS) {
-      logger.error(
-        { agentName: input.agentName, op: input.op, errorName: errName(err) },
-        '[fleet] lifecycle-lock: acquire failed on a non-contention SSM error — failing closed',
+  for (let attempt = 1; attempt <= MAX_ACQUIRE_ATTEMPTS; attempt++) {
+    // Atomic acquire: Overwrite=false throws ParameterAlreadyExists if a
+    // lock is already held.
+    try {
+      await ssmClient.send(
+        new PutParameterCommand({
+          Name: name,
+          Type: 'String',
+          Value: valueJson,
+          Overwrite: false,
+        }),
       )
-      return { ok: false, reason: 'error', errorName: errName(err) }
+      return { ok: true, token }
+    } catch (err) {
+      if (errName(err) !== PARAM_ALREADY_EXISTS) {
+        logger.error(
+          { agentName: input.agentName, op: input.op, errorName: errName(err) },
+          '[fleet] lifecycle-lock: acquire failed on a non-contention SSM error — failing closed',
+        )
+        return { ok: false, reason: 'error', errorName: errName(err) }
+      }
     }
-  }
 
-  // A lock exists — read it to decide held-vs-stale.
-  let heldBy: LifecycleLockHolder | undefined
-  try {
-    const got = await ssmClient.send(new GetParameterCommand({ Name: name }))
-    heldBy = parseHolder(got.Parameter?.Value)
-  } catch (err) {
-    if (errName(err) === PARAM_NOT_FOUND) {
-      // Released between our PutParameter and this read — the slot is
-      // free now. Fall through to the reclaim path (heldBy=undefined).
-      heldBy = undefined
-    } else {
+    // A lock exists — read it to decide held-vs-stale.
+    let heldBy: LifecycleLockHolder | undefined
+    try {
+      const got = await ssmClient.send(new GetParameterCommand({ Name: name }))
+      heldBy = parseHolder(got.Parameter?.Value)
+    } catch (err) {
+      if (errName(err) === PARAM_NOT_FOUND) {
+        // Released/vanished between our atomic acquire and this read.
+        // RETRY the atomic Overwrite=false acquire rather than reclaim
+        // with Overwrite=true — overwriting here would clobber a holder
+        // that legitimately acquired the now-empty slot in the gap
+        // (Greptile #85 P1 "vanished lock clobbers holder").
+        continue
+      }
       logger.error(
         { agentName: input.agentName, op: input.op, errorName: errName(err) },
         '[fleet] lifecycle-lock: GetParameter failed while resolving contention — failing closed',
       )
       return { ok: false, reason: 'error', errorName: errName(err) }
     }
+
+    const ageMs = heldBy ? Date.now() - heldBy.ts : Infinity
+    if (heldBy && ageMs < LIFECYCLE_LOCK_TTL_MS) {
+      return { ok: false, reason: 'held', heldBy }
+    }
+
+    // Stale (older than TTL) or corrupt/unparseable but present — reclaim
+    // with Overwrite=true, stamping OUR token so the release ownership
+    // check below is meaningful. This is the one documented residual
+    // TOCTOU: two callers that both observe the SAME stale lock can both
+    // overwrite. Only reachable after a crash leaves a lock older than
+    // the TTL, on an admin-gated endpoint — proportionate.
+    try {
+      await ssmClient.send(
+        new PutParameterCommand({
+          Name: name,
+          Type: 'String',
+          Value: valueJson,
+          Overwrite: true,
+        }),
+      )
+      logger.warn(
+        {
+          agentName: input.agentName,
+          op: input.op,
+          reclaimedAgeMs: Number.isFinite(ageMs) ? ageMs : undefined,
+          priorHolder: heldBy,
+        },
+        '[fleet] lifecycle-lock: reclaimed a stale/abandoned lock',
+      )
+      return { ok: true, token }
+    } catch (err) {
+      logger.error(
+        { agentName: input.agentName, op: input.op, errorName: errName(err) },
+        '[fleet] lifecycle-lock: stale-lock reclaim failed — failing closed',
+      )
+      return { ok: false, reason: 'error', errorName: errName(err) }
+    }
   }
 
-  const ageMs = heldBy ? Date.now() - heldBy.ts : Infinity
-  if (heldBy && ageMs < LIFECYCLE_LOCK_TTL_MS) {
-    return { ok: false, reason: 'held', heldBy }
-  }
-
-  // Stale (or vanished, or corrupt) — reclaim with Overwrite=true. This
-  // is the documented TOCTOU window: only reachable after an abandoned
-  // lock, never during normal sub-TTL operation.
-  try {
-    await ssmClient.send(
-      new PutParameterCommand({
-        Name: name,
-        Type: 'String',
-        Value: JSON.stringify(value),
-        Overwrite: true,
-      }),
-    )
-    logger.warn(
-      {
-        agentName: input.agentName,
-        op: input.op,
-        reclaimedAgeMs: Number.isFinite(ageMs) ? ageMs : undefined,
-        priorHolder: heldBy,
-      },
-      '[fleet] lifecycle-lock: reclaimed a stale/abandoned lock',
-    )
-    return { ok: true }
-  } catch (err) {
-    logger.error(
-      { agentName: input.agentName, op: input.op, errorName: errName(err) },
-      '[fleet] lifecycle-lock: stale-lock reclaim failed — failing closed',
-    )
-    return { ok: false, reason: 'error', errorName: errName(err) }
-  }
+  // Exhausted the vanished-lock retry budget — the slot kept flipping
+  // between empty and held under contention. Fail closed; the caller
+  // 503s and the operator retries.
+  logger.error(
+    { agentName: input.agentName, op: input.op },
+    '[fleet] lifecycle-lock: acquire exhausted retries under contention — failing closed',
+  )
+  return { ok: false, reason: 'error', errorName: 'LockAcquireContention' }
 }
 
 /**
- * Release the per-agent lifecycle lock. Best-effort + idempotent: a
- * missing parameter (already released, or never acquired) is fine. A
- * release failure is logged but not raised — the lock self-expires
- * after {@link LIFECYCLE_LOCK_TTL_MS} via the staleness path, so a
- * dropped release degrades to a delayed unlock, never a permanent one.
+ * Release the per-agent lifecycle lock. Best-effort + idempotent.
+ *
+ * Ownership-checked (Greptile #85 P1 "release deletes successors"): the
+ * parameter is only deleted when the stored fencing `token` still
+ * matches the releaser's `token`. If this handler ran past the TTL and a
+ * newer op reclaimed the lock, the stored token won't match — so we
+ * leave the successor's lock in place instead of deleting it (which
+ * would let a third op acquire and run concurrently with the reclaimer).
+ *
+ * If the ownership read fails for any reason other than a clean
+ * not-found, we DON'T delete — better to let the lock self-expire after
+ * {@link LIFECYCLE_LOCK_TTL_MS} than risk clobbering a successor. A
+ * missing parameter (already released / never acquired) is a no-op. When
+ * no `token` is supplied (legacy/best-effort callers) the check is
+ * skipped and the parameter is deleted unconditionally.
  */
 export async function releaseLifecycleLock(
-  input: LifecycleLockInput,
+  input: LifecycleLockInput & { token?: string },
 ): Promise<void> {
   const name = lifecycleLockParamName(
     input.projectName,
     input.environment,
     input.agentName,
   )
+
+  if (input.token) {
+    try {
+      const got = await ssmClient.send(new GetParameterCommand({ Name: name }))
+      const holder = parseHolder(got.Parameter?.Value)
+      if (holder?.token && holder.token !== input.token) {
+        // We no longer own the lock — a newer op reclaimed it. Deleting
+        // here would strand the successor; leave it.
+        logger.warn(
+          { agentName: input.agentName, heldByToken: holder.token },
+          '[fleet] lifecycle-lock: release skipped — lock was reclaimed by a newer op (token mismatch)',
+        )
+        return
+      }
+    } catch (err) {
+      if (errName(err) === PARAM_NOT_FOUND) return // already released
+      logger.error(
+        { agentName: input.agentName, errorName: errName(err) },
+        `[fleet] lifecycle-lock: ownership read failed during release — leaving lock to self-expire after ${LIFECYCLE_LOCK_TTL_MS}ms rather than risk clobbering a successor`,
+      )
+      return
+    }
+  }
+
   try {
     await ssmClient.send(new DeleteParameterCommand({ Name: name }))
   } catch (err) {

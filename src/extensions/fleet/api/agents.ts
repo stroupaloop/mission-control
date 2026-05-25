@@ -1264,12 +1264,14 @@ export async function POST(request: NextRequest) {
     )
   } finally {
     // Release the lifecycle lock on every exit path (201, 409, 502, or
-    // a thrown-then-caught error). Best-effort + idempotent; the lock
-    // self-expires after the TTL if this release is ever dropped.
+    // a thrown-then-caught error). Ownership-checked via the fencing
+    // token so we never delete a successor's lock; best-effort +
+    // idempotent; the lock self-expires after the TTL if dropped.
     await releaseLifecycleLock({
       projectName: resolved.projectName,
       environment: resolved.environment,
       agentName: input.agentName,
+      token: lock.token,
     })
   }
 }

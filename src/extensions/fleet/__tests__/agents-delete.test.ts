@@ -1908,4 +1908,17 @@ describe('DELETE /api/fleet/agents/:name — lifecycle lock (#480 Risk 1)', () =
     expect(ssmCmdTypes()).toContain('PutParameterCommand') // acquire
     expect(ssmCmdTypes()).toContain('DeleteParameterCommand') // release in finally
   })
+
+  it('releases the lock even when teardown fails (finally)', async () => {
+    // beforeEach leaves the ssm default-resolve in place (acquire ok).
+    // Force step 1 DescribeServices to throw → catch → 502 → finally.
+    ecsSendMock.mockReset()
+    ecsSendMock.mockRejectedValueOnce(ssmErr('InternalServerError'))
+    const DELETE = await importHandler()
+
+    const resp = await DELETE(mkRequest(), mkParams())
+
+    expect(resp.status).toBe(502)
+    expect(ssmCmdTypes()).toContain('DeleteParameterCommand') // released despite failure
+  })
 })
