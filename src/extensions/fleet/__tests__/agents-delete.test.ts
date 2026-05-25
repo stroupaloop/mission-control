@@ -2008,6 +2008,8 @@ describe('DELETE /api/fleet/agents/:name — AWS-call hardening', () => {
     expect(ecsSendMock).toHaveBeenCalledTimes(1)
     expect(elbv2SendMock).not.toHaveBeenCalled()
     expect(logsSendMock).not.toHaveBeenCalled()
+  })
+})
 
 describe('DELETE /api/fleet/agents/:name — lifecycle lock (#480 Risk 1)', () => {
   const ssmErr = (name: string) => Object.assign(new Error(name), { name })
