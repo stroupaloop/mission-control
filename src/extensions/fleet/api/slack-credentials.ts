@@ -85,6 +85,20 @@ const ecsClient = new ECSClient({ region: AWS_REGION_AT_LOAD })
 // transient. Same shape as PR #50's slack-channels.ts fix.
 const NO_STORE = { 'Cache-Control': 'no-store' } as const
 
+// ender-stack#274: app-defined, non-retriable error names that the
+// operator-facing `detail` string is keyed to (gateway/init-config
+// missing, missing-ARN guards). These are intentional known-name
+// handling and pass through to the client verbatim; every other
+// (raw AWS SDK) name is redacted to UPSTREAM_ERROR_CODE. Module-level
+// so it isn't re-allocated on each error.
+const CLIENT_SAFE_ERROR_NAMES = new Set([
+  'TaskDefinitionGatewayMissing',
+  'TaskDefinitionInitMissing',
+  'PutSecretValueMissingArn',
+  'CreateSecretMissingArn',
+  'RegisterTaskDefinitionMissingArn',
+])
+
 const GATEWAY_CONTAINER_NAME = 'gateway'
 // ender-stack#286: OPENCLAW_SLACK_CONFIG_JSON is consumed by
 // init-config.sh inside the INIT container — gateway reads
@@ -793,13 +807,7 @@ export async function POST(
     // names that the operator-facing detail string is keyed to (gateway/
     // init-config missing, missing-ARN guards) are intentional known-name
     // handling and stay verbatim — only the raw AWS fallback is redacted.
-    const CLIENT_SAFE_ERROR_NAMES = new Set([
-      'TaskDefinitionGatewayMissing',
-      'TaskDefinitionInitMissing',
-      'PutSecretValueMissingArn',
-      'CreateSecretMissingArn',
-      'RegisterTaskDefinitionMissingArn',
-    ])
+    // CLIENT_SAFE_ERROR_NAMES is defined at module scope (see above).
     const clientErrorCode =
       error.name && CLIENT_SAFE_ERROR_NAMES.has(error.name)
         ? error.name

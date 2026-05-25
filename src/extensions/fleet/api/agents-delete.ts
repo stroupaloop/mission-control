@@ -290,7 +290,7 @@ export async function DELETE(
       )
       return NextResponse.json(
         upstreamErrorBody() satisfies DeleteAgentErrorResponse,
-        { status: 502 },
+        { status: 502, headers: { 'Cache-Control': 'no-store' } },
       )
     }
     if (classified.missing.length > 0) {

@@ -1765,6 +1765,9 @@ describe('DELETE /api/fleet/agents/:name — AWS-call hardening', () => {
     const DELETE = await importHandler()
     const resp = await DELETE(mkRequest(), mkParams())
     expect(resp.status).toBe(502)
+    // Consistent with every other fleet error path — a transient 502
+    // must not be cached by a proxy/CDN.
+    expect(resp.headers.get('Cache-Control')).toBe('no-store')
     const json = (await resp.json()) as { error: string }
     expect(json.error).toBe('UpstreamServiceError')
     // Defense-in-depth: handler bailed right after DescribeServices —
