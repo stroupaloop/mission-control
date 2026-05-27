@@ -176,6 +176,19 @@ describe('validateChannelInputs (#494 stateless checks)', () => {
     ])
     expect(err).toMatch(/must be an array/)
   })
+
+  it('rejects assignedUsers without a role (would be silently dropped otherwise)', () => {
+    // No role → normalizeChannelInput takes the legacy path and drops
+    // assignedUsers. Reject so the operator's allowlist intent isn't
+    // swallowed with a misleading 200.
+    const err = validateChannelInputs([
+      { id: 'C0123456789', assignedUsers: [OWNER] } as unknown as {
+        id: string
+        assignedUsers: string[]
+      },
+    ])
+    expect(err).toMatch(/assignedUsers requires a role/)
+  })
 })
 
 describe('extractOwnerSlackId (#494)', () => {
@@ -239,6 +252,20 @@ describe('validatePrimaryAssignment (#494 owner-aware)', () => {
 
   it('treats a malformed owner as no owner', () => {
     expect(validatePrimaryAssignment(primaryEmpty, 'bogus')).toMatch(
+      /no usable owner Slack ID/,
+    )
+  })
+
+  it('permits multiple primary channels (init-config injects owner into each)', () => {
+    // No single-primary constraint: init-config.sh loops over every
+    // primary and injects the owner. Both empty primaries are satisfied
+    // by a valid owner; with no owner, both would be rejected.
+    const twoPrimaries: ChannelInput[] = [
+      { id: 'C0123456789', role: 'primary', assignedUsers: [] },
+      { id: 'C9876543210', role: 'primary', assignedUsers: [] },
+    ]
+    expect(validatePrimaryAssignment(twoPrimaries, OWNER)).toBeNull()
+    expect(validatePrimaryAssignment(twoPrimaries, undefined)).toMatch(
       /no usable owner Slack ID/,
     )
   })

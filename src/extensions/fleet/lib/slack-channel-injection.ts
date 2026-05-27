@@ -288,6 +288,15 @@ export function validateChannelInputs(
       }
     }
     if ('assignedUsers' in c && c.assignedUsers !== undefined) {
+      // assignedUsers only has meaning alongside a role (it becomes
+      // groupAllowFrom downstream). Without a role, normalizeChannelInput
+      // routes the entry down the legacy path and silently DROPS
+      // assignedUsers — reject so the operator's allowlist intent isn't
+      // swallowed with a misleading 200. Symmetric to the
+      // accessMode-requires-active guard above.
+      if (typeof c.role !== 'string') {
+        return `Channel "${c.id}".assignedUsers requires a role (${VALID_ROLES.join(', ')})`
+      }
       if (!Array.isArray(c.assignedUsers)) {
         return `Channel "${c.id}".assignedUsers must be an array of Slack user IDs`
       }
@@ -332,6 +341,11 @@ export function extractOwnerSlackId(
  * Runs AFTER the live task-def is described (that's where the owner
  * lives), so call it post-describe in the handlers, before the
  * RegisterTaskDefinition mutation.
+ *
+ * Multiple `primary` channels are permitted: init-config.sh's owner
+ * auto-injection loops over EVERY channel with role==='primary' and
+ * injects the owner into each, so there's no single-primary constraint
+ * to enforce here — each primary is checked independently below.
  */
 export function validatePrimaryAssignment(
   channels: ChannelInput[] | undefined,
