@@ -73,6 +73,26 @@ describe('normalizeChannelInput (#494)', () => {
       { id: 'C0123456789', role: 'monitor' },
     )
   })
+
+  it('drops an explicit requireMention when a role is present (derived downstream)', () => {
+    // An operator migrating a legacy {id, requireMention} object by adding
+    // a role: requireMention is silently superseded by role(+accessMode)
+    // downstream. Lock that the wire shape carries no stale requireMention.
+    const out = normalizeChannelInput({
+      id: 'C0123456789',
+      role: 'active',
+      accessMode: 'exclusive',
+      requireMention: false,
+      assignedUsers: [OWNER],
+    })
+    expect('requireMention' in out).toBe(false)
+    expect(out).toEqual({
+      id: 'C0123456789',
+      role: 'active',
+      accessMode: 'exclusive',
+      assignedUsers: [OWNER],
+    })
+  })
 })
 
 describe('serializeChannelInputs (#494)', () => {

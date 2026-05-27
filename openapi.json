@@ -13369,7 +13369,7 @@
                             "id": { "type": "string", "pattern": "^[CGD][A-Z0-9]{8,12}$" },
                             "requireMention": { "type": "boolean", "description": "Legacy-only (#291). Omitted/ignored when role is present; init-config derives requireMention from role(+accessMode)." },
                             "role": { "type": "string", "enum": ["primary", "active", "monitor"], "description": "ender-stack#494 role taxonomy. primary = home channel (ambient, owner+assignedUsers); active = shared team channel (ambient when accessMode=preferred, else mention-gated); monitor = mention-only, assignedUsers ignored." },
-                            "assignedUsers": { "type": "array", "items": { "type": "string", "pattern": "^U[A-Z0-9]{8,12}$" }, "description": "Slack user IDs allowed to drive the agent in this channel (→ groupAllowFrom). Ignored for monitor; owner auto-injected for primary downstream." },
+                            "assignedUsers": { "type": "array", "items": { "type": "string", "pattern": "^U[A-Z0-9]{8,12}$" }, "description": "Slack user IDs allowed to drive the agent in this channel (→ groupAllowFrom). Accepted for monitor but has no effect (init-config drops it); owner auto-injected for primary downstream." },
                             "accessMode": { "type": "string", "enum": ["exclusive", "preferred"], "description": "Only meaningful for role=active (preferred flips requireMention false)." }
                           }
                         }
@@ -13667,7 +13667,7 @@
                             "assignedUsers": {
                               "type": "array",
                               "items": { "type": "string", "pattern": "^U[A-Z0-9]{8,12}$" },
-                              "description": "Slack user IDs allowed to drive the agent in this channel (→ groupAllowFrom). Ignored for monitor; owner auto-injected for primary downstream."
+                              "description": "Slack user IDs allowed to drive the agent in this channel (→ groupAllowFrom). Accepted for monitor but has no effect (init-config drops it); owner auto-injected for primary downstream."
                             },
                             "accessMode": {
                               "type": "string",
