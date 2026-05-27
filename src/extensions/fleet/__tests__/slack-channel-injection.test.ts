@@ -136,6 +136,19 @@ describe('validateChannelInputs (#494 stateless checks)', () => {
     expect(err).toMatch(/accessMode must be one of/)
   })
 
+  it('rejects accessMode on a non-active role', () => {
+    expect(
+      validateChannelInputs([
+        { id: 'C0123456789', role: 'primary', accessMode: 'exclusive' },
+      ]),
+    ).toMatch(/accessMode is only valid for role "active"/)
+    expect(
+      validateChannelInputs([
+        { id: 'C0123456789', role: 'monitor', accessMode: 'preferred' },
+      ]),
+    ).toMatch(/accessMode is only valid for role "active"/)
+  })
+
   it('rejects a malformed assignedUsers entry', () => {
     const err = validateChannelInputs([
       { id: 'C0123456789', role: 'active', assignedUsers: [OWNER, 'not-a-user'] },

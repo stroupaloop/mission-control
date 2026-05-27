@@ -85,9 +85,9 @@ export const ECS_ENV_VALUE_MAX = 4096
  * accepts but init-config silently drops. Same dual-contract shape
  * as the IAM-coverage check — keep both ends in lock-step.
  *
- * Note: templates/constraints.ts OWNER_SLACK_ID_RE is intentionally
- * looser (`U[A-Z0-9]{8,}`, no upper bound) for the create-agent
- * owner field; this one mirrors the channel-config consumer's bound.
+ * templates/constraints.ts OWNER_SLACK_ID_RE shares this exact bound
+ * (#494) so an owner accepted at create time is always one init-config
+ * will inject — no silent owner-drop between create and channel-config.
  */
 export const SLACK_USER_ID_RE = /^U[A-Z0-9]{8,12}$/
 
@@ -265,6 +265,13 @@ export function validateChannelInputs(
       ) {
         return `Channel "${c.id}".accessMode must be one of: ${VALID_ACCESS_MODES.join(', ')}`
       }
+      // accessMode only changes behavior for role=active (it flips
+      // requireMention). init-config.sh ignores it on primary/monitor
+      // and logs a warning; reject upstream so the operator's intent
+      // isn't silently dropped (MC is the authoritative validator).
+      if (c.role !== 'active') {
+        return `Channel "${c.id}".accessMode is only valid for role "active"`
+      }
     }
     if ('assignedUsers' in c && c.assignedUsers !== undefined) {
       if (!Array.isArray(c.assignedUsers)) {
@@ -417,7 +424,7 @@ export function serializeChannelInputs(
   const json = JSON.stringify({ channels })
   if (json.length > ECS_ENV_VALUE_MAX) {
     return {
-      error: `channels JSON (${json.length} chars) exceeds the ${ECS_ENV_VALUE_MAX}-char ECS env-value limit. Reduce the channel count.`,
+      error: `channels JSON (${json.length} chars) exceeds the ${ECS_ENV_VALUE_MAX}-char ECS env-value limit. Reduce the channel count or the number of assignedUsers per channel.`,
     }
   }
   return { json, channels }
