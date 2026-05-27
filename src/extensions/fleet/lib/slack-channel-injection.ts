@@ -37,6 +37,11 @@ export const SLACK_CONFIG_ENV_NAME = 'OPENCLAW_SLACK_CONFIG_JSON'
  * 502'ing. Cap at the application layer with a clear 400 so the
  * operator gets an actionable error instead of a cryptic AWS
  * failure. Round-1 audit on PR #48.
+ *
+ * #494: this count cap does NOT account for assignedUsers density —
+ * a role-form payload with many assignedUsers per channel can hit
+ * ECS_ENV_VALUE_MAX well below 50 channels. ECS_ENV_VALUE_MAX is the
+ * real guard; the count cap is a coarse first gate.
  */
 export const MAX_CHANNELS_PER_AGENT = 50
 
@@ -219,6 +224,15 @@ export function validateChannelIds(
  * format check as validateChannelIds, but accepts the object
  * form too; rejects malformed shapes (non-string id, non-boolean
  * requireMention).
+ *
+ * Validates the RAW (pre-dedup) request — every entry must be
+ * individually well-formed. A stateless-invalid entry is rejected
+ * even when a later duplicate for the same id would overwrite it
+ * under serializeChannelInputs' last-object-wins dedup. This is
+ * conservative-correct: rejecting a malformed payload is safer than
+ * silently discarding the bad entry. (The owner-aware
+ * validatePrimaryAssignment, by contrast, runs on the DEDUPED output
+ * since it's about the channel that actually deploys.)
  */
 export function validateChannelInputs(
   channels: ChannelInput[] | undefined,

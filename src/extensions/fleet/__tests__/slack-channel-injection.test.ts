@@ -95,6 +95,20 @@ describe('serializeChannelInputs (#494)', () => {
     )
   })
 
+  it('monitor with assignedUsers preserves them on the wire (MC permissive; init-config ignores)', () => {
+    // Documented contract: MC does not strip assignedUsers for monitor;
+    // init-config.sh is what drops them. This locks the serialized shape.
+    const r = serializeChannelInputs([
+      { id: 'C0123456789', role: 'monitor', assignedUsers: [OWNER] },
+    ])
+    if ('error' in r) throw new Error(r.error)
+    expect(parse(r.json).channels[0]).toEqual({
+      id: 'C0123456789',
+      role: 'monitor',
+      assignedUsers: [OWNER],
+    })
+  })
+
   it('dedupes by id; object overwrites earlier string', () => {
     const r = serializeChannelInputs([
       'C0123456789',
