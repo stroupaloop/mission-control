@@ -335,7 +335,7 @@ export function validatePrimaryAssignment(
         )
       : []
     if (assigned.length === 0) {
-      return `Channel "${c.id}" has role "primary" but no assignedUsers, and the agent has no owner Slack ID set. Add at least one assigned user, or set the agent owner.`
+      return `Channel "${c.id}" has role "primary" but no assignedUsers, and the agent has no usable owner Slack ID. Add at least one assigned user, or set the agent owner. (If an owner was set but its Slack ID isn't in the supported format — U + 8–12 alphanumerics — it's treated as unset.)`
     }
   }
   return null

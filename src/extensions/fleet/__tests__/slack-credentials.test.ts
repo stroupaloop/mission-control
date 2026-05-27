@@ -375,7 +375,7 @@ describe('POST /api/fleet/agents/:name/slack/credentials — happy path', () => 
     expect(resp.status).toBe(400)
     const json = (await resp.json()) as { error: string; detail?: string }
     expect(json.error).toBe('InvalidChannelList')
-    expect(json.detail).toContain('no owner Slack ID')
+    expect(json.detail).toContain('no usable owner Slack ID')
     // Rejected before the mutation — no new task-def registered.
     expect(
       ecsSendMock.mock.calls.some(

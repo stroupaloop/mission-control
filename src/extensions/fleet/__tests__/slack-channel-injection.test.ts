@@ -194,7 +194,7 @@ describe('validatePrimaryAssignment (#494 owner-aware)', () => {
 
   it('rejects primary + empty assignedUsers when no owner', () => {
     expect(validatePrimaryAssignment(primaryEmpty, undefined)).toMatch(
-      /no owner Slack ID/,
+      /no usable owner Slack ID/,
     )
   })
 
@@ -225,7 +225,7 @@ describe('validatePrimaryAssignment (#494 owner-aware)', () => {
 
   it('treats a malformed owner as no owner', () => {
     expect(validatePrimaryAssignment(primaryEmpty, 'bogus')).toMatch(
-      /no owner Slack ID/,
+      /no usable owner Slack ID/,
     )
   })
 })
