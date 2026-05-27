@@ -689,10 +689,13 @@ export async function PUT(
     // we read it from the live task-def just described. A primary
     // channel with no assignedUsers is rejected ONLY when the agent
     // has no owner (init-config auto-injects a valid owner downstream).
-    // Runs before RegisterTaskDefinition so a 400 leaves the live
-    // task-def untouched.
+    // Validates the DEDUPED payload (`dedupedChannels`) that actually
+    // deploys — not the raw request — so a duplicate primary entry
+    // whose later occurrence supplies assignedUsers isn't rejected on
+    // a stale earlier occurrence (Greptile P2). Runs before
+    // RegisterTaskDefinition so a 400 leaves the live task-def untouched.
     const primaryErr = validatePrimaryAssignment(
-      body.channels,
+      dedupedChannels,
       extractOwnerSlackId(td.containerDefinitions),
     )
     if (primaryErr) {

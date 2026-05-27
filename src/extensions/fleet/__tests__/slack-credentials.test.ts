@@ -998,6 +998,7 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     ecsSendMock.mockReset()
     smSendMock.mockReset()
     mockHarnessService()
+    mockTaskDef() // #494: task-def is described before the secrets write
     smSendMock.mockResolvedValueOnce({ ARN: undefined }) // SDK anomaly
     const POST = await importHandler()
     const resp = await POST(mkRequest(), mkParams())
@@ -1020,6 +1021,7 @@ describe('POST /api/fleet/agents/:name/slack/credentials — round-1 audit harde
     ecsSendMock.mockReset()
     smSendMock.mockReset()
     mockHarnessService()
+    mockTaskDef() // #494: task-def is described before the secrets write
     const notFound = Object.assign(new Error('not found'), {
       name: 'ResourceNotFoundException',
     })

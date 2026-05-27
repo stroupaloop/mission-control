@@ -1345,6 +1345,42 @@ describe('PUT /api/fleet/agents/:name/slack/channels — channels-only update (#
     expect(resp.status).toBe(200)
   })
 
+  it('#494: validates the DEDUPED payload — duplicate primary (empty then with-users) is accepted even with no owner', async () => {
+    // serializeChannelInputs last-writer-wins: the second entry
+    // (with assignedUsers) is what deploys, so the primary check must
+    // not reject on the stale empty first occurrence (Greptile P2).
+    mockHappyPath({ initEnv: [] }) // no owner
+    const PUT = await importPut()
+    const resp = await PUT(
+      mkPutRequest({
+        channels: [
+          { id: 'C0123456789', role: 'primary', assignedUsers: [] },
+          { id: 'C0123456789', role: 'primary', assignedUsers: ['U01ABCDEF23'] },
+        ],
+      }),
+      mkParams(),
+    )
+    expect(resp.status).toBe(200)
+    const registerCall = ecsSendMock.mock.calls.find(
+      (c) => c[0]?.__type === 'RegisterTaskDefinitionCommand',
+    )
+    const registerInput = registerCall![0].input as {
+      containerDefinitions: Array<{
+        name: string
+        environment?: Array<{ name: string; value: string }>
+      }>
+    }
+    const channelsEnv = registerInput.containerDefinitions
+      .find((c) => c.name === 'init-config')!
+      .environment!.find((e) => e.name === 'OPENCLAW_SLACK_CONFIG_JSON')!
+    const parsed = JSON.parse(channelsEnv.value) as {
+      channels: Array<Record<string, unknown>>
+    }
+    expect(parsed.channels).toEqual([
+      { id: 'C0123456789', role: 'primary', assignedUsers: ['U01ABCDEF23'] },
+    ])
+  })
+
   it('#494: rejects an unknown role with a clear 400', async () => {
     const PUT = await importPut()
     const resp = await PUT(
