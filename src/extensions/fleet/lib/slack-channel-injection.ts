@@ -74,10 +74,56 @@ export const CHANNEL_ID_RE = /^[CGD][A-Z0-9]{8,12}$/
 export const ECS_ENV_VALUE_MAX = 4096
 
 /**
- * Per-channel config (ender-stack#291). Today carries reply-mode
- * preference; the type is intentionally extensible if OpenClaw
- * surfaces more per-channel knobs (visibleReplies override,
- * customSystemPrompt, etc.).
+ * Slack user-ID format: `U` + 8-12 uppercase alphanumerics.
+ *
+ * PARITY CONTRACT (ender-stack#494): this must match the
+ * SLACK_USER_ID_RE that init-config.sh applies when it filters
+ * `assignedUsers` and auto-injects AGENT_OWNER_SLACK_ID
+ * (services/companion/openclaw/init/init-config.sh). MC is the
+ * authoritative validator; init-config sanitizes defensively. If
+ * one side's bound drifts, an operator can submit a user ID MC
+ * accepts but init-config silently drops. Same dual-contract shape
+ * as the IAM-coverage check — keep both ends in lock-step.
+ *
+ * Note: templates/constraints.ts OWNER_SLACK_ID_RE is intentionally
+ * looser (`U[A-Z0-9]{8,}`, no upper bound) for the create-agent
+ * owner field; this one mirrors the channel-config consumer's bound.
+ */
+export const SLACK_USER_ID_RE = /^U[A-Z0-9]{8,12}$/
+
+/**
+ * Env var on the init-config container that carries the agent's
+ * owner Slack ID (set by templates/openclaw.ts at create time).
+ * init-config.sh auto-injects this into every primary channel's
+ * assignedUsers, so a valid owner satisfies the primary-channel
+ * assignment requirement even when the operator leaves
+ * assignedUsers empty (#494).
+ */
+export const OWNER_SLACK_ID_ENV_NAME = 'AGENT_OWNER_SLACK_ID'
+
+/**
+ * Channel role taxonomy (ender-stack#378 / #494). Mirrors
+ * VALID_ROLES in init-config.sh — the downstream consumer derives
+ * requireMention + groupAllowFrom from these:
+ *   primary — agent's home channel; ambient response to owner +
+ *             assignedUsers (owner auto-injected downstream).
+ *   active  — shared team channel; ambient for assignedUsers when
+ *             accessMode='preferred', else mention-gated.
+ *   monitor — mention-only presence; assignedUsers ignored.
+ * Keep in lock-step with init-config.sh VALID_ROLES (parity contract).
+ */
+export const VALID_ROLES = ['primary', 'active', 'monitor'] as const
+export type ChannelRole = (typeof VALID_ROLES)[number]
+
+/** accessMode taxonomy — mirrors VALID_ACCESS_MODES in init-config.sh. */
+export const VALID_ACCESS_MODES = ['exclusive', 'preferred'] as const
+export type ChannelAccessMode = (typeof VALID_ACCESS_MODES)[number]
+
+/**
+ * Per-channel config (ender-stack#291, extended #494). Carries
+ * reply-mode preference (legacy) and the role taxonomy that drives
+ * groupAllowFrom enforcement downstream; the type is intentionally
+ * extensible if OpenClaw surfaces more per-channel knobs.
  */
 export interface ChannelConfig {
   id: string
@@ -85,8 +131,27 @@ export interface ChannelConfig {
    * If true (default): respond only on explicit @bot mentions
    * (matches OpenClaw's mention-gated default). If false:
    * respond to all messages in the channel.
+   *
+   * Legacy-only (#494): when `role` is present this is OMITTED from
+   * the serialized payload — init-config.sh derives requireMention
+   * from role(+accessMode), so emitting it here would carry an
+   * ignored/contradictory value on the wire.
    */
-  requireMention: boolean
+  requireMention?: boolean
+  /**
+   * #494 role taxonomy. When present, init-config.sh derives
+   * requireMention and enforces groupAllowFrom from assignedUsers.
+   * Absent → legacy mention-gated mode (no allowlist gating).
+   */
+  role?: ChannelRole
+  /**
+   * Slack user IDs allowed to drive the agent in this channel
+   * (→ groupAllowFrom downstream). Ignored for `monitor`. For
+   * `primary`, the agent owner is auto-injected downstream.
+   */
+  assignedUsers?: string[]
+  /** Only meaningful for `active` (flips requireMention to false). */
+  accessMode?: ChannelAccessMode
 }
 
 /**
@@ -105,11 +170,23 @@ export type ChannelInput = string | ChannelConfig
  */
 export function normalizeChannelInput(c: ChannelInput): ChannelConfig {
   if (typeof c === 'string') return { id: c, requireMention: true }
-  return {
-    id: c.id,
-    requireMention:
-      typeof c.requireMention === 'boolean' ? c.requireMention : true,
+  // Legacy object form (no role) — preserve byte-identical pre-#494
+  // output: {id, requireMention}. No role/assignedUsers/accessMode keys.
+  if (typeof c.role !== 'string') {
+    return {
+      id: c.id,
+      requireMention:
+        typeof c.requireMention === 'boolean' ? c.requireMention : true,
+    }
   }
+  // Role-based form (#494). requireMention is derived downstream by
+  // init-config.sh from role(+accessMode); omit it so the wire shape
+  // carries no ignored value. Carry assignedUsers/accessMode only when
+  // provided (JSON.stringify drops undefined → clean output).
+  const out: ChannelConfig = { id: c.id, role: c.role }
+  if (Array.isArray(c.assignedUsers)) out.assignedUsers = c.assignedUsers
+  if (c.accessMode !== undefined) out.accessMode = c.accessMode
+  return out
 }
 
 /**
@@ -166,6 +243,92 @@ export function validateChannelInputs(
       typeof c.requireMention !== 'boolean'
     ) {
       return `Channel "${c.id}".requireMention must be a boolean if provided`
+    }
+    // #494: role / accessMode / assignedUsers shape + enum + format
+    // checks. Mirrors init-config.sh's VALID_ROLES / VALID_ACCESS_MODES
+    // / SLACK_USER_ID_RE so MC rejects upstream rather than letting
+    // init-config silently sanitize. Fields are runtime-untrusted
+    // (the request shape guard only verifies `id` is a string), so
+    // guard defensively despite the ChannelConfig types.
+    if ('role' in c && c.role !== undefined) {
+      if (
+        typeof c.role !== 'string' ||
+        !VALID_ROLES.includes(c.role as ChannelRole)
+      ) {
+        return `Channel "${c.id}".role must be one of: ${VALID_ROLES.join(', ')}`
+      }
+    }
+    if ('accessMode' in c && c.accessMode !== undefined) {
+      if (
+        typeof c.accessMode !== 'string' ||
+        !VALID_ACCESS_MODES.includes(c.accessMode as ChannelAccessMode)
+      ) {
+        return `Channel "${c.id}".accessMode must be one of: ${VALID_ACCESS_MODES.join(', ')}`
+      }
+    }
+    if ('assignedUsers' in c && c.assignedUsers !== undefined) {
+      if (!Array.isArray(c.assignedUsers)) {
+        return `Channel "${c.id}".assignedUsers must be an array of Slack user IDs`
+      }
+      for (const u of c.assignedUsers) {
+        if (typeof u !== 'string' || !SLACK_USER_ID_RE.test(u)) {
+          return `Channel "${c.id}".assignedUsers entry "${String(u).slice(0, 30)}" doesn't match Slack user-ID format (U + 8-12 alphanumerics)`
+        }
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * Extract the agent's owner Slack ID from the init-config container's
+ * AGENT_OWNER_SLACK_ID env var (#494). Returns the trimmed value only
+ * if it matches SLACK_USER_ID_RE, else undefined. Used by the
+ * owner-aware primary-channel assignment check below — the handlers
+ * read this from the live task-def they already describe.
+ */
+export function extractOwnerSlackId(
+  containers: ContainerDefinition[],
+): string | undefined {
+  const init = containers.find((c) => c.name === INIT_CONTAINER_NAME)
+  const raw = init?.environment?.find(
+    (e) => e.name === OWNER_SLACK_ID_ENV_NAME,
+  )?.value
+  const trimmed = raw?.trim()
+  return trimmed && SLACK_USER_ID_RE.test(trimmed) ? trimmed : undefined
+}
+
+/**
+ * Owner-aware validation for primary channels (#494). A `primary`
+ * channel responds ambient (requireMention=false) and gates on
+ * assignedUsers → groupAllowFrom. An empty allowlist with no owner
+ * would degrade to mention-gated downstream (init-config safety
+ * fallback) — surfacing that as a clear 400 here is better UX than a
+ * silent degrade. Per the chosen policy: reject primary+empty ONLY
+ * when the agent has no valid owner Slack ID; a valid owner satisfies
+ * the requirement because init-config auto-injects it downstream.
+ *
+ * Runs AFTER the live task-def is described (that's where the owner
+ * lives), so call it post-describe in the handlers, before the
+ * RegisterTaskDefinition mutation.
+ */
+export function validatePrimaryAssignment(
+  channels: ChannelInput[] | undefined,
+  ownerSlackId: string | undefined,
+): string | null {
+  if (!channels || channels.length === 0) return null
+  const hasValidOwner =
+    typeof ownerSlackId === 'string' && SLACK_USER_ID_RE.test(ownerSlackId)
+  if (hasValidOwner) return null
+  for (const c of channels) {
+    if (typeof c === 'string' || c.role !== 'primary') continue
+    const assigned = Array.isArray(c.assignedUsers)
+      ? c.assignedUsers.filter(
+          (u) => typeof u === 'string' && SLACK_USER_ID_RE.test(u),
+        )
+      : []
+    if (assigned.length === 0) {
+      return `Channel "${c.id}" has role "primary" but no assignedUsers, and the agent has no owner Slack ID set. Add at least one assigned user, or set the agent owner.`
     }
   }
   return null
@@ -229,9 +392,11 @@ export interface SerializedChannelInputs {
  * was always true since normalizeChannelInput sets it to a
  * concrete boolean.
  *
- * The on-the-wire shape is
+ * The on-the-wire shape is the legacy form for mention-gated entries
  *   {"channels":[{"id":"C123","requireMention":true},...]}
- * which init-config.sh's normalizeChannelInput accepts.
+ * and the #494 role form for allowlist-gated entries
+ *   {"channels":[{"id":"C123","role":"primary","assignedUsers":["U..."]},...]}
+ * both of which init-config.sh's normalizeChannelInput accepts.
  */
 export function serializeChannelInputs(
   rawChannels: ChannelInput[] | undefined,

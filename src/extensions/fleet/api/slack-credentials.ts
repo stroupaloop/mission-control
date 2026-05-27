@@ -120,9 +120,11 @@ import {
   INIT_CONTAINER_NAME,
   MAX_CHANNELS_PER_AGENT,
   SLACK_CONFIG_ENV_NAME,
+  extractOwnerSlackId,
   injectChannelsIntoInit,
   serializeChannelInputs,
   validateChannelInputs,
+  validatePrimaryAssignment,
   type ChannelInput,
 } from '@/extensions/fleet/lib/slack-channel-injection'
 import { stripReadOnlyFields } from '@/extensions/fleet/lib/ecs-task-def-helpers'
@@ -606,6 +608,28 @@ export async function POST(
     // config env (templating script reads it to render
     // openclaw.json). Each helper throws a distinct error if its
     // target container is missing.
+    // #494: owner-aware primary-channel check. Owner Slack ID lives on
+    // the init-config container env (set at create time); read it from
+    // the live task-def just described. Reject a primary channel with
+    // no assignedUsers ONLY when the agent has no owner (init-config
+    // auto-injects a valid owner downstream). The 3 secrets were
+    // already written above (idempotent), but this returns before
+    // RegisterTaskDefinition so the live task-def is unchanged — the
+    // operator re-pastes after fixing the channel config.
+    const primaryErr = validatePrimaryAssignment(
+      body.channels,
+      extractOwnerSlackId(td.containerDefinitions),
+    )
+    if (primaryErr) {
+      return NextResponse.json(
+        {
+          error: 'InvalidChannelList',
+          detail: primaryErr,
+        } satisfies SlackCredentialsErrorResponse,
+        { status: 400, headers: NO_STORE },
+      )
+    }
+
     const containersWithSecrets = injectSecretsIntoGateway(
       td.containerDefinitions,
       arns,
