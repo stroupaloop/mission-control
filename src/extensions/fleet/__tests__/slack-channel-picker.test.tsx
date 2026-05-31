@@ -828,4 +828,49 @@ describe('<SlackChannelPicker />', () => {
       { id: 'G987654321', requireMention: true },
     ])
   })
+
+  it('#501 (Greptile PR #87): primary default fires once — re-add after a clear stays legacy', async () => {
+    fetchMock.mockResolvedValueOnce(okResp(sampleChannels))
+    render(<SlackChannelPicker agentName={AGENT} reloadKey={0} />)
+    await screen.findByTestId('slack-channel-row-C0123456789')
+    // First selection → primary default.
+    fireEvent.click(screen.getByTestId('slack-channel-row-C0123456789'))
+    expect(
+      (screen.getByTestId('slack-channel-role-C0123456789') as HTMLSelectElement)
+        .value,
+    ).toBe('primary')
+    // Clear it, then select a different channel — must NOT re-default to primary.
+    fireEvent.click(screen.getByTestId('slack-channel-row-C0123456789'))
+    fireEvent.click(screen.getByTestId('slack-channel-row-G987654321'))
+    expect(
+      (screen.getByTestId('slack-channel-role-G987654321') as HTMLSelectElement)
+        .value,
+    ).toBe('')
+    // Legacy → the @-only toggle is present.
+    expect(
+      screen.getByTestId('slack-channel-pill-mode-G987654321'),
+    ).toBeInTheDocument()
+  })
+
+  it('#501 (Greptile PR #87): accessMode survives a role round-trip (active→monitor→active)', async () => {
+    fetchMock.mockResolvedValueOnce(okResp(sampleChannels))
+    render(<SlackChannelPicker agentName={AGENT} reloadKey={0} />)
+    await screen.findByTestId('slack-channel-row-C0123456789')
+    fireEvent.click(screen.getByTestId('slack-channel-row-C0123456789'))
+    const role = () =>
+      screen.getByTestId('slack-channel-role-C0123456789') as HTMLSelectElement
+    fireEvent.change(role(), { target: { value: 'active' } })
+    fireEvent.change(
+      screen.getByTestId('slack-channel-access-mode-C0123456789'),
+      { target: { value: 'preferred' } },
+    )
+    // Round-trip away and back.
+    fireEvent.change(role(), { target: { value: 'monitor' } })
+    fireEvent.change(role(), { target: { value: 'active' } })
+    expect(
+      (screen.getByTestId(
+        'slack-channel-access-mode-C0123456789',
+      ) as HTMLSelectElement).value,
+    ).toBe('preferred')
+  })
 })

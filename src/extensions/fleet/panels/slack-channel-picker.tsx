@@ -168,6 +168,13 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
   // but the inconsistency with the credentials-form's mountedRef
   // pattern was real.
   const mountedRef = useRef(true)
+  // #501 (Greptile PR #87): the role=primary first-channel default
+  // fires at most ONCE per context (mount / agent / reloadKey). Without
+  // this latch, clearing the selection mid-edit and re-adding a channel
+  // would silently re-default it to primary. The latch lets a genuine
+  // new-agent first channel default to primary while a re-add after a
+  // clear stays legacy (operator opts into a role explicitly).
+  const firstDefaultAppliedRef = useRef(false)
 
   // Cleanup on unmount.
   useEffect(() => {
@@ -186,6 +193,7 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
   // expectation.
   useEffect(() => {
     setSelected(new Map())
+    firstDefaultAppliedRef.current = false
   }, [agentName, reloadKey])
 
   // Fetch channels when agentName / reloadKey / retryKey changes.
@@ -286,19 +294,25 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
     state.kind === 'success' ? state.ownerSlackId : undefined
 
   const toggleChannel = (id: string) => {
+    // #501: the FIRST channel selected on a fresh picker defaults to the
+    // owner-gated home channel — role=primary with the owner prefilled
+    // into assignedUsers. This flips new agents off the legacy
+    // workspace-open mention-gated shape (the #494 bug). The latch
+    // (Greptile PR #87) ensures this fires once per context: after the
+    // operator clears the selection mid-edit, a re-add stays legacy so
+    // they opt into a role explicitly rather than silently re-priming.
+    const applyPrimaryDefault =
+      selected.size === 0 &&
+      !selected.has(id) &&
+      !firstDefaultAppliedRef.current
+    if (applyPrimaryDefault) firstDefaultAppliedRef.current = true
     setSelected((prev) => {
       const next = new Map(prev)
       if (next.has(id)) {
         next.delete(id)
         return next
       }
-      // #501: the FIRST channel on a new agent defaults to the
-      // owner-gated home channel — role=primary with the owner
-      // prefilled into assignedUsers. This flips new agents off the
-      // legacy workspace-open mention-gated shape (the #494 bug).
-      // Subsequent channels start legacy (no role) so the operator
-      // opts into a role explicitly.
-      if (prev.size === 0) {
+      if (applyPrimaryDefault) {
         next.set(id, {
           requireMention: true,
           role: 'primary',
@@ -328,26 +342,28 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
   }
 
   /**
-   * #501: set (or clear) a channel's role. Transitions:
-   *   - undefined → legacy mention-gated (drop role/assignedUsers/accessMode).
-   *   - primary → prefill the owner into assignedUsers (dedup), no accessMode.
-   *   - active  → keep assignedUsers, default accessMode='exclusive'.
-   *   - monitor → keep assignedUsers in state (omitted on the wire),
-   *               drop accessMode.
+   * #501: set (or clear) a channel's role. assignedUsers + accessMode are
+   * PRESERVED across every transition (Greptile PR #87 + Claude audit), so
+   * toggling roles never silently discards the operator's work — e.g.
+   * active(preferred) → monitor → active restores `preferred` instead of
+   * resetting to `exclusive`. The PUT body builder omits the fields that
+   * don't apply to the chosen role (assignedUsers for monitor; accessMode
+   * for everything but active; both for legacy), so carrying them in state
+   * is wire-safe.
+   *   - undefined → legacy mention-gated (role cleared; fields kept in state).
+   *   - primary → prefill the owner into assignedUsers (dedup).
+   *   - active  → default accessMode to 'exclusive' only if none was set.
    */
   const setChannelRole = (id: string, role: ChannelRole | undefined) => {
     setSelected((prev) => {
       const cur = prev.get(id)
       if (!cur) return prev
       const next = new Map(prev)
-      if (role === undefined) {
-        next.set(id, { requireMention: cur.requireMention })
-        return next
-      }
       const updated: SelectedChannelState = {
         requireMention: cur.requireMention,
         role,
         assignedUsers: cur.assignedUsers ?? [],
+        accessMode: cur.accessMode,
       }
       if (role === 'primary') {
         const users = updated.assignedUsers ?? []
