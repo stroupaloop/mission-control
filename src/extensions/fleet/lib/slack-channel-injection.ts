@@ -428,6 +428,9 @@ export function validateAtLeastOneAllowlisted(
   const gated = channels.some((c) => {
     if (typeof c === 'string') return false
     if (c.role === 'primary') return hasValidAssigned(c) || hasValidOwner
+    // accessMode is intentionally NOT checked: it flips requireMention
+    // (ambient vs mention-gated), not the allowlist. active+preferred and
+    // active+exclusive both emit groupAllowFrom iff assignedUsers is set.
     if (c.role === 'active') return hasValidAssigned(c)
     return false
   })

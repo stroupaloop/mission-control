@@ -536,6 +536,11 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
   // auto-injects), or role=active with assignedUsers (either accessMode).
   // monitor + role-less never qualify. Same predicate the server returns,
   // so a valid local selection always round-trips.
+  //
+  // KEEP IN SYNC with validateAtLeastOneAllowlisted (the server source of
+  // truth): the two operate on different shapes (SelectedChannelState here
+  // vs ChannelInput[] there) so the predicate is mirrored, not shared —
+  // adding a new gating role/accessMode means updating both.
   const noAllowlistError = useMemo(() => {
     if (selected.size === 0) return null
     const hasOwner = !!ownerSlackId && SLACK_USER_ID_RE.test(ownerSlackId)

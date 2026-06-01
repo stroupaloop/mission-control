@@ -338,8 +338,9 @@ describe('validateAtLeastOneAllowlisted (#535 resolved-groupAllowFrom)', () => {
   })
 
   it('rejects primary with neither assignedUsers nor a usable owner', () => {
-    // No resolved groupAllowFrom (validatePrimaryAssignment catches the
-    // same case with a more specific message; this guard agrees).
+    // Isolation coverage of the function's own contract. In the server flow
+    // this exact case is unreachable here — validatePrimaryAssignment fires
+    // FIRST with a more specific message; this guard only agrees as backstop.
     expect(
       validateAtLeastOneAllowlisted(
         [{ id: 'C0123456789', role: 'primary', assignedUsers: [] }],
