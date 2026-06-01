@@ -427,14 +427,21 @@ export function renderTaskDefinition(
           : []),
       ]
     : []
-  const kbInitSecrets = env.kbPrivateKeySecretArn
-    ? [
-        {
-          name: 'KB_GITHUB_APP_PRIVATE_KEY',
-          valueFrom: env.kbPrivateKeySecretArn,
-        },
-      ]
-    : []
+  // Gate the PEM secret on the SAME kbRepoUrl condition as kbInitEnv, not on
+  // the ARN alone. A no-KB deployment carrying a stale
+  // MC_KB_GITHUB_APP_PRIVATE_KEY_SECRET_ARN (no MC_KB_REPO_URL) must still
+  // render an unchanged task-def — otherwise ECS would try to resolve an
+  // unused KB_GITHUB_APP_PRIVATE_KEY and could fail launch if that ARN is
+  // stale / outside the role's permissions (Greptile on PR #89).
+  const kbInitSecrets =
+    env.kbRepoUrl && env.kbPrivateKeySecretArn
+      ? [
+          {
+            name: 'KB_GITHUB_APP_PRIVATE_KEY',
+            valueFrom: env.kbPrivateKeySecretArn,
+          },
+        ]
+      : []
 
   const logConfig = (streamPrefix: string) => ({
     logDriver: 'awslogs' as const,

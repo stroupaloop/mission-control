@@ -736,6 +736,12 @@ export async function POST(request: NextRequest) {
   // requires minting them after the conflict check. Until the step
   // runs they're empty strings; the create flow never reaches the
   // template render without them set.
+  // #522: single "KB enabled" gate — a configured repo URL. The PEM secret
+  // ARN is only honored (both for the task-def secrets[] and the per-agent
+  // exec-role grant below) when KB is actually enabled, so a stale ARN env
+  // var with no repo URL is inert.
+  const kbSecretArn = resolved.kbRepoUrl ? resolved.kbPrivateKeySecretArn : ''
+
   const env: OpenClawAgentEnv = {
     region: resolved.region,
     prefix: resolved.prefix,
@@ -747,11 +753,14 @@ export async function POST(request: NextRequest) {
     subnetIds: resolved.subnetIds,
     securityGroupId: resolved.securityGroupId,
     litellmAlbDnsName: resolved.litellmAlbDnsName,
-    // #522: fleet-wide shared KB. Empty when this deployment has no KB
-    // configured — the template no-ops the KB env/secret in that case.
+    // #522: fleet-wide shared KB. KB is enabled iff a repo URL is configured;
+    // the PEM secret ARN follows that same gate so a stale
+    // MC_KB_GITHUB_APP_PRIVATE_KEY_SECRET_ARN left over from a prior/partial
+    // deployment (no MC_KB_REPO_URL) neither injects an unused secret nor
+    // widens the per-agent exec role's secret access (Greptile on PR #89).
     kbRepoUrl: resolved.kbRepoUrl,
     kbGithubAppId: resolved.kbGithubAppId,
-    kbPrivateKeySecretArn: resolved.kbPrivateKeySecretArn,
+    kbPrivateKeySecretArn: kbSecretArn,
     tags: buildTags(resolved),
   }
 
@@ -941,8 +950,8 @@ export async function POST(request: NextRequest) {
       // lives outside the companion-openclaw-{agent}-* prefix the other
       // statements scope to. Effective only because the ender-stack
       // permissions boundary (BoundaryFleetKBSecretRead) also permits it.
-      // Empty when no KB → no statement emitted.
-      kbPrivateKeySecretArn: resolved.kbPrivateKeySecretArn,
+      // Empty when no KB (or a stale ARN with no repo URL) → no statement.
+      kbPrivateKeySecretArn: kbSecretArn,
     })
     // Only mark roles for rollback if mintAgentRoles actually
     // CREATED them. Recovery-via-GetRole (alreadyExisted=true) means

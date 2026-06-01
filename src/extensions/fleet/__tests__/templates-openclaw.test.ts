@@ -514,6 +514,24 @@ describe('renderTaskDefinition', () => {
     )
   })
 
+  it('#522: does NOT inject the KB PEM secret when an ARN is set but kbRepoUrl is empty (stale-ARN guard)', () => {
+    // A no-KB deployment carrying a leftover MC_KB_GITHUB_APP_PRIVATE_KEY_SECRET_ARN
+    // (no MC_KB_REPO_URL) must render an unchanged task-def — the secret is
+    // gated on kbRepoUrl, not on the ARN alone (Greptile on PR #89).
+    const envStaleArn: OpenClawAgentEnv = {
+      ...fixtureEnv,
+      kbPrivateKeySecretArn:
+        'arn:aws:secretsmanager:us-east-1:111:secret:ender-stack/dev/kb-github-app-private-key-Stale1',
+    }
+    const taskDef = renderTaskDefinition(fixtureInput, envStaleArn)
+    for (const name of ['init-config', 'gateway']) {
+      const c = findContainer(taskDef, name)
+      expect((c?.secrets ?? []).map((s) => s.name)).not.toContain(
+        'KB_GITHUB_APP_PRIVATE_KEY',
+      )
+    }
+  })
+
   it('#522: emits NO KB env/secret on either container when KB is unconfigured (no regression)', () => {
     // fixtureEnv has no kb* fields → pre-#522 behavior preserved.
     const taskDef = renderTaskDefinition(fixtureInput, fixtureEnv)
