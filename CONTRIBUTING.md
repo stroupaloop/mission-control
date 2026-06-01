@@ -52,6 +52,16 @@ pnpm dev
 - **Type checking**: `pnpm typecheck`
 - **Lint**: `pnpm lint`
 
+### Testing AWS handlers
+
+Handlers under `src/extensions/fleet/` that call AWS (ECS, ELBv2, IAM, Secrets
+Manager, CloudWatch Logs) are tested with **hand-rolled vitest mocks** that
+assert the exact command sequence and parameters — we deliberately do **not**
+use LocalStack or moto. See
+[`docs/architecture/adr-001-no-localstack-aws-mocking.md`](docs/architecture/adr-001-no-localstack-aws-mocking.md)
+for the rationale. Use `src/extensions/fleet/__tests__/redeploy.test.ts` as the
+exemplar when adding a new AWS-handler test.
+
 ## Reporting Bugs
 
 Open an issue with:
