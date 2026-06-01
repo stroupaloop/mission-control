@@ -89,6 +89,10 @@ const MAX_EXPLICIT_SERVICES = 200
 // Parallel UpdateService cap. ECS throttles aggressive callers; 5 keeps the
 // batch moving without tripping rate limits on large fleets.
 const UPDATE_CONCURRENCY = 5
+// Parallel DescribeServices cap during discovery — same rationale. An
+// unbounded fan-out on a large cluster can self-throttle and 502 the whole
+// rollout before any UpdateService fires.
+const DESCRIBE_CONCURRENCY = 5
 // Count above which an explicit confirmation string is required.
 const CONFIRM_THRESHOLD = 5
 
@@ -162,8 +166,13 @@ async function describeInChunks(
   for (let i = 0; i < names.length; i += MAX_SERVICES_PER_DESCRIBE) {
     chunks.push(names.slice(i, i + MAX_SERVICES_PER_DESCRIBE))
   }
-  const descs = await Promise.all(
-    chunks.map(async (chunk) => {
+  // Bound the describe fan-out the same way the update phase is bounded —
+  // an unbounded Promise.all over every chunk can self-throttle on a large
+  // cluster and reject the whole discovery before any rollout starts.
+  const descs = await mapWithConcurrency(
+    chunks,
+    DESCRIBE_CONCURRENCY,
+    async (chunk) => {
       const t = withTimeout()
       try {
         return await ecsClient.send(
@@ -177,7 +186,7 @@ async function describeInChunks(
       } finally {
         t.clear()
       }
-    }),
+    },
   )
   const services: Service[] = []
   let hasNonMissing = false
@@ -274,12 +283,16 @@ function isBulkRedeployRequest(body: unknown): body is BulkRedeployRequest {
   if (b.confirm !== undefined && typeof b.confirm !== 'string') return false
   if (f.mode === 'explicit') {
     if (!Array.isArray(f.services) || f.services.length === 0) return false
-    if (f.services.length > MAX_EXPLICIT_SERVICES) return false
     if (
       !f.services.every((s) => typeof s === 'string' && s.trim().length > 0)
     ) {
       return false
     }
+    // Cap on the DEDUPED set, not the raw array, so a client that accidentally
+    // repeats a name (e.g. 201 copies of one service) isn't rejected when the
+    // real target set is tiny. The handler dedups identically before describe.
+    const uniqueServices = new Set((f.services as string[]).map((s) => s.trim()))
+    if (uniqueServices.size > MAX_EXPLICIT_SERVICES) return false
   }
   if (f.mode === 'by-tag') {
     if (typeof f.tagKey !== 'string' || f.tagKey.trim().length === 0) {
@@ -350,7 +363,13 @@ export async function POST(request: NextRequest) {
 
   // ender-stack#272: rate-limit this mutating endpoint before any AWS call.
   const rateCheck = mutationLimiter(request)
-  if (rateCheck) return rateCheck
+  if (rateCheck) {
+    // mutationLimiter's 429 doesn't carry no-store; add it so this mutating
+    // endpoint never has a cacheable response path (a proxy could otherwise
+    // serve a stale 429 past the rate-limit window).
+    rateCheck.headers.set('Cache-Control', 'no-store')
+    return rateCheck
+  }
 
   let body: unknown
   try {
@@ -486,7 +505,12 @@ export async function POST(request: NextRequest) {
           mode,
           count: targets.length,
           failed,
-          services: targets,
+          // Cap the inline list so a 200-agent `all` rollout doesn't bloat the
+          // security_events TEXT column; count + mode carry the audit signal.
+          services:
+            targets.length <= 20
+              ? targets
+              : [...targets.slice(0, 20), `…and ${targets.length - 20} more`],
           actor,
         }),
       })

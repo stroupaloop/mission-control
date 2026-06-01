@@ -418,6 +418,19 @@ describe('POST /api/fleet/bulk-redeploy — input validation', () => {
     expect(sendMock).not.toHaveBeenCalled()
   })
 
+  it('accepts explicit mode with duplicate names that dedup under the cap', async () => {
+    // The 200-cap is on the DEDUPED set: 201 copies of one valid name resolve
+    // to a single target and must not be rejected as InvalidRequestShape.
+    registry = [mkService('agent-a')]
+    const POST = await importHandler()
+    const dupes = Array.from({ length: 201 }, () => 'agent-a')
+    const resp = await POST(
+      mkRequest({ filter: { mode: 'explicit', services: dupes } }),
+    )
+    expect(resp.status).toBe(202)
+    expect((await resp.json()).count).toBe(1)
+  })
+
   it('400s on a non-JSON body', async () => {
     const POST = await importHandler()
     const bad = {
@@ -454,6 +467,9 @@ describe('POST /api/fleet/bulk-redeploy — auth + rate limit', () => {
     const POST = await importHandler()
     const resp = await POST(mkRequest({ filter: { mode: 'all' } }))
     expect(resp.status).toBe(429)
+    // The handler stamps no-store onto the limiter's 429 so no mutating
+    // response path is cacheable.
+    expect(resp.headers.get('Cache-Control')).toBe('no-store')
     expect(sendMock).not.toHaveBeenCalled()
   })
 })

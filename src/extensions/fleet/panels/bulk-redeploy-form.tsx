@@ -144,6 +144,9 @@ export function BulkRedeployForm({
         return
       }
       setResult(body as BulkRedeployResponse)
+      // Clear submitting so the success screen's Esc / backdrop / ✕ dismissal
+      // paths (all gated on !submitting) work, not just the Done button.
+      setSubmitting(false)
       onDone()
     } catch {
       setError('NetworkError')
