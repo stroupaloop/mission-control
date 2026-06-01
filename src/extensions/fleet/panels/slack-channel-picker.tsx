@@ -547,7 +547,7 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
     }
     // Shared with the server's validateAtLeastOneAllowlisted so a 400
     // surfaced through the network layer reads identically to this
-    // client-side block (claude audit, PR #91).
+    // client-side block.
     return NO_ALLOWLIST_BLOCK_MESSAGE
   }, [selected, ownerSlackId])
 
