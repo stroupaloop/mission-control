@@ -240,6 +240,20 @@ interface ResolvedEnv {
    */
   litellmMasterKeySecretArn: string
   sharedAlbName: string
+  /**
+   * #522: shared KB GitHub App wiring, sourced from the MC service's
+   * `MC_KB_*` env (set by terraform/modules/mission-control when
+   * kb_repo_url is configured). Fleet-wide — every MC-created agent
+   * inherits the same KB. All optional: when `kbRepoUrl` is empty the
+   * template emits no KB env/secret and getMissingEnv() does NOT flag
+   * them, so non-KB deployments are unaffected (no regression).
+   * `kbPrivateKeySecretArn` is the ARN of the PEM (not the key itself);
+   * the per-agent execution role pulls it at task launch, which is why
+   * mintAgentRoles also grants a read on it (FleetKBSecretRead).
+   */
+  kbRepoUrl: string
+  kbGithubAppId: string
+  kbPrivateKeySecretArn: string
 }
 
 /**
@@ -298,6 +312,13 @@ function resolveEnv(): ResolvedEnv {
     litellmMasterKeySecretArn:
       process.env.MC_LITELLM_MASTER_KEY_SECRET_ARN || '',
     sharedAlbName: `${fleetPrefix.prefix}-agents-shared`,
+    // #522: shared KB GitHub App wiring. Optional — empty MC_KB_REPO_URL
+    // means this deployment has no shared KB, and the agent template + role
+    // minting both no-op the KB path. NOT added to getMissingEnv().
+    kbRepoUrl: process.env.MC_KB_REPO_URL || '',
+    kbGithubAppId: process.env.MC_KB_GITHUB_APP_ID || '',
+    kbPrivateKeySecretArn:
+      process.env.MC_KB_GITHUB_APP_PRIVATE_KEY_SECRET_ARN || '',
   }
 }
 
@@ -726,6 +747,11 @@ export async function POST(request: NextRequest) {
     subnetIds: resolved.subnetIds,
     securityGroupId: resolved.securityGroupId,
     litellmAlbDnsName: resolved.litellmAlbDnsName,
+    // #522: fleet-wide shared KB. Empty when this deployment has no KB
+    // configured — the template no-ops the KB env/secret in that case.
+    kbRepoUrl: resolved.kbRepoUrl,
+    kbGithubAppId: resolved.kbGithubAppId,
+    kbPrivateKeySecretArn: resolved.kbPrivateKeySecretArn,
     tags: buildTags(resolved),
   }
 
@@ -910,6 +936,13 @@ export async function POST(request: NextRequest) {
       logGroupPrefix: resolved.logGroupPrefix,
       projectName: resolved.projectName,
       environment: resolved.environment,
+      // #522: when a shared KB is configured, grant the per-agent exec role
+      // read on the KB PEM (FleetKBSecretRead). The PEM is org-shared, so it
+      // lives outside the companion-openclaw-{agent}-* prefix the other
+      // statements scope to. Effective only because the ender-stack
+      // permissions boundary (BoundaryFleetKBSecretRead) also permits it.
+      // Empty when no KB → no statement emitted.
+      kbPrivateKeySecretArn: resolved.kbPrivateKeySecretArn,
     })
     // Only mark roles for rollback if mintAgentRoles actually
     // CREATED them. Recovery-via-GetRole (alreadyExisted=true) means
