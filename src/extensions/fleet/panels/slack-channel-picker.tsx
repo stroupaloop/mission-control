@@ -7,6 +7,7 @@ import type {
   SlackChannelsErrorResponse,
 } from '../api/slack-channels'
 import {
+  NO_ALLOWLIST_BLOCK_MESSAGE,
   SLACK_USER_ID_RE,
   type ChannelConfig,
   type ChannelInput,
@@ -544,7 +545,10 @@ export function SlackChannelPicker({ agentName, reloadKey }: Props) {
       if (s.role === 'primary' && (hasValidAssigned(s) || hasOwner)) return null
       if (s.role === 'active' && hasValidAssigned(s)) return null
     }
-    return 'No channel restricts who can @-mention this agent — every selected channel would respond to any workspace user. Designate a “primary” home channel (the owner is added automatically), or add assigned users to an “active” channel. (“monitor” and role-less channels don’t gate who can mention.)'
+    // Shared with the server's validateAtLeastOneAllowlisted so a 400
+    // surfaced through the network layer reads identically to this
+    // client-side block (claude audit, PR #91).
+    return NO_ALLOWLIST_BLOCK_MESSAGE
   }, [selected, ownerSlackId])
 
   const overCap = selected.size > MAX_CHANNELS_PER_AGENT

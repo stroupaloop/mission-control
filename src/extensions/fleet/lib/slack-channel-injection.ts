@@ -398,7 +398,21 @@ export function validatePrimaryAssignment(
  * Returns null for an empty/undefined list (the no-channels case is
  * handled by the caller). Returns an error string when the non-empty
  * list has no allowlist-gated channel.
+ *
+ * Accepts `ChannelInput[]` (mirrors validatePrimaryAssignment's signature
+ * so both guards share a call contract). On the PUT path the argument is
+ * always `dedupedChannels` (`ChannelConfig[]`, the normalized output of
+ * serializeChannelInputs), so the `typeof c === 'string'` branch is
+ * defensive — raw string inputs never reach this in production — and is
+ * kept only for signature parity + direct unit-test calls.
  */
+export const NO_ALLOWLIST_BLOCK_MESSAGE =
+  'No channel restricts who can @-mention this agent — every selected ' +
+  'channel would respond to any workspace user. Designate a "primary" ' +
+  'home channel (the owner is added automatically), or add assigned ' +
+  'users to an "active" channel, so the who-can-mention allowlist is ' +
+  'applied. ("monitor" and role-less channels don\'t gate who can mention.)'
+
 export function validateAtLeastOneAllowlisted(
   channels: ChannelInput[] | undefined,
   ownerSlackId: string | undefined,
@@ -418,7 +432,7 @@ export function validateAtLeastOneAllowlisted(
     return false
   })
   if (gated) return null
-  return `No channel restricts who can @-mention this agent — every selected channel would respond to ANY workspace user. Designate a "primary" home channel (the owner is added automatically), or set assigned users on an "active" channel, so the who-can-mention allowlist is applied. ("monitor" and role-less channels don't gate who can mention.)`
+  return NO_ALLOWLIST_BLOCK_MESSAGE
 }
 
 export interface SerializedChannels {
