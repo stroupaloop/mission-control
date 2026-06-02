@@ -258,6 +258,14 @@ interface ResolvedEnv {
    * on restart. Defaults to `{}` when the env var is absent or unparseable.
    */
   efsAccessPoints: Record<string, { config: string; workspace: string }>
+  /**
+   * #559: whether MC_AGENT_EFS_ACCESS_POINTS was present AND a valid JSON object.
+   * False when the env var is absent or malformed — a fleet-level deploy-contract
+   * gap (Terraform hasn't published the map) that getMissingEnv turns into a 500,
+   * the same class as MC_AGENT_EFS_FILE_SYSTEM_ID. Distinct from "agent missing
+   * from a valid map", which is a per-agent 422 (Greptile P2 on PR #94).
+   */
+  efsAccessPointsConfigured: boolean
   sharedAlbName: string
   /**
    * #522: shared KB GitHub App wiring, sourced from the MC service's
@@ -275,33 +283,44 @@ interface ResolvedEnv {
   kbPrivateKeySecretArn: string
 }
 
+/** EFS access point ids have the shape `fsap-<alphanumeric>`. Reject anything
+ *  else (whitespace, `not-an-ap`, empty) so a malformed id never passes the
+ *  early per-agent guard and creates orphan resources before ECS rejects the
+ *  task-def (#559, Greptile P2 on PR #94). */
+const EFS_ACCESS_POINT_ID_RE = /^fsap-[A-Za-z0-9]+$/
+
 /**
  * #559: parse MC_AGENT_EFS_ACCESS_POINTS into a validated agent→AP-pair map.
  * The value is published by ender-stack Terraform as a JSON object keyed by
  * agent name: `{ "<agent>": { "config": "fsap-…", "workspace": "fsap-…" } }`.
  *
- * Defensive by design: a missing, non-JSON, non-object, or wrong-shaped value
- * degrades to an empty map. The consequence is a precise per-agent 422 at create
- * time ("no EFS access point provisioned for <agent>") rather than a confusing
- * SDK error deep in the create flow — and the file-system-id requirement in
- * getMissingEnv still fails fast on a fully-unconfigured deployment. Only entries
- * with both a non-empty `config` and `workspace` string are kept.
+ * Returns `null` when the env var is **absent or not a JSON object** — a
+ * fleet-level deploy-contract gap (Terraform hasn't published the map), which
+ * `getMissingEnv` turns into a 500 ConfigurationError, mirroring how
+ * MC_AGENT_EFS_FILE_SYSTEM_ID is handled. Returns a (possibly empty) **map** when
+ * the env var is a valid object: only entries whose `config` + `workspace` are
+ * well-formed `fsap-` ids are kept, so a single malformed entry surfaces as a
+ * precise per-agent 422 ("no EFS access point provisioned for <agent>") before
+ * any resource is created — not a confusing SDK error deep in the create flow.
  */
 function parseEfsAccessPoints(
   raw: string | undefined,
-): Record<string, { config: string; workspace: string }> {
-  if (!raw) return {}
+): Record<string, { config: string; workspace: string }> | null {
+  if (!raw) return null
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
   } catch {
     logger.error(
-      '[fleet] MC_AGENT_EFS_ACCESS_POINTS is not valid JSON — treating as empty; per-agent create will 422 until fixed',
+      '[fleet] MC_AGENT_EFS_ACCESS_POINTS is not valid JSON — treating as unconfigured (create will 500 until fixed)',
     )
-    return {}
+    return null
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return {}
+    logger.error(
+      '[fleet] MC_AGENT_EFS_ACCESS_POINTS is not a JSON object — treating as unconfigured (create will 500 until fixed)',
+    )
+    return null
   }
   const out: Record<string, { config: string; workspace: string }> = {}
   for (const [agent, value] of Object.entries(
@@ -311,9 +330,9 @@ function parseEfsAccessPoints(
     const { config, workspace } = value as Record<string, unknown>
     if (
       typeof config === 'string' &&
-      config.length > 0 &&
+      EFS_ACCESS_POINT_ID_RE.test(config) &&
       typeof workspace === 'string' &&
-      workspace.length > 0
+      EFS_ACCESS_POINT_ID_RE.test(workspace)
     ) {
       out[agent] = { config, workspace }
     }
@@ -381,9 +400,15 @@ function resolveEnv(): ResolvedEnv {
     // value degrades to `{}`, which surfaces per-agent at create time as a clear
     // "no AP provisioned for <agent>" 422 rather than a cryptic env error.
     efsFileSystemId: process.env.MC_AGENT_EFS_FILE_SYSTEM_ID || '',
-    efsAccessPoints: parseEfsAccessPoints(
-      process.env.MC_AGENT_EFS_ACCESS_POINTS,
-    ),
+    ...(() => {
+      const parsed = parseEfsAccessPoints(
+        process.env.MC_AGENT_EFS_ACCESS_POINTS,
+      )
+      return {
+        efsAccessPoints: parsed ?? {},
+        efsAccessPointsConfigured: parsed !== null,
+      }
+    })(),
     sharedAlbName: `${fleetPrefix.prefix}-agents-shared`,
     // #522: shared KB GitHub App wiring. Optional — empty MC_KB_REPO_URL
     // means this deployment has no shared KB, and the agent template + role
@@ -629,10 +654,15 @@ function getMissingEnv(env: ResolvedEnv): string[] {
   // #354: MC reads the master key to mint per-agent virtual keys.
   if (!env.litellmMasterKeySecretArn)
     missing.push('MC_LITELLM_MASTER_KEY_SECRET_ARN')
-  // #559: every MC-created agent is EFS-backed for durable state. The file
-  // system id is required for ALL agents; the per-agent access-point pair is
-  // checked at create time (a precise 422 naming the unprovisioned agent).
+  // #559: every MC-created agent is EFS-backed for durable state. Both the file
+  // system id AND the access-point map are fleet-level deploy-contract inputs — a
+  // missing/malformed map means Terraform hasn't published it, so EVERY create
+  // would fail; surface that as one ConfigurationError (500), not a misleading
+  // per-agent 422 (Greptile P2 on PR #94). An agent absent from a VALID map is the
+  // genuine per-agent 422, checked at create time.
   if (!env.efsFileSystemId) missing.push('MC_AGENT_EFS_FILE_SYSTEM_ID')
+  if (!env.efsAccessPointsConfigured)
+    missing.push('MC_AGENT_EFS_ACCESS_POINTS')
   return missing
 }
 

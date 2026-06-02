@@ -478,6 +478,48 @@ describe('POST /api/fleet/agents — env validation', () => {
     expect(json.detail).toContain('MC_AGENT_EFS_FILE_SYSTEM_ID')
   })
 
+  it('returns 500 ConfigurationError when MC_AGENT_EFS_ACCESS_POINTS is unset (#559)', async () => {
+    // An absent/malformed map is a fleet-level deploy gap (Terraform hasn't
+    // published it) → every create would fail → surface as one 500, not a
+    // misleading per-agent 422.
+    delete process.env.MC_AGENT_EFS_ACCESS_POINTS
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { error: string; detail?: string }
+    expect(json.error).toBe('ConfigurationError')
+    expect(json.detail).toContain('MC_AGENT_EFS_ACCESS_POINTS')
+  })
+
+  it('returns 500 when MC_AGENT_EFS_ACCESS_POINTS is malformed JSON (#559)', async () => {
+    process.env.MC_AGENT_EFS_ACCESS_POINTS = '{not json'
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(500)
+    const json = (await resp.json()) as { detail?: string }
+    expect(json.detail).toContain('MC_AGENT_EFS_ACCESS_POINTS')
+  })
+
+  it('treats an entry with a malformed access-point id as not-provisioned → 422 before resources (#559)', async () => {
+    // A present map whose entry has a non-`fsap-` id is a per-agent provisioning
+    // error: the entry is dropped, the agent is "not provisioned", and create
+    // fails loud (422) before any resource is created — not after ECS rejects the
+    // task-def (Greptile P2 on PR #94).
+    happyPathMocks()
+    process.env.MC_AGENT_EFS_ACCESS_POINTS = JSON.stringify({
+      'hello-bot': { config: 'not-an-ap', workspace: 'fsap-0workspace0' },
+    })
+    const POST = await importHandler()
+    const resp = await POST(mkRequest(validBody()))
+    expect(resp.status).toBe(422)
+    const registered = ecsSendMock.mock.calls.some(
+      (c) =>
+        (c[0] as { __type: string }).__type ===
+        'RegisterTaskDefinitionCommand',
+    )
+    expect(registered).toBe(false)
+  })
+
   it('returns 422 when the agent has no per-agent EFS access point provisioned (#559)', async () => {
     // The agent name isn't in MC_AGENT_EFS_ACCESS_POINTS → no durable storage was
     // pre-provisioned in Terraform. Fail loud (and BEFORE any resource is created)
