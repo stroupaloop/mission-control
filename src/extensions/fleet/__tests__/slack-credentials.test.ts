@@ -1372,9 +1372,12 @@ describe('POST /api/fleet/agents/:name/slack/credentials — SSM bridge (ender-s
     )
     expect(input.Type).toBe('SecureString')
     expect(input.Overwrite).toBe(true)
-    // Value matches the JSON injected onto the init-config env var —
-    // serialized form is `{"channels":[{"id":"C0123456789","requireMention":true}]}`
-    // (the default reply mode normalization, per ender-stack#291).
+    // Value matches the JSON injected onto the init-config env var. With
+    // the #549 gated default body, the serialized form is the #494 role
+    // shape `{"channels":[{"id":"C0123456789","role":"primary","assignedUsers":["U01ABCDEF23"]}]}`
+    // (no requireMention key for a primary). The assertions below stay
+    // permissive (ID + `channels` present) so they don't re-pin the exact
+    // wire shape, which the #291/#494 serializer tests already cover.
     expect(typeof input.Value).toBe('string')
     expect(input.Value as string).toContain('C0123456789')
     expect(input.Value as string).toContain('channels')
