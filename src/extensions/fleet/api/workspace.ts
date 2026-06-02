@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from 'next/server'
 import { createHash, randomUUID } from 'node:crypto'
-import { readFile, rename, open, readdir, unlink } from 'node:fs/promises'
+import { readFile, rename, open, readdir, unlink, stat } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
 import { ECSClient, DescribeServicesCommand } from '@aws-sdk/client-ecs'
 import { requireRole, type User } from '@/lib/auth'
@@ -133,6 +133,53 @@ function computeHash(raw: string): string {
   return createHash('sha256').update(raw, 'utf8').digest('hex')
 }
 
+/**
+ * Per-target-path async mutex. MC runs as a SINGLE ECS task (single-writer
+ * deploy precondition), so serializing the read→hash-check→write critical
+ * section in-process makes optimistic concurrency actually hold between two MC
+ * writers: without it, two PUTs that read the same `expectedHash` would both
+ * pass the 409 check and the later rename would silently drop the earlier edit
+ * (Greptile P1 / pr-agent "Lost Update"). It also removes the temp-sweep race
+ * (pr-agent): concurrent writes to the SAME file no longer overlap, so the
+ * sweep can't delete another in-flight request's temp file.
+ *
+ * The agent is an EXTERNAL writer and can't take this lock — that residual
+ * window (re-read → rename) is microseconds and unavoidable without NFS file
+ * locking, which is unreliable on EFS. The hash re-check inside the lock makes
+ * it as tight as is achievable; audit records `hashBefore` so any clobber is
+ * reconstructable.
+ */
+const fileLocks = new Map<string, Promise<void>>()
+function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prior = fileLocks.get(key) ?? Promise.resolve()
+  const run = prior.then(fn, fn)
+  const tail = run.then(
+    () => {},
+    () => {},
+  )
+  fileLocks.set(key, tail)
+  // Bound the map: drop the entry once this is the tail and it has settled.
+  tail.finally(() => {
+    if (fileLocks.get(key) === tail) fileLocks.delete(key)
+  })
+  return run
+}
+
+/**
+ * Normalize an `If-Match` header value to the bare hash. HTTP clients commonly
+ * quote entity-tags (`If-Match: "<hash>"`) and may prefix a weak validator
+ * (`W/"<hash>"`); strip both so an honest conditional write isn't rejected with
+ * a spurious 409 (Greptile P2). The `expected_hash` body field is our own
+ * contract and is used verbatim.
+ */
+function normalizeIfMatch(value: string | null): string | undefined {
+  if (!value) return undefined
+  let s = value.trim()
+  if (s.startsWith('W/')) s = s.slice(2).trim()
+  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) s = s.slice(1, -1)
+  return s || undefined
+}
+
 function isPersonaFile(f: string): f is PersonaFile {
   return (PERSONA_FILES as readonly string[]).includes(f)
 }
@@ -158,6 +205,7 @@ async function resolveAndAuthorize(
   request: NextRequest,
   params: Promise<{ name: string; filename: string }>,
   matrix: Partial<Record<EditorRole, readonly PersonaFile[]>>,
+  opts: { rateLimit?: boolean } = {},
 ): Promise<
   | { response: NextResponse }
   | {
@@ -174,6 +222,15 @@ async function resolveAndAuthorize(
     return {
       response: jsonError({ error: auth.error ?? 'Unauthorized' }, auth.status ?? 401),
     }
+  }
+
+  // Rate-limit AFTER auth (mutating PUT only) so an unauthenticated flood from a
+  // shared NAT can't burn the IP mutation bucket and 429 a legitimate admin —
+  // matches the sibling fleet mutation handlers, which authenticate first
+  // (Greptile P2). The GET read path is intentionally unthrottled.
+  if (opts.rateLimit) {
+    const rateCheck = mutationLimiter(request)
+    if (rateCheck) return { response: rateCheck as NextResponse }
   }
   const actor = auth.user
 
@@ -309,6 +366,20 @@ export async function GET(
   const { agentName, filename, target } = resolved
 
   try {
+    // Size guard BEFORE reading into memory: the agent (or a direct EFS edit)
+    // is also a writer and can create a file larger than PUT accepts, so a
+    // blind readFile could pull an arbitrarily large blob into memory and JSON
+    // (Greptile P2). stat first; reject oversized with a bounded 413.
+    const st = await stat(target)
+    if (st.size > MAX_PERSONA_BYTES) {
+      return jsonError(
+        {
+          error: 'PayloadTooLarge',
+          detail: `${filename} is ${st.size} bytes, over the ${MAX_PERSONA_BYTES}-byte cap; edit it directly on the workspace mount.`,
+        },
+        413,
+      )
+    }
     const content = await readFile(target, 'utf-8')
     return NextResponse.json(
       {
@@ -340,11 +411,11 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ name: string; filename: string }> },
 ) {
-  // Rate-limit the mutating endpoint before any AWS/fs work.
-  const rateCheck = mutationLimiter(request)
-  if (rateCheck) return rateCheck
-
-  const resolved = await resolveAndAuthorize(request, params, WRITE_MATRIX)
+  // Auth → rate-limit → ECS guard, all inside resolveAndAuthorize so the
+  // mutation rate bucket is only spent by authenticated callers (Greptile P2).
+  const resolved = await resolveAndAuthorize(request, params, WRITE_MATRIX, {
+    rateLimit: true,
+  })
   if (resolved.response) return resolved.response
   const { agentName, filename, workspaceDir, target, actor } = resolved
 
@@ -377,8 +448,10 @@ export async function PUT(
 
   // Optimistic concurrency is REQUIRED: the agent is an active concurrent
   // writer, so a blind PUT could silently drop its edit. The caller must echo
-  // the hash it read via GET (If-Match header or expected_hash body field).
-  const expectedHash = bodyExpectedHash ?? request.headers.get('if-match') ?? undefined
+  // the hash it read via GET (If-Match header — quotes/weak-validator tolerated
+  // — or the expected_hash body field, which wins if both are present).
+  const expectedHash =
+    bodyExpectedHash ?? normalizeIfMatch(request.headers.get('if-match'))
   if (!expectedHash) {
     return jsonError(
       {
@@ -389,120 +462,126 @@ export async function PUT(
     )
   }
 
-  // Read the live file: it must already exist (these files are seeded on first
-  // boot). A blank-file edit of a never-seeded file is out of scope for Phase 1.
-  let current: string
-  try {
-    current = await readFile(target, 'utf-8')
-  } catch (err) {
-    const e = err as { code?: string; message?: string }
-    if (e.code === 'ENOENT') {
+  const ipAddress =
+    request.headers.get('x-forwarded-for') ||
+    request.headers.get('x-real-ip') ||
+    'unknown'
+
+  // Serialize the read→hash-check→write critical section per target path so two
+  // MC writers can't both pass the 409 check and clobber each other (the lock
+  // also removes the temp-sweep race). See withFileLock for the full rationale.
+  return withFileLock(target, async () => {
+    // Read the live file: it must already exist (seeded on first boot). A
+    // blank-file edit of a never-seeded file is out of scope for Phase 1.
+    let current: string
+    try {
+      current = await readFile(target, 'utf-8')
+    } catch (err) {
+      const e = err as { code?: string; message?: string }
+      if (e.code === 'ENOENT') {
+        return jsonError(
+          { error: 'FileNotFound', detail: `${filename} is not present in agent "${agentName}" workspace` },
+          404,
+        )
+      }
+      logger.error(
+        { agentName, filename, errorCode: e.code, errorMessage: e.message },
+        '[fleet] workspace PUT: read-before-write failed',
+      )
+      return jsonError({ error: 'WorkspaceReadError' }, 502)
+    }
+
+    const hashBefore = computeHash(current)
+    if (expectedHash !== hashBefore) {
       return jsonError(
-        { error: 'FileNotFound', detail: `${filename} is not present in agent "${agentName}" workspace` },
-        404,
+        {
+          error: 'Conflict',
+          detail: 'File changed since you last read it (the agent or another editor wrote it). Reload and reapply your edit.',
+          hash: hashBefore,
+        },
+        409,
       )
     }
-    logger.error(
-      { agentName, filename, errorCode: e.code, errorMessage: e.message },
-      '[fleet] workspace PUT: read-before-write failed',
-    )
-    return jsonError({ error: 'WorkspaceReadError' }, 502)
-  }
 
-  const hashBefore = computeHash(current)
-  if (expectedHash !== hashBefore) {
-    return jsonError(
-      {
-        error: 'Conflict',
-        detail: 'File changed since you last read it (the agent or another editor wrote it). Reload and reapply your edit.',
-        hash: hashBefore,
-      },
-      409,
-    )
-  }
+    const hashAfter = computeHash(content)
+    const bytesAfter = Buffer.byteLength(content, 'utf8')
 
-  const hashAfter = computeHash(content)
-  const bytesAfter = Buffer.byteLength(content, 'utf8')
-
-  // Best-effort sweep of orphaned temp files from a prior crashed write (an MC
-  // OOM/kill between create and rename would otherwise leak `.{file}.*.tmp`).
-  try {
-    const entries = await readdir(workspaceDir)
-    const stalePrefix = `.${filename}.`
-    await Promise.all(
-      entries
-        .filter((e) => e.startsWith(stalePrefix) && e.endsWith('.tmp'))
-        .map((e) => unlink(resolve(workspaceDir, e)).catch(() => {})),
-    )
-  } catch {
-    // Non-fatal: the workspace dir always exists for an ACTIVE agent; a
-    // readdir hiccup shouldn't block the write.
-  }
-
-  // Atomic write: per-request unique temp file in the TARGET dir, created
-  // exclusively (O_EXCL via 'wx'), fsync'd, then renamed onto the target. Two
-  // concurrent PUTs get distinct temp names, so neither clobbers the other's
-  // temp file nor leaves persisted content mismatched with the audit record.
-  const tmp = resolve(workspaceDir, `.${filename}.${randomUUID()}.tmp`)
-  try {
-    const fh = await open(tmp, 'wx')
+    // Best-effort sweep of orphaned temp files from a prior CRASHED write (an MC
+    // OOM/kill between create and rename leaks `.{file}.*.tmp`). Safe under the
+    // lock: no concurrent same-file write is in flight to have a live temp here.
     try {
-      await fh.writeFile(content, 'utf-8')
-      await fh.sync()
-    } finally {
-      await fh.close()
+      const entries = await readdir(workspaceDir)
+      const stalePrefix = `.${filename}.`
+      await Promise.all(
+        entries
+          .filter((e) => e.startsWith(stalePrefix) && e.endsWith('.tmp'))
+          .map((e) => unlink(resolve(workspaceDir, e)).catch(() => {})),
+      )
+    } catch {
+      // Non-fatal: the workspace dir always exists for an ACTIVE agent; a
+      // readdir hiccup shouldn't block the write.
     }
-    await rename(tmp, target)
-  } catch (err) {
-    const e = err as { code?: string; message?: string }
-    await unlink(tmp).catch(() => {})
-    logger.error(
-      { agentName, filename, errorCode: e.code, errorMessage: e.message },
-      '[fleet] workspace PUT: atomic write failed',
-    )
-    return jsonError({ error: 'WorkspaceWriteError' }, 502)
-  }
 
-  // Audit (memo §5b): rich record on the same rail gateway-config uses
-  // (audit_log table + webhook broadcast). hashBefore makes a forced overwrite
-  // reconstructable. Best-effort — a SQLite failure must not fail a write that
-  // already landed on EFS (the file is authoritative).
-  try {
-    const ipAddress =
-      request.headers.get('x-forwarded-for') ||
-      request.headers.get('x-real-ip') ||
-      'unknown'
-    logAuditEvent({
-      action: 'agent_persona_write',
-      actor: actor.username,
-      actor_id: actor.id,
-      target_type: 'agent_workspace_file',
-      detail: {
-        agent: agentName,
-        role: actor.role,
-        file: filename,
-        hashBefore,
-        hashAfter,
-        bytesBefore: Buffer.byteLength(current, 'utf8'),
-        bytesAfter,
-      },
-      ip_address: ipAddress,
-    })
-  } catch (auditErr) {
-    logger.warn(
-      { err: auditErr, agentName, filename },
-      '[fleet] workspace PUT: audit-log write failed after successful file write (response unaffected)',
-    )
-  }
+    // Atomic write: per-request unique temp file in the TARGET dir, created
+    // exclusively (O_EXCL via 'wx'), fsync'd, then renamed onto the target so a
+    // reader never sees a torn file.
+    const tmp = resolve(workspaceDir, `.${filename}.${randomUUID()}.tmp`)
+    try {
+      const fh = await open(tmp, 'wx')
+      try {
+        await fh.writeFile(content, 'utf-8')
+        await fh.sync()
+      } finally {
+        await fh.close()
+      }
+      await rename(tmp, target)
+    } catch (err) {
+      const e = err as { code?: string; message?: string }
+      await unlink(tmp).catch(() => {})
+      logger.error(
+        { agentName, filename, errorCode: e.code, errorMessage: e.message },
+        '[fleet] workspace PUT: atomic write failed',
+      )
+      return jsonError({ error: 'WorkspaceWriteError' }, 502)
+    }
 
-  return NextResponse.json(
-    {
-      ok: true,
-      agentName,
-      filename,
-      hash: hashAfter,
-      bytes: bytesAfter,
-    } satisfies WorkspaceWriteResponse,
-    { status: 200, headers: NO_STORE },
-  )
+    // Audit (memo §5b): rich record on the same rail gateway-config uses
+    // (audit_log table + webhook broadcast). hashBefore makes a forced overwrite
+    // reconstructable. Best-effort — a SQLite failure must not fail a write that
+    // already landed on EFS (the file is authoritative).
+    try {
+      logAuditEvent({
+        action: 'agent_persona_write',
+        actor: actor.username,
+        actor_id: actor.id,
+        target_type: 'agent_workspace_file',
+        detail: {
+          agent: agentName,
+          role: actor.role,
+          file: filename,
+          hashBefore,
+          hashAfter,
+          bytesBefore: Buffer.byteLength(current, 'utf8'),
+          bytesAfter,
+        },
+        ip_address: ipAddress,
+      })
+    } catch (auditErr) {
+      logger.warn(
+        { err: auditErr, agentName, filename },
+        '[fleet] workspace PUT: audit-log write failed after successful file write (response unaffected)',
+      )
+    }
+
+    return NextResponse.json(
+      {
+        ok: true,
+        agentName,
+        filename,
+        hash: hashAfter,
+        bytes: bytesAfter,
+      } satisfies WorkspaceWriteResponse,
+      { status: 200, headers: NO_STORE },
+    )
+  })
 }

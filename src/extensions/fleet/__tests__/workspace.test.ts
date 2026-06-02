@@ -16,6 +16,7 @@ const renameMock = vi.fn()
 const openMock = vi.fn()
 const readdirMock = vi.fn()
 const unlinkMock = vi.fn()
+const statMock = vi.fn()
 vi.mock('node:fs/promises', () => {
   const api = {
     readFile: (...a: unknown[]) => readFileMock(...a),
@@ -23,6 +24,7 @@ vi.mock('node:fs/promises', () => {
     open: (...a: unknown[]) => openMock(...a),
     readdir: (...a: unknown[]) => readdirMock(...a),
     unlink: (...a: unknown[]) => unlinkMock(...a),
+    stat: (...a: unknown[]) => statMock(...a),
   }
   return { ...api, default: api }
 })
@@ -128,6 +130,8 @@ beforeEach(() => {
   readdirMock.mockReset()
   unlinkMock.mockReset()
   unlinkMock.mockResolvedValue(undefined)
+  statMock.mockReset()
+  statMock.mockResolvedValue({ size: 100 }) // small by default; one test overrides
   fhMock.writeFile.mockClear()
   fhMock.sync.mockClear()
   fhMock.close.mockClear()
@@ -203,6 +207,15 @@ describe('GET /api/fleet/agents/:name/workspace/:filename', () => {
     expect((await resp.json()).error).toBe('FileNotFound')
   })
 
+  it('returns 413 when the on-disk file exceeds the size cap (no full read)', async () => {
+    primeHarness()
+    statMock.mockResolvedValueOnce({ size: 1024 * 1024 + 1 })
+    const { GET } = await importHandlers()
+    const resp = await GET(mkGetRequest(), mkParams())
+    expect(resp.status).toBe(413)
+    expect(readFileMock).not.toHaveBeenCalled()
+  })
+
   it('returns 500 when MC_AGENT_WORKSPACE_ROOT is unset', async () => {
     delete process.env.MC_AGENT_WORKSPACE_ROOT
     const { GET } = await importHandlers()
@@ -267,6 +280,54 @@ describe('PUT /api/fleet/agents/:name/workspace/:filename', () => {
     )
     expect(resp.status).toBe(200)
     expect(renameMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('accepts a quoted If-Match entity-tag (strips quotes / weak validator)', async () => {
+    primeHarness()
+    primeWriteFs(HELLO)
+    const expectedHash = (await importCryptoHash())(HELLO)
+    const { PUT } = await importHandlers()
+    const resp = await PUT(
+      mkPutRequest({ content: 'updated' }, { 'If-Match': `W/"${expectedHash}"` }),
+      mkParams(),
+    )
+    expect(resp.status).toBe(200)
+    expect(renameMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('serializes concurrent writers: one 200, one 409 (no lost update)', async () => {
+    // Both requests carry the same expectedHash (the base content). The mutex
+    // forces them through the critical section one at a time: the first wins
+    // (reads base → writes), the second then reads the just-written content,
+    // sees a hash mismatch, and gets 409 instead of silently clobbering.
+    ecsSendMock.mockResolvedValue({
+      services: [
+        {
+          serviceArn: SERVICE_ARN,
+          status: 'ACTIVE',
+          taskDefinition: 'arn:x:7',
+          tags: [
+            { key: 'Component', value: 'agent-harness' },
+            { key: 'ManagedBy', value: 'mission-control' },
+          ],
+        },
+      ],
+    })
+    readFileMock
+      .mockResolvedValueOnce(HELLO) // first writer reads base
+      .mockResolvedValueOnce('first-writer-content') // second writer reads new
+    readdirMock.mockResolvedValue([])
+    openMock.mockResolvedValue(fhMock)
+    renameMock.mockResolvedValue(undefined)
+    const expectedHash = (await importCryptoHash())(HELLO)
+    const { PUT } = await importHandlers()
+    const [r1, r2] = await Promise.all([
+      PUT(mkPutRequest({ content: 'a', expected_hash: expectedHash }), mkParams()),
+      PUT(mkPutRequest({ content: 'b', expected_hash: expectedHash }), mkParams()),
+    ])
+    const statuses = [r1.status, r2.status].sort()
+    expect(statuses).toEqual([200, 409])
+    expect(renameMock).toHaveBeenCalledTimes(1) // only the winner wrote
   })
 
   it('returns 409 with the current hash when the file changed since GET', async () => {
