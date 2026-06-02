@@ -114,7 +114,7 @@ const fhMock = {
 const primeWriteFs = (current: string) => {
   readFileMock.mockResolvedValueOnce(current) // read-before-write
   readdirMock.mockResolvedValueOnce([]) // no stale temp files
-  openMock.mockResolvedValueOnce(fhMock)
+  openMock.mockResolvedValue(fhMock) // temp-file write + parent-dir fsync
   renameMock.mockResolvedValueOnce(undefined)
 }
 
@@ -240,12 +240,14 @@ describe('PUT /api/fleet/agents/:name/workspace/:filename', () => {
     expect(body.ok).toBe(true)
     expect(body.hash).toHaveLength(64)
 
-    // Atomic write: O_EXCL temp open, then rename onto the real target.
-    expect(openMock).toHaveBeenCalledTimes(1)
+    // Atomic write: O_EXCL temp open, rename onto target, then parent-dir fsync.
+    expect(openMock).toHaveBeenCalledTimes(2)
     const [tmpPath, flag] = openMock.mock.calls[0]
     expect(flag).toBe('wx')
     expect(String(tmpPath)).toMatch(/\/companion\/openclaw\/hello-bot\/workspace\/\.USER\.md\..*\.tmp$/)
-    expect(fhMock.sync).toHaveBeenCalledTimes(1)
+    // Second open is the parent dir, opened read-only for fsync durability.
+    expect(openMock.mock.calls[1]).toEqual(['/companion/openclaw/hello-bot/workspace', 'r'])
+    expect(fhMock.sync).toHaveBeenCalledTimes(2) // temp file + parent dir
     expect(renameMock).toHaveBeenCalledTimes(1)
     expect(renameMock.mock.calls[0][0]).toBe(tmpPath)
     expect(renameMock.mock.calls[0][1]).toBe('/companion/openclaw/hello-bot/workspace/USER.md')

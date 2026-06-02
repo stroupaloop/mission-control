@@ -535,6 +535,21 @@ export async function PUT(
         await fh.close()
       }
       await rename(tmp, target)
+      // Durability: fsync the parent dir so the new directory entry survives a
+      // crash right after the response, not just the file content (Greptile P2).
+      // Best-effort — on NFS/EFS the server owns durability and a dir fsync may
+      // be a near no-op; a failure here must not fail an already-renamed write.
+      try {
+        const dh = await open(workspaceDir, 'r')
+        try {
+          await dh.sync()
+        } finally {
+          await dh.close()
+        }
+      } catch {
+        // ignore — content + rename already persisted; dir-entry durability is
+        // a best-effort hardening, not a correctness requirement.
+      }
     } catch (err) {
       const e = err as { code?: string; message?: string }
       await unlink(tmp).catch(() => {})
