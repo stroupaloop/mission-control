@@ -182,6 +182,27 @@ describe('deleteAgentLiteLLMKey — PendingDeletion idempotency (#354 round-2)',
     )
   })
 
+  it('issues a recovery-window delete with ForceDeleteWithoutRecovery=false (#561)', async () => {
+    // The ender-stack IAM grant conditions DeleteSecret on
+    // ForceDeleteWithoutRecovery — a force-delete is denied at IAM. The
+    // handler must request a recovery-window delete (7 days) and pass the
+    // flag explicitly so the call works under a strict `Bool` condition
+    // and never accidentally force-deletes.
+    smSendMock.mockResolvedValueOnce({})
+    const deleteKey = await importDelete()
+    await deleteKey('baz')
+    const cmd = smSendMock.mock.calls[0][0] as {
+      __type: string
+      input: {
+        RecoveryWindowInDays?: number
+        ForceDeleteWithoutRecovery?: boolean
+      }
+    }
+    expect(cmd.__type).toBe('DeleteSecretCommand')
+    expect(cmd.input.RecoveryWindowInDays).toBe(7)
+    expect(cmd.input.ForceDeleteWithoutRecovery).toBe(false)
+  })
+
   it('propagates non-PendingDeletion InvalidRequestException', async () => {
     smSendMock.mockRejectedValueOnce(
       Object.assign(new Error('unrelated'), { name: 'InvalidRequestException' }),

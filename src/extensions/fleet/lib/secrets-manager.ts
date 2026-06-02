@@ -531,6 +531,12 @@ export async function deleteAgentLiteLLMKey(
       new DeleteSecretCommand({
         SecretId: keySecretName,
         RecoveryWindowInDays: 7,
+        // #561: send ForceDeleteWithoutRecovery=false explicitly. The
+        // ender-stack IAM grant conditions DeleteSecret on this key
+        // (force-delete is denied at IAM); passing it makes intent
+        // legible and keeps the call working even under a strict `Bool`
+        // condition that requires the key to be present in the request.
+        ForceDeleteWithoutRecovery: false,
       }),
     )
     return { alreadyDeleted: false, secretName: keySecretName }
