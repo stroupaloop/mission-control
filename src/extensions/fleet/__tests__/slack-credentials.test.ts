@@ -462,7 +462,7 @@ describe('POST /api/fleet/agents/:name/slack/credentials — happy path', () => 
       service: { deployments: [{ id: 'ecs-svc/12345', status: 'PRIMARY' }] },
     })
   }
-  const noRegister = () =>
+  const wasRegistered = () =>
     ecsSendMock.mock.calls.some(
       (c) => (c[0] as { __type: string }).__type === 'RegisterTaskDefinitionCommand',
     )
@@ -480,7 +480,7 @@ describe('POST /api/fleet/agents/:name/slack/credentials — happy path', () => 
     expect(json.detail).toContain('No channel restricts who can @-mention')
     // Hard block runs before the secrets write + task-def register —
     // a workspace-open config performs NO mutation.
-    expect(noRegister()).toBe(false)
+    expect(wasRegistered()).toBe(false)
     expect(smSendMock).not.toHaveBeenCalled()
   })
 
@@ -497,7 +497,9 @@ describe('POST /api/fleet/agents/:name/slack/credentials — happy path', () => 
     expect(resp.status).toBe(400)
     const json = (await resp.json()) as { error: string }
     expect(json.error).toBe('InvalidChannelList')
-    expect(noRegister()).toBe(false)
+    // Pre-mutation invariant: no task-def registered AND no secrets written.
+    expect(wasRegistered()).toBe(false)
+    expect(smSendMock).not.toHaveBeenCalled()
   })
 
   it('#549: accepts a bare primary when the agent has an owner (owner gates)', async () => {
@@ -511,7 +513,7 @@ describe('POST /api/fleet/agents/:name/slack/credentials — happy path', () => 
       mkParams(),
     )
     expect(resp.status).toBe(200)
-    expect(noRegister()).toBe(true)
+    expect(wasRegistered()).toBe(true)
   })
 
   it('#549: an empty channels array is unaffected (no block)', async () => {
@@ -522,7 +524,7 @@ describe('POST /api/fleet/agents/:name/slack/credentials — happy path', () => 
       mkParams(),
     )
     expect(resp.status).toBe(200)
-    expect(noRegister()).toBe(true)
+    expect(wasRegistered()).toBe(true)
   })
 
   it('strips read-only task-def fields before RegisterTaskDefinition', async () => {
