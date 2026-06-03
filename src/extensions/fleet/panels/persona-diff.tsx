@@ -13,6 +13,11 @@
 // pathologically large, so the LCS can never blow up the render thread.
 
 const MAX_DIFF_LINES = 4000
+// The LCS allocates an (n+1)×(m+1) cell matrix, so a per-side line cap alone
+// isn't enough — a 4000×4000 file (well under the server's 1 MiB cap when lines
+// are short) would still build ~16M cells synchronously during render and freeze
+// the Settings tab. Cap the PRODUCT so the matrix can never exceed this.
+const MAX_DIFF_CELLS = 500_000
 
 export type DiffRow =
   | { type: 'same'; text: string }
@@ -82,9 +87,12 @@ export function PersonaDiff({ before, after }: Props) {
   }
 
   // Pathological-size guard: skip the O(n·m) LCS and just say it changed.
+  const beforeLines = before.split('\n')
+  const afterLines = after.split('\n')
   const tooLarge =
-    before.split('\n').length > MAX_DIFF_LINES ||
-    after.split('\n').length > MAX_DIFF_LINES
+    beforeLines.length > MAX_DIFF_LINES ||
+    afterLines.length > MAX_DIFF_LINES ||
+    beforeLines.length * afterLines.length > MAX_DIFF_CELLS
   if (tooLarge) {
     return (
       <div

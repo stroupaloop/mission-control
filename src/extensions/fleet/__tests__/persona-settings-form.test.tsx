@@ -124,6 +124,48 @@ describe('<PersonaSettingsForm />', () => {
     )
   })
 
+  it('ignores a stale GET that resolves after the user switches files', async () => {
+    // First file (IDENTITY.md) GET is slow; we switch to USER.md before it
+    // resolves, then resolve the stale IDENTITY response — it must NOT overwrite
+    // the editor that now shows USER.md.
+    let resolveSlow!: (r: Response) => void
+    const slow = new Promise<Response>((res) => {
+      resolveSlow = res
+    })
+    fetchMock.mockReturnValueOnce(slow) // IDENTITY.md (pending)
+    renderForm()
+
+    fetchMock.mockResolvedValueOnce(
+      okResp({ ok: true, agentName: AGENT_NAME, filename: 'USER.md', content: 'user content', hash: 'hu' }),
+    )
+    fireEvent.click(screen.getByTestId('persona-file-USER.md'))
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('persona-editor') as HTMLTextAreaElement).value,
+      ).toBe('user content'),
+    )
+
+    // Resolve the superseded IDENTITY.md GET — should be ignored.
+    resolveSlow(
+      okResp({ ok: true, agentName: AGENT_NAME, filename: 'IDENTITY.md', content: 'identity content', hash: 'hi' }),
+    )
+    await new Promise((r) => setTimeout(r, 5))
+    expect(
+      (screen.getByTestId('persona-editor') as HTMLTextAreaElement).value,
+    ).toBe('user content')
+  })
+
+  it('disables Apply now while there are unsaved edits', async () => {
+    fetchMock.mockResolvedValueOnce(
+      okResp({ ok: true, agentName: AGENT_NAME, filename: 'IDENTITY.md', content: 'x', hash: 'h1' }),
+    )
+    renderForm()
+    const editor = (await screen.findByTestId('persona-editor')) as HTMLTextAreaElement
+    expect((screen.getByTestId('persona-apply-now') as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.change(editor, { target: { value: 'dirty edit' } })
+    expect((screen.getByTestId('persona-apply-now') as HTMLButtonElement).disabled).toBe(true)
+  })
+
   it('surfaces a load error with a Retry affordance', async () => {
     fetchMock.mockResolvedValueOnce(
       errResp(404, { error: 'FileNotFound', detail: 'not seeded' }),

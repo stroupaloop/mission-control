@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { MarkdownRenderer } from '@/components/markdown-renderer'
 import { useMissionControl } from '@/store'
@@ -68,9 +68,13 @@ export function PersonaSettingsForm({ agent, agentName }: Props) {
   const role = currentUser?.role as EditorRole | undefined
   const files = readablePersonaFiles(role)
 
-  const [selected, setSelected] = useState<PersonaFile | null>(
-    files[0] ?? null,
-  )
+  const firstFile = files[0] ?? null
+  // Starts null: currentUser is null on first render and populated later by the
+  // app's /api/auth/me fetch, so `files` is empty until the role resolves. The
+  // effect below sets the selection once `firstFile` becomes available — without
+  // it an admin who opens Settings pre-auth would stay stuck on the no-access
+  // branch and never fetch.
+  const [selected, setSelected] = useState<PersonaFile | null>(null)
   const [load, setLoad] = useState<LoadPhase>({ kind: 'loading' })
   const [draft, setDraft] = useState('')
   const [save, setSave] = useState<SavePhase>({ kind: 'idle' })
@@ -91,77 +95,96 @@ export function PersonaSettingsForm({ agent, agentName }: Props) {
 
   // Fetch the selected file (GET → { content, hash }). Shared by initial load,
   // file-switch, and the post-409 refetch. Aborts any prior in-flight request.
-  const fetchFile = useCallback(
-    async (file: PersonaFile, opts: { asConflict?: boolean } = {}) => {
-      abortRef.current?.abort()
-      const controller = new AbortController()
-      abortRef.current = controller
-      const timeout = setTimeout(
-        () => controller.abort(),
-        REQUEST_TIMEOUT_MS,
+  // Plain function (not useCallback) — the load effect below keys on the data
+  // deps [selected, agentName] and intentionally omits fetchFile, so recreating
+  // it each render is harmless and avoids a memoization-deps mismatch.
+  const fetchFile = async (
+    file: PersonaFile,
+    opts: { asConflict?: boolean } = {},
+  ) => {
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    // Abort with a sentinel reason so a genuine timeout is distinguishable
+    // from an abort caused by supersession/unmount, without a captured
+    // mutable flag (which the React Compiler can't memoize through).
+    const timeout = setTimeout(
+      () => controller.abort('timeout'),
+      REQUEST_TIMEOUT_MS,
+    )
+    // A newer request (file switch / save) or an unmount supersedes this one —
+    // its result must NOT overwrite the editor or the snapshot/hash the next
+    // PUT depends on. The guard is `!mountedRef.current || abortRef.current
+    // !== controller`, inlined at each await boundary below (a nested helper
+    // closure can't be memoized through by the React Compiler).
+    setLoad({ kind: 'loading' })
+    try {
+      const resp = await fetch(
+        `/api/fleet/agents/${encodeURIComponent(agentName)}/workspace/${encodeURIComponent(file)}`,
+        { method: 'GET', cache: 'no-store', signal: controller.signal },
       )
-      setLoad({ kind: 'loading' })
-      try {
-        const resp = await fetch(
-          `/api/fleet/agents/${encodeURIComponent(agentName)}/workspace/${encodeURIComponent(file)}`,
-          { method: 'GET', cache: 'no-store', signal: controller.signal },
-        )
-        clearTimeout(timeout)
-        if (!mountedRef.current) return
-        if (resp.ok) {
-          const body = (await resp.json()) as WorkspaceFileResponse
-          if (!mountedRef.current) return
-          setLoad({ kind: 'ready', content: body.content, hash: body.hash })
-          // On a normal load, sync the draft to the server content. On a
-          // post-409 refetch, KEEP the operator's draft (so they can reapply)
-          // and just refresh the server snapshot the diff compares against.
-          if (!opts.asConflict) {
-            setDraft(body.content)
-            setSave({ kind: 'idle' })
-          }
-          return
+      clearTimeout(timeout)
+      if (!mountedRef.current || abortRef.current !== controller) return
+      if (resp.ok) {
+        const body = (await resp.json()) as WorkspaceFileResponse
+        if (!mountedRef.current || abortRef.current !== controller) return
+        setLoad({ kind: 'ready', content: body.content, hash: body.hash })
+        // On a normal load, sync the draft to the server content. On a
+        // post-409 refetch, KEEP the operator's draft (so they can reapply)
+        // and just refresh the server snapshot the diff compares against.
+        if (!opts.asConflict) {
+          setDraft(body.content)
+          setSave({ kind: 'idle' })
         }
-        let body: WorkspaceErrorResponse
-        try {
-          body = (await resp.json()) as WorkspaceErrorResponse
-        } catch {
-          body = { error: `HTTP ${resp.status}` }
-        }
-        if (!mountedRef.current) return
-        setLoad({ kind: 'load-error', status: resp.status, body })
-      } catch (err) {
-        clearTimeout(timeout)
-        if (!mountedRef.current) return
-        const aborted = controller.signal.aborted
-        setLoad({
-          kind: 'load-error',
-          status: 0,
-          body: {
-            error: aborted ? 'RequestAborted' : 'NetworkError',
-            detail: aborted
-              ? 'Load timed out or was cancelled'
-              : (err as Error).message,
-          },
-        })
+        return
       }
-    },
-    [agentName],
-  )
+      let body: WorkspaceErrorResponse
+      try {
+        body = (await resp.json()) as WorkspaceErrorResponse
+      } catch {
+        body = { error: `HTTP ${resp.status}` }
+      }
+      if (!mountedRef.current || abortRef.current !== controller) return
+      setLoad({ kind: 'load-error', status: resp.status, body })
+    } catch (err) {
+      clearTimeout(timeout)
+      // Superseded (newer request / unmount) or aborted by handleSave → stay
+      // silent; the owning request sets the state. Only a genuine timeout or
+      // network failure of THIS request surfaces an error.
+      if (!mountedRef.current || abortRef.current !== controller) return
+      // Silent on supersession/unmount/save-abort; surface only a genuine
+      // timeout (sentinel reason) or network failure of THIS request.
+      if (controller.signal.aborted && controller.signal.reason !== 'timeout')
+        return
+      const timedOut = controller.signal.reason === 'timeout'
+      setLoad({
+        kind: 'load-error',
+        status: 0,
+        body: {
+          error: timedOut ? 'RequestTimeout' : 'NetworkError',
+          detail: timedOut ? 'Load timed out' : (err as Error).message,
+        },
+      })
+    }
+  }
 
   // Initial load + reload when the agent or selected file changes.
   useEffect(() => {
     if (!selected) return
     void fetchFile(selected)
-  }, [selected, agentName, fetchFile])
+    // fetchFile is a fresh closure each render but intentionally omitted — the
+    // load should fire only when the selected file or agent changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, agentName])
 
-  // Reset selection to the first readable file when the agent changes.
+  // Pick the first readable file once the role/file set resolves (null → first
+  // file when auth arrives), and reset transient state when the agent changes.
   useEffect(() => {
-    setSelected(files[0] ?? null)
+    setSelected(firstFile)
     setSave({ kind: 'idle' })
     setShowPreview(false)
     setRedeploy({ kind: 'idle' })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentName])
+  }, [firstFile, agentName])
 
   const handleSave = async () => {
     if (load.kind !== 'ready' || !selected || !writable) return
@@ -176,7 +199,10 @@ export function PersonaSettingsForm({ agent, agentName }: Props) {
         `/api/fleet/agents/${encodeURIComponent(agentName)}/workspace/${encodeURIComponent(selected)}`,
         {
           method: 'PUT',
-          headers: { 'content-type': 'application/json', 'if-match': load.hash },
+          headers: {
+            'content-type': 'application/json',
+            'if-match': load.hash,
+          },
           body: JSON.stringify({ content: draft, expected_hash: load.hash }),
           cache: 'no-store',
           signal: controller.signal,
@@ -226,31 +252,47 @@ export function PersonaSettingsForm({ agent, agentName }: Props) {
   }
 
   const handleApplyNow = async () => {
-    // The reload restarts the agent task (single-writer deploy → brief downtime).
-    // Confirm before kicking the redeploy.
+    // Redeploy restarts the agent task, which reloads whatever is ALREADY on
+    // EFS — it does NOT deploy the in-editor draft. The button is disabled while
+    // dirty (Save first); the confirm spells it out as a second guard against an
+    // operator believing unsaved edits will ship.
     if (
       !window.confirm(
-        'Apply persona changes now? This force-restarts the agent task — it will be briefly offline while the new task boots.',
+        'Restart the agent now? Only SAVED persona changes are applied — the agent reloads its files on restart, and any unsaved edits in the editor are NOT deployed. The agent is briefly offline while the new task boots.',
       )
     ) {
       return
     }
     setRedeploy({ kind: 'pending' })
+    // Own AbortController (independent of abortRef, which serves GET/PUT) so a
+    // hung redeploy can't leave the button stuck on "Restarting…" forever.
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
     try {
       const resp = await fetch(
         `/api/fleet/services/${encodeURIComponent(agent.name)}/redeploy`,
-        { method: 'POST', cache: 'no-store' },
+        { method: 'POST', cache: 'no-store', signal: controller.signal },
       )
+      clearTimeout(timeout)
       if (!mountedRef.current) return
       if (resp.ok) {
         setRedeploy({ kind: 'done' })
         return
       }
       const body = (await resp.json().catch(() => ({}))) as { error?: string }
-      setRedeploy({ kind: 'error', error: body.error ?? `HTTP ${resp.status}` })
+      setRedeploy({
+        kind: 'error',
+        error: body.error ?? `HTTP ${resp.status}`,
+      })
     } catch (err) {
+      clearTimeout(timeout)
       if (!mountedRef.current) return
-      setRedeploy({ kind: 'error', error: (err as Error).message })
+      setRedeploy({
+        kind: 'error',
+        error: controller.signal.aborted
+          ? 'Redeploy request timed out'
+          : (err as Error).message,
+      })
     }
   }
 
@@ -273,12 +315,16 @@ export function PersonaSettingsForm({ agent, agentName }: Props) {
     <div className="space-y-4" data-testid="persona-settings-form">
       <p className="text-xs text-muted-foreground">
         Edit this agent&apos;s seeded persona files. Saves use optimistic
-        concurrency — if the agent changed the file since you opened it, the save
-        is rejected and you&apos;ll see the latest version to reapply onto.
+        concurrency — if the agent changed the file since you opened it, the
+        save is rejected and you&apos;ll see the latest version to reapply onto.
       </p>
 
       {/* File selector */}
-      <div className="flex flex-wrap gap-1" role="tablist" aria-label="Persona files">
+      <div
+        className="flex flex-wrap gap-1"
+        role="tablist"
+        aria-label="Persona files"
+      >
         {files.map((f) => (
           <Button
             key={f}
@@ -292,7 +338,9 @@ export function PersonaSettingsForm({ agent, agentName }: Props) {
           >
             {f}
             {!canWritePersona(role, f) ? (
-              <span className="ml-1 text-[0.65rem] opacity-60">(read-only)</span>
+              <span className="ml-1 text-[0.65rem] opacity-60">
+                (read-only)
+              </span>
             ) : null}
           </Button>
         ))}
@@ -337,10 +385,7 @@ export function PersonaSettingsForm({ agent, agentName }: Props) {
         <>
           <div>
             <div className="flex items-center justify-between mb-1">
-              <label
-                htmlFor="persona-editor"
-                className="text-xs font-medium"
-              >
+              <label htmlFor="persona-editor" className="text-xs font-medium">
                 {selected}
                 {!writable ? ' (read-only for your role)' : ''}
               </label>
@@ -390,8 +435,8 @@ export function PersonaSettingsForm({ agent, agentName }: Props) {
               data-testid="persona-settings-conflict"
             >
               The file changed since you opened it (the agent or another editor
-              wrote it). The editor above now shows your draft against the latest
-              server version — review the diff and click Save to reapply.
+              wrote it). The editor above now shows your draft against the
+              latest server version — review the diff and click Save to reapply.
             </div>
           ) : null}
 
@@ -400,8 +445,8 @@ export function PersonaSettingsForm({ agent, agentName }: Props) {
               className="text-sm text-green-700"
               data-testid="persona-settings-saved"
             >
-              ✓ Saved {selected} ({save.bytes} bytes). The agent picks up persona
-              changes on its next session; use “Apply now” to restart it
+              ✓ Saved {selected} ({save.bytes} bytes). The agent picks up
+              persona changes on its next session; use “Apply now” to restart it
               immediately.
             </div>
           ) : null}
@@ -429,7 +474,12 @@ export function PersonaSettingsForm({ agent, agentName }: Props) {
                 variant="outline"
                 size="sm"
                 onClick={handleApplyNow}
-                disabled={redeploy.kind === 'pending'}
+                disabled={redeploy.kind === 'pending' || dirty}
+                title={
+                  dirty
+                    ? 'Save your edits first — restart only applies saved changes'
+                    : undefined
+                }
                 data-testid="persona-apply-now"
               >
                 {redeploy.kind === 'pending' ? 'Restarting…' : 'Apply now'}
