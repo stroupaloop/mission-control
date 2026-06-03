@@ -261,6 +261,49 @@ describe('<AgentDetailPanel />', () => {
     ).not.toBeNull()
   })
 
+  it('shows the tab bar and defaults to the Overview tab (#552)', () => {
+    render(
+      <AgentDetailPanel
+        agent={sampleAgent}
+        agentName={AGENT_NAME}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(
+      document.body.querySelector('[data-testid="agent-detail-tabs"]'),
+    ).not.toBeNull()
+    // Overview content (identity) visible by default; settings not mounted.
+    expect(
+      document.body.querySelector('[data-testid="agent-detail-identity"]'),
+    ).not.toBeNull()
+    expect(
+      document.body.querySelector('[data-testid="agent-detail-settings"]'),
+    ).toBeNull()
+  })
+
+  it('switches to the Settings tab and mounts the persona editor (#552)', () => {
+    render(
+      <AgentDetailPanel
+        agent={sampleAgent}
+        agentName={AGENT_NAME}
+        onClose={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('agent-detail-tab-settings'))
+    // Settings section now mounted; Overview's identity section unmounted.
+    expect(
+      document.body.querySelector('[data-testid="agent-detail-settings"]'),
+    ).not.toBeNull()
+    expect(
+      document.body.querySelector('[data-testid="agent-detail-identity"]'),
+    ).toBeNull()
+    // currentUser is null in the test store → persona editor shows the
+    // admin-only notice rather than fetching.
+    expect(
+      document.body.querySelector('[data-testid="persona-settings-no-access"]'),
+    ).not.toBeNull()
+  })
+
   it('handles a missing taskDefinition gracefully (em-dash fallback)', () => {
     render(
       <AgentDetailPanel

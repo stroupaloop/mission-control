@@ -7,6 +7,7 @@ import type { FleetServiceSummary } from '../api/services'
 import { SlackManifestDisplay } from './slack-manifest-display'
 import { SlackCredentialsForm } from './slack-credentials-form'
 import { SlackChannelPicker } from './slack-channel-picker'
+import { PersonaSettingsForm } from './persona-settings-form'
 
 // Phase 2.4 Beat 5c.1 — Agent detail side-panel.
 //
@@ -55,6 +56,17 @@ export function AgentDetailPanel({ agent, agentName, onClose }: Props) {
   // SM, so the picker's prior 404 SlackBotTokenNotFound state
   // becomes stale).
   const [picksReloadKey, setPicksReloadKey] = useState(0)
+  // Tab bar (#552). 'overview' keeps the original section-based content
+  // (Identity + Connect to Slack); 'settings' is the persona editor. Default
+  // is 'overview' so existing operator flows (manifest → credentials →
+  // channels) are unchanged.
+  const [tab, setTab] = useState<'overview' | 'settings'>('overview')
+
+  // Reset to Overview whenever the panel opens for a different agent so a
+  // stale Settings selection doesn't carry across rows.
+  useEffect(() => {
+    setTab('overview')
+  }, [agentName])
 
   // Esc closes (matches modal-form behavior).
   useEffect(() => {
@@ -162,6 +174,39 @@ export function AgentDetailPanel({ agent, agentName, onClose }: Props) {
             </Button>
           </div>
 
+          {/* ── Tab bar (#552) ───────────────────────────────── */}
+          <div
+            className="flex gap-1 border-b border-border"
+            role="tablist"
+            aria-label="Agent detail sections"
+            data-testid="agent-detail-tabs"
+          >
+            {(
+              [
+                ['overview', 'Overview'],
+                ['settings', 'Settings'],
+              ] as const
+            ).map(([id, labelText]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={tab === id}
+                onClick={() => setTab(id)}
+                data-testid={`agent-detail-tab-${id}`}
+                className={`px-3 py-1.5 text-sm font-medium -mb-px border-b-2 transition-colors ${
+                  tab === id
+                    ? 'border-primary text-foreground'
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {labelText}
+              </button>
+            ))}
+          </div>
+
+          {tab === 'overview' ? (
+            <>
           {/* ── Identity section ─────────────────────────────── */}
           <section
             className="space-y-2"
@@ -253,6 +298,19 @@ export function AgentDetailPanel({ agent, agentName, onClose }: Props) {
               />
             </div>
           </section>
+            </>
+          ) : (
+            /* ── Settings section (persona editing, #552) ─────── */
+            <section
+              className="space-y-4"
+              data-testid="agent-detail-settings"
+            >
+              <h3 className="text-sm font-semibold border-b border-border pb-1">
+                Persona files
+              </h3>
+              <PersonaSettingsForm agent={agent} agentName={agentName} />
+            </section>
+          )}
         </div>
       </div>
     </div>

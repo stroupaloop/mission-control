@@ -15,6 +15,17 @@ import {
   upstreamErrorBody,
   classifyEcsFailures,
 } from '@/extensions/fleet/lib/aws-hardening'
+// Persona-file allow-list + §3 matrices live in a server-dep-free module so the
+// Settings-tab UI imports the SAME source of truth (no mirrored copy to drift).
+import {
+  PERSONA_FILES,
+  type PersonaFile,
+  type EditorRole,
+  READ_MATRIX,
+  WRITE_MATRIX,
+  MAX_PERSONA_BYTES,
+  isPersonaFile,
+} from '@/extensions/fleet/lib/persona-files'
 
 /**
  * GET/PUT /api/fleet/agents/:name/workspace/:filename — post-deploy
@@ -57,52 +68,10 @@ const ecsClient = new ECSClient({ region: AWS_REGION_AT_LOAD })
 // the editor wedged after the underlying file is fixed. Mirrors slack-channels.
 const NO_STORE = { 'Cache-Control': 'no-store' } as const
 
-/**
- * The four persona files seeded to every agent's workspace by the
- * workspace-defaults + archetype overlay (memo §1.2). TOOLS.md is intentionally
- * absent — it is not seeded today, so editing it would be a no-op (memo §1.3,
- * deferred). This list is the authoritative write/read allow-list.
- */
-const PERSONA_FILES = [
-  'IDENTITY.md',
-  'SOUL.md',
-  'USER.md',
-  'AGENTS.md',
-] as const
-type PersonaFile = (typeof PERSONA_FILES)[number]
-
-/** Roles that can appear in the §3 matrix. `owner` is not yet a real MC role
- *  (see the file-level note); its rows are the forward contract. */
-type EditorRole = User['role'] | 'owner'
-
-/**
- * §3 READ matrix — who may GET which files. Read is deliberately a SEPARATE
- * matrix from write: an owner may *view* SOUL.md/AGENTS.md (needed for the
- * "request a change" affordance) but never PUT them.
- */
-const READ_MATRIX: Partial<Record<EditorRole, readonly PersonaFile[]>> = {
-  admin: PERSONA_FILES,
-  // Phase-2 (owner self-service) — inert until the ownership primitive lands:
-  owner: PERSONA_FILES,
-}
-
-/**
- * §3 WRITE matrix — who may PUT which files. SOUL.md + AGENTS.md are admin-only
- * because they carry the safety envelope (behavioral constraints, channel
- * segregation, heartbeat rules); an owner editing them would be a real liability.
- */
-const WRITE_MATRIX: Partial<Record<EditorRole, readonly PersonaFile[]>> = {
-  admin: PERSONA_FILES,
-  // Phase-2 (owner self-service) — inert until the ownership primitive lands:
-  owner: ['IDENTITY.md', 'USER.md'],
-}
-
-/**
- * Cap on persona-file size. These are human-authored markdown; 1 MiB is far
- * above any real persona file and bounds a pathological write. memory-core
- * indexes them on session start, so an enormous file would also bloat the agent.
- */
-const MAX_PERSONA_BYTES = 1024 * 1024
+// PERSONA_FILES, PersonaFile, EditorRole, READ_MATRIX, WRITE_MATRIX,
+// MAX_PERSONA_BYTES, and isPersonaFile are imported from
+// `../lib/persona-files` — the single source of truth shared with the
+// Settings-tab UI.
 
 export interface WorkspaceFileResponse {
   ok: true
@@ -178,10 +147,6 @@ function normalizeIfMatch(value: string | null): string | undefined {
   if (s.startsWith('W/')) s = s.slice(2).trim()
   if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) s = s.slice(1, -1)
   return s || undefined
-}
-
-function isPersonaFile(f: string): f is PersonaFile {
-  return (PERSONA_FILES as readonly string[]).includes(f)
 }
 
 function jsonError(
