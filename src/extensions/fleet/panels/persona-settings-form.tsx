@@ -117,7 +117,12 @@ export function PersonaSettingsForm({ agent, agentName }: Props) {
     // PUT depends on. The guard is `!mountedRef.current || abortRef.current
     // !== controller`, inlined at each await boundary below (a nested helper
     // closure can't be memoized through by the React Compiler).
-    setLoad({ kind: 'loading' })
+    //
+    // On a post-409 refetch (asConflict) DON'T flip to 'loading' — that would
+    // unmount the editor + conflict banner for a frame (a visible flash). The
+    // editor keeps showing the operator's draft; only the server snapshot the
+    // diff compares against is refreshed when the response lands.
+    if (!opts.asConflict) setLoad({ kind: 'loading' })
     try {
       const resp = await fetch(
         `/api/fleet/agents/${encodeURIComponent(agentName)}/workspace/${encodeURIComponent(file)}`,
