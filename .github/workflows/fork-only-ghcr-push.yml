@@ -87,6 +87,7 @@ jobs:
               - '!tools/gstack/**'
               - '!.gitmodules'
               - '!.gitignore'
+              - '!.greptile.yaml'
               - '!LICENSE'
 
       # PR builds use push: false, so no registry auth is needed — skip login
